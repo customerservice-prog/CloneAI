@@ -1,6 +1,10 @@
+const isProd = import.meta.env.PROD;
 const envBase = import.meta.env.VITE_API_URL?.trim();
-const API_BASE = (envBase || 'http://localhost:3001').replace(/\/$/, '');
-const API_ANALYZE = `${API_BASE}/api/analyze`;
+const API_BASE = (() => {
+  if (isProd && !envBase) return '';
+  return (envBase || 'http://localhost:3001').replace(/\/$/, '');
+})();
+const API_ANALYZE = API_BASE ? `${API_BASE}/api/analyze` : '';
 const INGRESS_KEY = import.meta.env.VITE_CLONEAI_KEY?.trim();
 
 const OPTION_DEFS = [
@@ -50,7 +54,8 @@ let fullBriefText = '';
 let displayIndex = 0;
 let streamActive = false;
 let typewriterRaf = 0;
-let selectedOptions = new Set(
+let analyzeAbort = null;
+const selectedOptions = new Set(
   OPTION_DEFS.filter((o) => o.defaultOn).map((o) => o.id)
 );
 
@@ -168,12 +173,13 @@ function scraperHintText(scraper) {
   if (!scraper) return '';
   const map = {
     challenge_or_waf:
-      'This site may block automated HTML fetches (bot protection or WAF). The brief prioritizes your screenshots and URL context — upload clear full-page captures for best accuracy.',
+      'This site may block automated HTML fetches (bot protection or WAF). Use clear full-page screenshots — original first, clone second if comparing.',
     body_too_small:
-      'Very little HTML was returned (possible block page or shell). Treat structural DOM claims as uncertain unless screenshots confirm them.',
+      'Very little HTML was returned (possible block page). Treat DOM detail as uncertain unless screenshots confirm it.',
     network_or_tls:
-      'The server could not fetch that URL (network, DNS, or TLS). Verify the address or rely on screenshots.',
-    http_error: `The URL returned HTTP ${scraper.statusCode ?? 'error'}. Try screenshots, another path, or a staging URL.`,
+      'The server could not reach that URL (network, DNS, or TLS). Check the address or rely on screenshots.',
+    http_error: `The URL returned HTTP ${scraper.statusCode ?? 'error'}. Try screenshots or another URL.`,
+    fetch_timeout: 'Fetching HTML timed out. Try again, use a lighter page, or upload screenshots instead.',
   };
   if (scraper.hint === 'ok' || scraper.hint === 'homepage_only' || scraper.hint === 'no_url') return '';
   return map[scraper.hint] || 'HTML context was limited; prioritize uploaded images where possible.';
@@ -189,13 +195,54 @@ function shouldShowScraperHint(scraper) {
 function applyMetaScraper(scraper) {
   const el = $('#analysis-hint');
   if (!el) return;
-  if (shouldShowScraperHint(scraper)) {
-    el.textContent = scraperHintText(scraper);
+  const parts = [];
+  if (shouldShowScraperHint(scraper)) parts.push(scraperHintText(scraper));
+  if (scraper?.truncated) {
+    parts.push('Large HTML was truncated server-side for speed — visual detail may still be incomplete.');
+  }
+  if (scraper?.deepWarning) parts.push(scraper.deepWarning);
+  if (parts.length) {
+    el.textContent = parts.join(' ');
     el.hidden = false;
   } else {
     el.textContent = '';
     el.hidden = true;
   }
+}
+
+function humanizeError(status, rawMessage, body) {
+  const msg = (rawMessage || '').trim();
+  if (status === 429) return 'Too many requests. Wait a minute and try again.';
+  if (status === 403) return msg || 'Access denied. Check API protection settings.';
+  if (status === 413) return 'Upload too large. Each image must be under 20MB (max 10 files).';
+  if (status === 400) return msg || 'Invalid request. Check your URL and images.';
+  if (status === 500) return msg || 'Server error. Please retry in a moment.';
+  if (msg) return msg;
+  if (body?.error) return String(body.error);
+  return `Something went wrong (${status || 'network'}). Tap Re-run to retry.`;
+}
+
+function setAnalyzeLoading(on) {
+  const btn = $('#analyze-btn');
+  const label = $('#analyze-btn-label');
+  if (!btn || !label) return;
+  btn.classList.toggle('is-loading', on);
+  btn.disabled = on;
+  btn.setAttribute('aria-busy', on ? 'true' : 'false');
+  label.textContent = on ? 'Running analysis…' : 'Run AI Clone Analysis';
+}
+
+function autoScrollEnabled() {
+  return $('#autoscroll-toggle')?.checked !== false;
+}
+
+function scrollSummaryIfNeeded() {
+  if (!autoScrollEnabled()) return;
+  const body = $('#summary-body');
+  if (!body) return;
+  requestAnimationFrame(() => {
+    body.scrollTop = body.scrollHeight;
+  });
 }
 
 function buildOptionsGrid() {
@@ -295,7 +342,7 @@ function applyStageEvent(data) {
 
 function bumpStreamProgress() {
   const base = 68;
-  const extra = Math.min(30, Math.floor(fullBriefText.length / 450));
+  const extra = Math.min(30, Math.floor(fullBriefText.length / 420));
   setProgress(Math.min(99, base + extra));
 }
 
@@ -419,8 +466,9 @@ function setTab(tab) {
   });
 }
 
-function showToast() {
+function showToast(text = 'Copied to clipboard') {
   const toast = $('#toast');
+  toast.textContent = text;
   toast.hidden = false;
   requestAnimationFrame(() => toast.classList.add('show'));
   clearTimeout(showToast._t);
@@ -433,11 +481,33 @@ function showToast() {
 }
 
 async function copyBrief() {
+  const text = fullBriefText;
+  if (!text) {
+    showToast('Nothing to copy yet');
+    return;
+  }
   try {
-    await navigator.clipboard.writeText(fullBriefText);
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      showToast();
+      return;
+    }
+  } catch {
+    /* fall through */
+  }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
     showToast();
   } catch {
-    showToast();
+    showToast('Copy failed — select text manually');
   }
 }
 
@@ -452,10 +522,12 @@ function startTypewriter() {
   const tick = () => {
     const target = fullBriefText.length;
     if (displayIndex < target) {
-      const chunk = Math.min(4, target - displayIndex);
-      displayIndex += chunk;
+      const lag = target - displayIndex;
+      const chunk = lag > 120 ? 3 : lag > 40 ? 2 : 1;
+      displayIndex += Math.min(chunk, lag);
     }
     content.innerHTML = renderMarkdown(fullBriefText.slice(0, displayIndex));
+    scrollSummaryIfNeeded();
     const showCursor = streamActive || displayIndex < fullBriefText.length;
     cursor.classList.toggle('hidden', !showCursor);
     typewriterRaf = requestAnimationFrame(tick);
@@ -464,11 +536,16 @@ function startTypewriter() {
   typewriterRaf = requestAnimationFrame(tick);
 }
 
-async function parseSseStream(response, { onText } = {}) {
+async function parseSseStream(response, { onText, signal } = {}) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
+  let completed = false;
+
   while (true) {
+    if (signal?.aborted) {
+      throw new Error('Request cancelled.');
+    }
     const { done, value } = await reader.read();
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
@@ -494,6 +571,10 @@ async function parseSseStream(response, { onText } = {}) {
         if (data.type === 'meta' && data.scraper) {
           applyMetaScraper(data.scraper);
         }
+        if (data.type === 'warning' && data.message) {
+          fullBriefText += data.message;
+          onText?.();
+        }
         if (data.type === 'text' && data.content) {
           fullBriefText += data.content;
           onText?.();
@@ -502,10 +583,20 @@ async function parseSseStream(response, { onText } = {}) {
           throw new Error(data.message || 'Analysis failed');
         }
         if (data.type === 'done') {
+          completed = true;
           return;
         }
       }
     }
+  }
+
+  if (signal?.aborted) {
+    throw new Error('Request cancelled.');
+  }
+  if (!completed) {
+    throw new Error(
+      'Connection closed before the brief finished. Check your network, VPN, or ad-blockers, then tap Re-run.'
+    );
   }
 }
 
@@ -523,12 +614,23 @@ function updateScorecard(md) {
 }
 
 async function runAnalyze() {
+  if (!API_ANALYZE) {
+    alert(
+      'Production configuration error: set VITE_API_URL to your API base URL in Vercel (or .env) and redeploy.'
+    );
+    return;
+  }
+
   const url = getUrlValue();
   const files = getFilesForRequest();
   if (!url && !files.length) {
     alert('Enter a URL and/or upload at least one image.');
     return;
   }
+
+  if (analyzeAbort) analyzeAbort.abort();
+  analyzeAbort = new AbortController();
+  const { signal } = analyzeAbort;
 
   $('#progress-section').hidden = false;
   $('#results-section').hidden = true;
@@ -539,36 +641,43 @@ async function runAnalyze() {
   streamActive = true;
   $('#summary-content').innerHTML = '';
   $('#type-cursor').classList.remove('hidden');
-  $('#progress-stage').textContent = 'Starting pipeline…';
+  $('#progress-stage').textContent = 'Connecting…';
   buildAgentList();
-  setProgress(0);
+  setProgress(2);
+  setAnalyzeLoading(true);
 
   const opts = OPTION_DEFS.filter((o) => selectedOptions.has(o.id)).map((o) => o.label);
   const form = new FormData();
   form.append('url', url);
   form.append('depth', depth);
   form.append('options', JSON.stringify(opts));
+  form.append('comparePair', $('#compare-pair')?.checked ? '1' : '0');
   files.forEach((f) => form.append('images', f));
 
   const headers = {};
   if (INGRESS_KEY) headers['X-CloneAI-Key'] = INGRESS_KEY;
 
   try {
-    const res = await fetch(API_ANALYZE, { method: 'POST', headers, body: form });
+    const res = await fetch(API_ANALYZE, { method: 'POST', headers, body: form, signal });
+
     if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || `Request failed (${res.status})`);
+      const body = await res.json().catch(() => ({}));
+      throw new Error(humanizeError(res.status, body.error, body));
     }
     const ct = res.headers.get('content-type') || '';
     if (!ct.includes('text/event-stream')) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.error || 'Unexpected response');
+      const body = await res.json().catch(() => ({}));
+      throw new Error(humanizeError(res.status, body.error, body));
     }
 
     startTypewriter();
 
     await parseSseStream(res, {
-      onText: () => bumpStreamProgress(),
+      signal,
+      onText: () => {
+        bumpStreamProgress();
+        scrollSummaryIfNeeded();
+      },
     });
 
     streamActive = false;
@@ -577,8 +686,9 @@ async function runAnalyze() {
 
     stopTypewriter();
     while (displayIndex < fullBriefText.length) {
-      displayIndex = Math.min(fullBriefText.length, displayIndex + 16);
+      displayIndex = Math.min(fullBriefText.length, displayIndex + 20);
       $('#summary-content').innerHTML = renderMarkdown(fullBriefText.slice(0, displayIndex));
+      scrollSummaryIfNeeded();
       await new Promise((r) => requestAnimationFrame(r));
     }
     $('#summary-content').innerHTML = renderMarkdown(fullBriefText);
@@ -603,7 +713,12 @@ async function runAnalyze() {
     if (!marked) setAgentStatus(7, 'error');
     $('#progress-stage').textContent = 'Failed';
     setProgress(100);
-    fullBriefText = `## Error\n\n${escapeHtml(e.message || String(e))}`;
+    let errMsg = e.name === 'AbortError' ? 'Request cancelled.' : e.message || String(e);
+    if (/failed to fetch|networkerror|load failed/i.test(errMsg)) {
+      errMsg =
+        'Network error — check your connection, disable VPN/ad-block for this site, and confirm the API URL (VITE_API_URL) is correct.';
+    }
+    fullBriefText = `## Error\n\n${escapeHtml(errMsg)}\n\nTap **Re-run** to try again without refreshing the page.`;
     $('#summary-content').innerHTML = renderMarkdown(fullBriefText);
     $('#type-cursor').classList.add('hidden');
     $('#metric-issues').textContent = '—';
@@ -613,10 +728,16 @@ async function runAnalyze() {
     $('#metric-coverage').textContent = '0%';
     $('#metric-coverage').className = 'metric-value issue-mid';
     $('#results-section').hidden = false;
+  } finally {
+    setAnalyzeLoading(false);
   }
 }
 
 function init() {
+  if (isProd && !envBase) {
+    console.error('[CloneAI] Set VITE_API_URL for production builds.');
+  }
+
   buildOptionsGrid();
   buildAgentList();
 

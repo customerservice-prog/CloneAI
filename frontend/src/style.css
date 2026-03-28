@@ -431,6 +431,31 @@ body {
   margin: 0;
 }
 
+.compare-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.65rem;
+  margin-top: 1rem;
+  padding: 0.85rem 1rem;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-family: 'Instrument Sans', sans-serif;
+  font-size: 0.82rem;
+  color: var(--text2);
+  line-height: 1.45;
+}
+
+.compare-row input {
+  margin-top: 0.2rem;
+  accent-color: var(--accent);
+}
+
+.compare-text {
+  flex: 1;
+}
+
 .analyze-btn {
   position: relative;
   width: 100%;
@@ -455,6 +480,12 @@ body {
 
 .analyze-btn:active {
   transform: translateY(0);
+}
+
+.analyze-btn.is-loading {
+  pointer-events: none;
+  opacity: 0.88;
+  cursor: wait;
 }
 
 .analyze-btn-shine {
@@ -736,6 +767,8 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.65rem;
   background: var(--surface2);
   border-bottom: 1px solid var(--border);
   padding: 0.85rem 1.25rem;
@@ -745,6 +778,30 @@ body {
   display: flex;
   align-items: center;
   gap: 0.65rem;
+}
+
+.toolbar-right {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+}
+
+.autoscroll-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-family: 'DM Mono', monospace;
+  font-size: 0.68rem;
+  color: var(--text3);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  user-select: none;
+}
+
+.autoscroll-toggle input {
+  accent-color: var(--accent);
 }
 
 .dots {

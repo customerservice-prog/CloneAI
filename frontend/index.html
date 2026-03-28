@@ -108,11 +108,15 @@
 
       <section class="options-section" aria-label="Analysis options">
         <div class="options-grid" id="options-grid"></div>
+        <label class="compare-row">
+          <input type="checkbox" id="compare-pair" />
+          <span class="compare-text">Compare original vs clone (upload screenshots in order: original first, then clone)</span>
+        </label>
       </section>
 
       <button type="button" class="analyze-btn" id="analyze-btn">
         <span class="analyze-btn-shine" aria-hidden="true"></span>
-        Run AI Clone Analysis
+        <span class="analyze-btn-label" id="analyze-btn-label">Run AI Clone Analysis</span>
       </button>
 
       <section class="progress-card" id="progress-section" hidden>
@@ -162,7 +166,13 @@
               <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
               <span class="filename">clone-analysis.md</span>
             </div>
-            <button type="button" class="btn-toolbar-copy" id="copy-toolbar-btn">Copy to Clipboard</button>
+            <div class="toolbar-right">
+              <label class="autoscroll-toggle">
+                <input type="checkbox" id="autoscroll-toggle" checked />
+                <span>Auto-scroll</span>
+              </label>
+              <button type="button" class="btn-toolbar-copy" id="copy-toolbar-btn">Copy to Clipboard</button>
+            </div>
           </div>
           <div class="summary-body" id="summary-body">
             <div class="summary-content" id="summary-content"></div>

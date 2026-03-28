@@ -1,42 +1,47 @@
 # CloneAI
 
-Full-stack AI website clone analyzer: a vanilla Vite frontend and Node.js/Express backend that streams a detailed developer brief from Claude (Anthropic).
+Production-oriented full-stack AI website clone analyzer: Vite + vanilla frontend, Node/Express backend, Claude streaming over SSE.
 
 ## Prerequisites
 
-- Node.js 18+
-- An [Anthropic API key](https://console.anthropic.com/)
+- Node.js 20+ recommended (Sharp prebuilds)
+- [Anthropic API key](https://console.anthropic.com/)
 
-## Backend environment (`backend/.env`)
+## Backend (`backend/.env`)
 
-Create `backend/.env` (not committed) with:
+Required:
 
 ```env
 ANTHROPIC_API_KEY=sk-ant-api03-...
 ```
 
-Optional:
+Recommended for production:
+
+```env
+NODE_ENV=production
+PORT=3001
+CORS_ORIGINS=https://your-app.vercel.app
+```
 
 | Variable | Purpose |
 |----------|---------|
-| `PORT` | Listen port (default `3001`) |
-| `CORS_ORIGINS` | Comma-separated allowed browser origins, e.g. `https://your-app.vercel.app,http://localhost:5173`. Use `*` only if you accept any origin. If unset in **production**, browsers are denied until you set this. |
-| `CLONEAI_INGRESS_KEY` | If set, clients must send header `X-CloneAI-Key` with the same value (pair with `VITE_CLONEAI_KEY` on the frontend). |
-| `RATE_LIMIT_MAX` | Max `/api/analyze` requests per IP per 15 minutes (default `30`). |
-| `CLAUDE_MAX_TOKENS` | Cap output tokens (default `8192`, max clamped in code). |
+| `CORS_ORIGINS` | **Required in production:** comma-separated frontend origins (no `*`). Dev defaults include `http://localhost:5173`. |
+| `CLONEAI_INGRESS_KEY` | Optional shared secret; browser sends `X-CloneAI-Key` (set `VITE_CLONEAI_KEY` on the frontend). |
+| `RATE_LIMIT_PER_MINUTE` | Max `POST /api/analyze` per IP per minute (default **8**, clamped 5–30). |
+| `HTML_FETCH_TIMEOUT_MS` | HTML fetch timeout (default **15000**, clamped 8s–20s). |
+| `CLAUDE_MAX_TOKENS` | Output cap (default **8000**, max **8192**). |
+| `CLAUDE_STREAM_TIMEOUT_MS` | Abort Claude stream if stalled (default **180000**). |
 
-## Frontend environment (local / Vercel)
+## Frontend (local / Vercel)
 
 | Variable | Purpose |
 |----------|---------|
-| `VITE_API_URL` | Backend base URL **without** trailing slash, e.g. `https://cloneai-api.onrender.com`. Omit for local dev (`http://localhost:3001`). |
-| `VITE_CLONEAI_KEY` | Must match `CLONEAI_INGRESS_KEY` when that is enabled. |
-
-On Vercel: Project → Settings → Environment Variables → add `VITE_API_URL` (and optional `VITE_CLONEAI_KEY`), then redeploy.
+| `VITE_API_URL` | **Required for production builds:** API origin only, e.g. `https://cloneai-api.onrender.com` (no path, no trailing slash). Local dev falls back to `http://localhost:3001`. |
+| `VITE_CLONEAI_KEY` | Matches `CLONEAI_INGRESS_KEY` when enabled. |
 
 ## Run locally
 
-**Terminal 1 — backend**
+**Backend**
 
 ```bash
 cd backend
@@ -44,10 +49,7 @@ npm install
 npm start
 ```
 
-- API: [http://localhost:3001](http://localhost:3001)
-- Health: [http://localhost:3001/api/health](http://localhost:3001/api/health)
-
-**Terminal 2 — frontend**
+**Frontend**
 
 ```bash
 cd frontend
@@ -59,33 +61,21 @@ Open [http://localhost:5173](http://localhost:5173).
 
 ## Deploy
 
-**Frontend (Vercel)**
+**Render / Railway (backend)**  
+Root `backend`, start `npm start`, set env vars above. Confirm `GET /api/health`.
 
-1. Import the GitHub repo.
-2. **Root Directory:** `frontend`
-3. Framework: **Vite**; build `npm run build`; output `dist`.
-4. Set `VITE_API_URL` to your hosted backend origin (no path).
+**Vercel (frontend)**  
+Root `frontend`, framework Vite, output `dist`, set `VITE_API_URL` to the public API origin.
 
-**Backend (Railway or Render)**
+## Security & limits (launch checklist)
 
-1. **Root Directory:** `backend`
-2. Start: `npm start`
-3. Set `ANTHROPIC_API_KEY`, `CORS_ORIGINS` (your Vercel URL), and `NODE_ENV=production`.
-4. Optional: `CLONEAI_INGRESS_KEY` + frontend `VITE_CLONEAI_KEY`.
-
-## Behavior notes
-
-- **Pipeline:** The backend emits SSE `stage` events (8 agents) before streaming Claude output, so the progress UI matches server-side steps.
-- **Scraping:** Many sites block bots; the API detects common challenge pages and tells Claude to rely on screenshots. Prefer **Image** or **URL + Images** when a fetch fails.
-- **Streaming:** Responses use `text/event-stream` with `X-Accel-Buffering: no` to reduce proxy buffering.
-
-## Project layout
-
-```
-backend/     Express API, rate limit, CORS, Claude streaming, multer uploads
-frontend/    Vite + vanilla HTML/CSS/JS
-```
+- CORS allowlist only (no wildcard in production path).
+- Rate limit on analyze (per minute, per IP).
+- URL validation (http/https, length, blocks loopback).
+- Images: PNG/JPEG/WebP only, magic-byte check, 20MB × 10 max (Multer).
+- Screenshots re-encoded/resized with **Sharp** before Claude to cut payload size.
+- Structured JSON logs: `analyze_request`, `analyze_success`, `analyze_failure`, `analyze_claude_timeout`.
 
 ## License
 
-Private / use as you like for your own projects.
+Use freely for your own projects.
