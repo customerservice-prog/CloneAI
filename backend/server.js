@@ -126,13 +126,14 @@ function normalizeAndValidateUrl(raw) {
   }
   const host = parsed.hostname.toLowerCase();
   if (
-    host === 'localhost' ||
-    host === '127.0.0.1' ||
-    host === '0.0.0.0' ||
-    host === '[::1]' ||
-    host.endsWith('.local')
+    isProd &&
+    (host === 'localhost' ||
+      host === '127.0.0.1' ||
+      host === '0.0.0.0' ||
+      host === '[::1]' ||
+      host.endsWith('.local'))
   ) {
-    return { ok: false, error: 'Local and loopback URLs are not allowed.' };
+    return { ok: false, error: 'Local and loopback URLs are not allowed in production.' };
   }
   return { ok: true, url: parsed.toString() };
 }
