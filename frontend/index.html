@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CloneAI — Website Clone Analyzer</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Instrument+Sans:wght@400;500;600&family=Syne:wght@400;500;600;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div class="grid-bg" aria-hidden="true"></div>
+    <div class="noise-bg" aria-hidden="true"></div>
+
+    <header class="app-header">
+      <div class="header-inner">
+        <div class="logo">
+          <span class="logo-dot" aria-hidden="true"></span>
+          <span class="logo-text">CloneAI</span>
+        </div>
+        <span class="header-badge">v1.0 — Powered by Claude</span>
+      </div>
+    </header>
+
+    <main class="main">
+      <section class="hero">
+        <p class="hero-pill">
+          <span class="hero-pill-dot" aria-hidden="true"></span>
+          AI Agent Suite
+        </p>
+        <h1 class="hero-title">
+          Clone Any Website<br />
+          <span class="hero-accent">Perfectly.</span>
+        </h1>
+        <p class="hero-sub">
+          Drop a URL or upload screenshots. AI agents scan every detail — layout, colors, fonts, spacing, components — and generate a complete developer brief.
+        </p>
+      </section>
+
+      <section class="input-card">
+        <div class="tabs" role="tablist">
+          <button type="button" class="tab active" data-tab="url" role="tab" aria-selected="true">URL Input</button>
+          <button type="button" class="tab" data-tab="images" role="tab" aria-selected="false">Image Upload</button>
+          <button type="button" class="tab" data-tab="both" role="tab" aria-selected="false">URL + Images</button>
+        </div>
+
+        <div class="tab-panels">
+          <div class="tab-panel active" id="panel-url" role="tabpanel">
+            <label class="sr-only" for="url-input">Website URL</label>
+            <input
+              id="url-input"
+              class="url-field"
+              type="url"
+              placeholder="https://example.com"
+              autocomplete="url"
+            />
+            <p class="depth-label">Scan depth:</p>
+            <div class="depth-pills" role="group" aria-label="Scan depth">
+              <button type="button" class="depth-pill active" data-depth="homepage">Homepage only</button>
+              <button type="button" class="depth-pill" data-depth="shallow">+2 levels</button>
+              <button type="button" class="depth-pill" data-depth="deep">Full crawl</button>
+            </div>
+          </div>
+
+          <div class="tab-panel" id="panel-images" role="tabpanel" hidden>
+            <div class="dropzone" id="dropzone-images" tabindex="0">
+              <div class="dropzone-icon" aria-hidden="true">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M4 16l4-4 4 4 4-8 4 8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+                  <path d="M4 20h16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+                </svg>
+              </div>
+              <p class="dropzone-title">Drop screenshots or click to upload</p>
+              <p class="dropzone-hint">PNG, JPG, WebP — original site &amp; current clone</p>
+              <input type="file" id="file-images" class="file-input" accept="image/png,image/jpeg,image/webp" multiple />
+            </div>
+            <div class="thumb-grid" id="thumb-grid-images" hidden></div>
+          </div>
+
+          <div class="tab-panel" id="panel-both" role="tabpanel" hidden>
+            <label class="sr-only" for="url-input-both">Website URL</label>
+            <input
+              id="url-input-both"
+              class="url-field url-field-stack"
+              type="url"
+              placeholder="https://example.com"
+              autocomplete="url"
+            />
+            <div class="dropzone dropzone-stack" id="dropzone-both" tabindex="0">
+              <div class="dropzone-icon" aria-hidden="true">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M4 16l4-4 4 4 4-8 4 8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+                  <path d="M4 20h16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+                </svg>
+              </div>
+              <p class="dropzone-title">Drop screenshots or click to upload</p>
+              <p class="dropzone-hint">PNG, JPG, WebP — original site &amp; current clone</p>
+              <input type="file" id="file-both" class="file-input" accept="image/png,image/jpeg,image/webp" multiple />
+            </div>
+            <div class="thumb-grid" id="thumb-grid-both" hidden></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="options-section" aria-label="Analysis options">
+        <div class="options-grid" id="options-grid"></div>
+      </section>
+
+      <button type="button" class="analyze-btn" id="analyze-btn">
+        <span class="analyze-btn-shine" aria-hidden="true"></span>
+        Run AI Clone Analysis
+      </button>
+
+      <section class="progress-card" id="progress-section" hidden>
+        <div class="progress-head">
+          <h2 class="progress-title">Agent pipeline</h2>
+          <span class="progress-pct" id="progress-pct">0%</span>
+        </div>
+        <div class="progress-bar-wrap">
+          <div class="progress-bar-fill" id="progress-bar-fill"></div>
+        </div>
+        <ul class="agent-list" id="agent-list"></ul>
+      </section>
+
+      <section class="results-section" id="results-section" hidden>
+        <div class="results-head">
+          <h2 class="results-title">Developer Brief</h2>
+          <div class="results-actions">
+            <button type="button" class="btn-outline" id="rerun-btn">Re-run</button>
+            <button type="button" class="btn-filled" id="copy-brief-btn">Copy Brief</button>
+          </div>
+        </div>
+        <div class="scorecard" id="scorecard">
+          <div class="metric-card">
+            <span class="metric-label">Issues Found</span>
+            <span class="metric-value" id="metric-issues">—</span>
+          </div>
+          <div class="metric-card">
+            <span class="metric-label">Sections</span>
+            <span class="metric-value metric-green" id="metric-sections">—</span>
+          </div>
+          <div class="metric-card">
+            <span class="metric-label">Word Count</span>
+            <span class="metric-value metric-accent" id="metric-words">—</span>
+          </div>
+          <div class="metric-card">
+            <span class="metric-label">Coverage</span>
+            <span class="metric-value metric-green">100%</span>
+          </div>
+        </div>
+        <div class="summary-box">
+          <div class="summary-toolbar">
+            <div class="toolbar-left">
+              <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
+              <span class="filename">clone-analysis.md</span>
+            </div>
+            <button type="button" class="btn-toolbar-copy" id="copy-toolbar-btn">Copy</button>
+          </div>
+          <div class="summary-body" id="summary-body">
+            <div class="summary-content" id="summary-content"></div>
+            <span class="type-cursor" id="type-cursor" aria-hidden="true"></span>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <div class="toast" id="toast" role="status" aria-live="polite" hidden>Copied to clipboard</div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
