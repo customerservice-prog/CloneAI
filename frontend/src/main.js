@@ -1,4 +1,7 @@
-const API_ANALYZE = 'http://localhost:3001/api/analyze';
+const envBase = import.meta.env.VITE_API_URL?.trim();
+const API_BASE = (envBase || 'http://localhost:3001').replace(/\/$/, '');
+const API_ANALYZE = `${API_BASE}/api/analyze`;
+const INGRESS_KEY = import.meta.env.VITE_CLONEAI_KEY?.trim();
 
 const OPTION_DEFS = [
   { id: 'layout', label: 'Layout & Structure', desc: 'Grid, flexbox, spacing, containers', defaultOn: true },
@@ -15,12 +18,28 @@ const OPTION_DEFS = [
 const AGENTS = [
   { icon: '🔍', name: 'URL Scanner', desc: 'Fetching page structure and DOM tree' },
   { icon: '⬜', name: 'Layout Analyst', desc: 'Analyzing grid, flex, spacing patterns' },
-  { icon: '𝐓', name: 'Typography Agent', desc: 'Extracting font stack, sizes, weights' },
+  { icon: '𝐓', name: 'Typography Extractor', desc: 'Extracting font stack, sizes, weights' },
   { icon: '🎨', name: 'Color Extractor', desc: 'Building exact color palette' },
   { icon: '⬡', name: 'Component Mapper', desc: 'Cataloguing UI components' },
   { icon: '📄', name: 'Content Indexer', desc: 'Mapping headings, copy, CTAs' },
   { icon: '⚖', name: 'Diff Analyzer', desc: 'Comparing original vs clone' },
-  { icon: '✍', name: 'Brief Writer', desc: 'Generating developer report' },
+  { icon: '✍', name: 'Brief Writer', desc: 'Generating developer report (Claude)' },
+];
+
+const COVERAGE_MARKERS = [
+  /EXECUTIVE OVERVIEW/i,
+  /GLOBAL LAYOUT/i,
+  /NAVIGATION\s*\/\s*HEADER/i,
+  /COLOR PALETTE/i,
+  /TYPOGRAPHY/i,
+  /HERO/i,
+  /SECTION-BY-SECTION/i,
+  /COMPONENTS CATALOG/i,
+  /IMAGES\s*&\s*MEDIA|IMAGES AND MEDIA/i,
+  /\bFOOTER\b/i,
+  /RESPONSIVENESS/i,
+  /CRITICAL ISSUES/i,
+  /PRIORITY FIX/i,
 ];
 
 let activeTab = 'url';
@@ -125,6 +144,15 @@ function extractMetrics(md) {
   return { issues, sections, words };
 }
 
+function computeCoverage(md) {
+  if (!md.trim()) return 0;
+  let hit = 0;
+  for (const re of COVERAGE_MARKERS) {
+    if (re.test(md)) hit += 1;
+  }
+  return Math.min(100, Math.round((hit / 13) * 100));
+}
+
 function formatWordCount(n) {
   if (n > 1000) return `${(n / 1000).toFixed(1)}k`;
   return String(n);
@@ -134,6 +162,40 @@ function issueClass(n) {
   if (n > 10) return 'issue-high';
   if (n > 3) return 'issue-mid';
   return 'issue-low';
+}
+
+function scraperHintText(scraper) {
+  if (!scraper) return '';
+  const map = {
+    challenge_or_waf:
+      'This site may block automated HTML fetches (bot protection or WAF). The brief prioritizes your screenshots and URL context — upload clear full-page captures for best accuracy.',
+    body_too_small:
+      'Very little HTML was returned (possible block page or shell). Treat structural DOM claims as uncertain unless screenshots confirm them.',
+    network_or_tls:
+      'The server could not fetch that URL (network, DNS, or TLS). Verify the address or rely on screenshots.',
+    http_error: `The URL returned HTTP ${scraper.statusCode ?? 'error'}. Try screenshots, another path, or a staging URL.`,
+  };
+  if (scraper.hint === 'ok' || scraper.hint === 'homepage_only' || scraper.hint === 'no_url') return '';
+  return map[scraper.hint] || 'HTML context was limited; prioritize uploaded images where possible.';
+}
+
+function shouldShowScraperHint(scraper) {
+  if (!scraper) return false;
+  if (scraper.ok && scraper.hint === 'ok') return false;
+  if (scraper.hint === 'homepage_only' || scraper.hint === 'no_url') return false;
+  return Boolean(scraper.blocked || scraperHintText(scraper));
+}
+
+function applyMetaScraper(scraper) {
+  const el = $('#analysis-hint');
+  if (!el) return;
+  if (shouldShowScraperHint(scraper)) {
+    el.textContent = scraperHintText(scraper);
+    el.hidden = false;
+  } else {
+    el.textContent = '';
+    el.hidden = true;
+  }
 }
 
 function buildOptionsGrid() {
@@ -195,8 +257,42 @@ function setProgress(pct) {
   $('#progress-bar-fill').style.width = `${n}%`;
 }
 
-function randMs() {
-  return 600 + Math.floor(Math.random() * 201);
+function setStageLabel(index, phase, label) {
+  const stageEl = $('#progress-stage');
+  if (!stageEl) return;
+  if (phase === 'running') {
+    const name = label || AGENTS[index]?.name || `Step ${index + 1}`;
+    stageEl.textContent = `Current: ${name}`;
+  } else if (phase === 'done' && index === 7) {
+    stageEl.textContent = 'Streaming developer brief…';
+  } else if (phase === 'done') {
+    stageEl.textContent = `Completed: ${label || AGENTS[index]?.name || `Step ${index + 1}`}`;
+  } else if (phase === 'error') {
+    stageEl.textContent = 'Pipeline error — see report below';
+  }
+}
+
+function applyStageEvent(data) {
+  const { index, phase, label } = data;
+  if (typeof index !== 'number') return;
+  if (phase === 'running') {
+    setAgentStatus(index, 'running');
+    setStageLabel(index, phase, label);
+    setProgress((index / 8) * 68);
+  } else if (phase === 'done') {
+    setAgentStatus(index, 'done');
+    setStageLabel(index, phase, label);
+    setProgress(((index + 1) / 8) * 68);
+  } else if (phase === 'error') {
+    setAgentStatus(index, 'error');
+    setStageLabel(index, phase, label);
+  }
+}
+
+function bumpStreamProgress() {
+  const base = 68;
+  const extra = Math.min(30, Math.floor(fullBriefText.length / 450));
+  setProgress(Math.min(99, base + extra));
 }
 
 function getUrlValue() {
@@ -352,7 +448,7 @@ function startTypewriter() {
   const tick = () => {
     const target = fullBriefText.length;
     if (displayIndex < target) {
-      const chunk = Math.min(3, target - displayIndex);
+      const chunk = Math.min(4, target - displayIndex);
       displayIndex += chunk;
     }
     content.innerHTML = renderMarkdown(fullBriefText.slice(0, displayIndex));
@@ -364,7 +460,7 @@ function startTypewriter() {
   typewriterRaf = requestAnimationFrame(tick);
 }
 
-async function parseSseStream(response) {
+async function parseSseStream(response, { onText } = {}) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
@@ -388,8 +484,15 @@ async function parseSseStream(response) {
         } catch {
           continue;
         }
+        if (data.type === 'stage') {
+          applyStageEvent(data);
+        }
+        if (data.type === 'meta' && data.scraper) {
+          applyMetaScraper(data.scraper);
+        }
         if (data.type === 'text' && data.content) {
           fullBriefText += data.content;
+          onText?.();
         }
         if (data.type === 'error') {
           throw new Error(data.message || 'Analysis failed');
@@ -402,17 +505,17 @@ async function parseSseStream(response) {
   }
 }
 
-async function runAgentSequence() {
-  AGENTS.forEach((_, i) => setAgentStatus(i, 'waiting'));
-  setProgress(0);
-  for (let i = 0; i < 7; i += 1) {
-    setAgentStatus(i, 'running');
-    setProgress(10 + i * 11);
-    await new Promise((r) => setTimeout(r, randMs()));
-    setAgentStatus(i, 'done');
-  }
-  setAgentStatus(7, 'running');
-  setProgress(88);
+function updateScorecard(md) {
+  const m = extractMetrics(md);
+  const cov = computeCoverage(md);
+  const issuesEl = $('#metric-issues');
+  issuesEl.textContent = String(m.issues);
+  issuesEl.className = `metric-value ${issueClass(m.issues)}`;
+  $('#metric-sections').textContent = String(Math.max(m.sections, 0));
+  $('#metric-words').textContent = formatWordCount(m.words);
+  const covEl = $('#metric-coverage');
+  covEl.textContent = `${cov}%`;
+  covEl.className = `metric-value ${cov >= 85 ? 'metric-green' : cov >= 55 ? 'metric-accent' : 'issue-mid'}`;
 }
 
 async function runAnalyze() {
@@ -425,14 +528,16 @@ async function runAnalyze() {
 
   $('#progress-section').hidden = false;
   $('#results-section').hidden = true;
+  $('#analysis-hint').hidden = true;
+  $('#analysis-hint').textContent = '';
   fullBriefText = '';
   displayIndex = 0;
   streamActive = true;
   $('#summary-content').innerHTML = '';
   $('#type-cursor').classList.remove('hidden');
+  $('#progress-stage').textContent = 'Starting pipeline…';
   buildAgentList();
-
-  const agentPromise = runAgentSequence();
+  setProgress(0);
 
   const opts = OPTION_DEFS.filter((o) => selectedOptions.has(o.id)).map((o) => o.label);
   const form = new FormData();
@@ -441,8 +546,11 @@ async function runAnalyze() {
   form.append('options', JSON.stringify(opts));
   files.forEach((f) => form.append('images', f));
 
+  const headers = {};
+  if (INGRESS_KEY) headers['X-CloneAI-Key'] = INGRESS_KEY;
+
   try {
-    const res = await fetch(API_ANALYZE, { method: 'POST', body: form });
+    const res = await fetch(API_ANALYZE, { method: 'POST', headers, body: form });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.error || `Request failed (${res.status})`);
@@ -455,36 +563,42 @@ async function runAnalyze() {
 
     startTypewriter();
 
-    await parseSseStream(res);
+    await parseSseStream(res, {
+      onText: () => bumpStreamProgress(),
+    });
 
     streamActive = false;
-    await agentPromise;
-    setAgentStatus(7, 'done');
     setProgress(100);
+    $('#progress-stage').textContent = 'Complete';
 
     stopTypewriter();
     while (displayIndex < fullBriefText.length) {
-      displayIndex = Math.min(fullBriefText.length, displayIndex + 12);
+      displayIndex = Math.min(fullBriefText.length, displayIndex + 16);
       $('#summary-content').innerHTML = renderMarkdown(fullBriefText.slice(0, displayIndex));
       await new Promise((r) => requestAnimationFrame(r));
     }
     $('#summary-content').innerHTML = renderMarkdown(fullBriefText);
     $('#type-cursor').classList.add('hidden');
 
-    const m = extractMetrics(fullBriefText);
-    const issuesEl = $('#metric-issues');
-    issuesEl.textContent = String(m.issues);
-    issuesEl.className = `metric-value ${issueClass(m.issues)}`;
-    $('#metric-sections').textContent = String(Math.max(m.sections, 0));
-    $('#metric-words').textContent = formatWordCount(m.words);
+    updateScorecard(fullBriefText);
 
     $('#results-section').hidden = false;
   } catch (e) {
     console.error(e);
     streamActive = false;
     stopTypewriter();
-    AGENTS.forEach((_, i) => setAgentStatus(i, i < 7 ? 'done' : 'error'));
-    setAgentStatus(7, 'error');
+    let marked = false;
+    for (let i = 0; i < AGENTS.length; i += 1) {
+      const badge = $(`#agent-list li[data-index="${i}"] [data-status]`);
+      if (badge?.classList.contains('running')) {
+        setAgentStatus(i, 'error');
+        marked = true;
+        break;
+      }
+    }
+    if (!marked) setAgentStatus(7, 'error');
+    $('#progress-stage').textContent = 'Failed';
+    setProgress(100);
     fullBriefText = `## Error\n\n${escapeHtml(e.message || String(e))}`;
     $('#summary-content').innerHTML = renderMarkdown(fullBriefText);
     $('#type-cursor').classList.add('hidden');
@@ -492,6 +606,8 @@ async function runAnalyze() {
     $('#metric-issues').className = 'metric-value issue-high';
     $('#metric-sections').textContent = '0';
     $('#metric-words').textContent = '0';
+    $('#metric-coverage').textContent = '0%';
+    $('#metric-coverage').className = 'metric-value issue-mid';
     $('#results-section').hidden = false;
   }
 }

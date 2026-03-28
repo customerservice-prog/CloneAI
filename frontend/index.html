@@ -117,7 +117,10 @@
 
       <section class="progress-card" id="progress-section" hidden>
         <div class="progress-head">
-          <h2 class="progress-title">Agent pipeline</h2>
+          <div class="progress-head-text">
+            <h2 class="progress-title">Agent pipeline</h2>
+            <p class="progress-stage" id="progress-stage" aria-live="polite"></p>
+          </div>
           <span class="progress-pct" id="progress-pct">0%</span>
         </div>
         <div class="progress-bar-wrap">
@@ -127,20 +130,13 @@
       </section>
 
       <section class="results-section" id="results-section" hidden>
-        <div class="results-head">
-          <h2 class="results-title">Developer Brief</h2>
-          <div class="results-actions">
-            <button type="button" class="btn-outline" id="rerun-btn">Re-run</button>
-            <button type="button" class="btn-filled" id="copy-brief-btn">Copy Brief</button>
-          </div>
-        </div>
         <div class="scorecard" id="scorecard">
           <div class="metric-card">
             <span class="metric-label">Issues Found</span>
             <span class="metric-value" id="metric-issues">—</span>
           </div>
           <div class="metric-card">
-            <span class="metric-label">Sections</span>
+            <span class="metric-label">Section Count</span>
             <span class="metric-value metric-green" id="metric-sections">—</span>
           </div>
           <div class="metric-card">
@@ -149,16 +145,24 @@
           </div>
           <div class="metric-card">
             <span class="metric-label">Coverage</span>
-            <span class="metric-value metric-green">100%</span>
+            <span class="metric-value metric-green" id="metric-coverage">—</span>
           </div>
         </div>
+        <div class="results-head">
+          <h2 class="results-title">Developer Brief</h2>
+          <div class="results-actions">
+            <button type="button" class="btn-outline" id="rerun-btn">Re-run</button>
+            <button type="button" class="btn-filled" id="copy-brief-btn">Copy to Clipboard</button>
+          </div>
+        </div>
+        <p class="analysis-hint" id="analysis-hint" hidden></p>
         <div class="summary-box">
           <div class="summary-toolbar">
             <div class="toolbar-left">
               <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
               <span class="filename">clone-analysis.md</span>
             </div>
-            <button type="button" class="btn-toolbar-copy" id="copy-toolbar-btn">Copy</button>
+            <button type="button" class="btn-toolbar-copy" id="copy-toolbar-btn">Copy to Clipboard</button>
           </div>
           <div class="summary-body" id="summary-body">
             <div class="summary-content" id="summary-content"></div>
