@@ -52,6 +52,15 @@ npm install
 npm start
 ```
 
+**Automated smoke checks** (with the server running on port 3001):
+
+```bash
+cd backend
+npm run smoke
+```
+
+Covers health, empty input, SSRF rejection on `127.0.0.1`, and honeypot rejection. End-to-end streaming still needs a valid `ANTHROPIC_API_KEY` and manual browser checks.
+
 **Frontend**
 
 ```bash

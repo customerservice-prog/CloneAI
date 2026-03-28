@@ -231,10 +231,20 @@ function applyMetaScraper(scraper) {
 function humanizeError(status, rawMessage, body) {
   const msg = (rawMessage || '').trim();
   if (status === 429) return 'Too many requests. Wait a minute and try again.';
-  if (status === 403) return msg || 'Access denied. Check API protection settings.';
+  if (status === 403) {
+    return (
+      msg ||
+      'Access denied. If you are on the live site, ensure this origin is listed in backend CORS_ORIGINS and (in production) matches the browser tab URL exactly.'
+    );
+  }
   if (status === 413) return 'Upload too large. Each image must be under 20MB (max 10 files).';
   if (status === 400) return msg || 'Invalid request. Check your URL and images.';
-  if (status === 500) return msg || 'Server error. Please retry in a moment.';
+  if (status === 500) {
+    if (/misconfiguration|ANTHROPIC|not set/i.test(msg)) {
+      return 'The analysis service is not configured (API key). Contact the site administrator.';
+    }
+    return msg || 'Server error. Please retry in a moment.';
+  }
   if (msg) return msg;
   if (body?.error) return String(body.error);
   return `Something went wrong (${status || 'network'}). Tap Re-run to retry.`;
@@ -719,6 +729,7 @@ async function runAnalyze() {
 
     updateScorecard(fullBriefText);
 
+    $('#progress-section').hidden = true;
     $('#results-section').hidden = false;
   } catch (e) {
     console.error(e);
@@ -750,6 +761,7 @@ async function runAnalyze() {
     $('#metric-words').textContent = '0';
     $('#metric-coverage').textContent = '0%';
     $('#metric-coverage').className = 'metric-value issue-mid';
+    $('#progress-section').hidden = true;
     $('#results-section').hidden = false;
   } finally {
     setAnalyzeLoading(false);
