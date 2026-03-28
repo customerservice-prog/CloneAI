@@ -28,9 +28,12 @@ CORS_ORIGINS=https://your-app.vercel.app
 | `CORS_ORIGINS` | **Required in production:** comma-separated frontend origins (no `*`). Dev defaults include `http://localhost:5173`. |
 | `CLONEAI_INGRESS_KEY` | Optional shared secret; browser sends `X-CloneAI-Key` (set `VITE_CLONEAI_KEY` on the frontend). |
 | `RATE_LIMIT_PER_MINUTE` | Max `POST /api/analyze` per IP per minute (default **8**, clamped 5–30). |
+| `RATE_LIMIT_DAILY_PER_IP` | Max analyses per IP per 24h (default **200**, clamped 20–5000). |
 | `HTML_FETCH_TIMEOUT_MS` | HTML fetch timeout (default **15000**, clamped 8s–20s). |
+| `HTML_FETCH_MAX_REDIRECTS` | Follow redirects only on the **same registrable host** (default **2**, max **5**). |
 | `CLAUDE_MAX_TOKENS` | Output cap (default **8000**, max **8192**). |
 | `CLAUDE_STREAM_TIMEOUT_MS` | Abort Claude stream if stalled (default **180000**). |
+| `RELAX_ANALYZE_ORIGIN_CHECK` | Set to `true` only if you must call `/api/analyze` without a browser `Origin` (discouraged). |
 
 ## Frontend (local / Vercel)
 
@@ -69,12 +72,17 @@ Root `frontend`, framework Vite, output `dist`, set `VITE_API_URL` to the public
 
 ## Security & limits (launch checklist)
 
-- CORS allowlist only (no wildcard in production path).
-- Rate limit on analyze (per minute, per IP).
-- URL validation (http/https, length, blocks loopback).
-- Images: PNG/JPEG/WebP only, magic-byte check, 20MB × 10 max (Multer).
-- Screenshots re-encoded/resized with **Sharp** before Claude to cut payload size.
-- Structured JSON logs: `analyze_request`, `analyze_success`, `analyze_failure`, `analyze_claude_timeout`.
+- **CORS:** Explicit allowlist only; `*` entries in `CORS_ORIGINS` are stripped with a warning.
+- **Browser origin (production):** `POST /api/analyze` requires an `Origin` header that matches `CORS_ORIGINS` (reduces scripted abuse). Override with `RELAX_ANALYZE_ORIGIN_CHECK=true` only if needed.
+- **Rate limits:** Per-minute **and** per-24h caps on `/api/analyze` (cost protection).
+- **SSRF:** DNS resolution with blocking of private/link-local/CGNAT ranges and metadata-style hostnames (`backend/ssrf.js`). URLs with embedded credentials are rejected.
+- **Redirects:** Only same host key (after stripping leading `www.`) as the initial URL; `http`/`https` only.
+- **Uploads:** PNG/JPEG/WebP only, magic-byte verification, **20MB × 10**, Multer field/part limits; files renamed to `upload-N.ext` server-side.
+- **Honeypot:** Hidden `hp` field must be empty.
+- **Errors:** Production uses generic client messages; stack traces and internals stay in logs only.
+- **Secrets:** Anthropic key server-only; never returned to the browser.
+- **Sharp** re-encodes images before Claude.
+- **Logs:** `analyze_request`, `analyze_success`, `analyze_failure`, `analyze_claude_timeout`, `analyze_honeypot_triggered`, `analyze_blocked_origin`, `html_fetch_failed`, etc.
 
 ## License
 

@@ -184,6 +184,9 @@
 
     <div class="toast" id="toast" role="status" aria-live="polite" hidden>Copied to clipboard</div>
 
+    <!-- Honeypot: must stay empty (bots only). Backend rejects non-empty. -->
+    <input type="text" class="hp-field" id="form-hp" name="hp" tabindex="-1" autocomplete="off" aria-hidden="true" />
+
     <script type="module" src="/src/main.js"></script>
   </body>
 </html>

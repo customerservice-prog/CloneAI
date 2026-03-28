@@ -3,9 +3,10 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import multer from 'multer';
 import axios from 'axios';
-import fetch from 'node-fetch';
+import net from 'node:net';
 import rateLimit from 'express-rate-limit';
 import { optimizeImageForModel } from './imageOptimize.js';
+import { assertUrlSafeForServerFetch, isUnsafeIpLiteral } from './ssrf.js';
 
 dotenv.config();
 
@@ -24,12 +25,25 @@ const DEFAULT_DEV_ORIGINS = [
   'http://127.0.0.1:4173',
 ];
 
-/** Production: set CORS_ORIGINS to comma-separated frontend origins. Wildcard is not allowed for public launch. */
+/** No wildcard: list explicit frontend origins. */
 function parseCorsOrigins() {
   const raw = process.env.CORS_ORIGINS?.trim();
-  if (raw) return raw.split(',').map((s) => s.trim()).filter(Boolean);
-  if (isProd) return [];
-  return DEFAULT_DEV_ORIGINS;
+  if (!raw) {
+    if (isProd) return [];
+    return DEFAULT_DEV_ORIGINS;
+  }
+  const list = raw
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .filter((o) => {
+      if (o === '*') {
+        console.warn('CORS_ORIGINS must not use *. Remove * and list exact frontend URLs.');
+        return false;
+      }
+      return true;
+    });
+  return list;
 }
 
 const corsOrigins = parseCorsOrigins();
@@ -53,11 +67,16 @@ app.use(
   })
 );
 
-app.use(express.json({ limit: '256kb' }));
+app.use(express.json({ limit: '512kb' }));
 
 const RATE_PER_MINUTE = Math.min(
   30,
   Math.max(5, Number(process.env.RATE_LIMIT_PER_MINUTE) || 8)
+);
+
+const DAILY_MAX = Math.min(
+  5000,
+  Math.max(20, Number(process.env.RATE_LIMIT_DAILY_PER_IP) || 200)
 );
 
 const analyzeLimiter = rateLimit({
@@ -68,9 +87,23 @@ const analyzeLimiter = rateLimit({
   message: { error: `Rate limit: max ${RATE_PER_MINUTE} analyses per minute. Try again shortly.` },
 });
 
+const analyzeDailyLimiter = rateLimit({
+  windowMs: 24 * 60 * 60 * 1000,
+  max: DAILY_MAX,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Daily analysis limit reached for this network. Try again tomorrow.' },
+});
+
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 20 * 1024 * 1024, files: 10 },
+  limits: {
+    fileSize: 20 * 1024 * 1024,
+    files: 10,
+    fields: 24,
+    fieldSize: 64 * 1024,
+    parts: 32,
+  },
 });
 
 function requireIngressKey(req, res, next) {
@@ -78,7 +111,24 @@ function requireIngressKey(req, res, next) {
   if (!expected) return next();
   const sent = req.get('x-cloneai-key');
   if (sent !== expected) {
-    res.status(403).json({ error: 'Forbidden: invalid or missing X-CloneAI-Key' });
+    res.status(403).json({ error: 'Forbidden.' });
+    return;
+  }
+  next();
+}
+
+/** In production, POST /api/analyze must include an Origin that matches CORS_ORIGINS (stops simple scripted abuse with spoofed cost). */
+function requireProductionBrowserOrigin(req, res, next) {
+  if (!isProd) return next();
+  if (process.env.RELAX_ANALYZE_ORIGIN_CHECK === 'true') return next();
+  if (!corsOrigins.length) {
+    res.status(403).json({ error: 'Forbidden.' });
+    return;
+  }
+  const origin = req.get('origin');
+  if (!origin || !corsOrigins.includes(origin)) {
+    logEvent('warn', 'analyze_blocked_origin', { ip: clientIp(req), origin: origin || null });
+    res.status(403).json({ error: 'Forbidden.' });
     return;
   }
   next();
@@ -91,24 +141,32 @@ const HTML_FETCH_TIMEOUT_MS = Math.min(
   Math.max(8000, Number(process.env.HTML_FETCH_TIMEOUT_MS) || 15000)
 );
 const MAX_HTML_BYTES = 450_000;
+const MAX_REDIRECTS = Math.min(5, Math.max(0, Number(process.env.HTML_FETCH_MAX_REDIRECTS) || 2));
 
 function clientIp(req) {
   return req.ip || req.socket?.remoteAddress || 'unknown';
 }
 
 function logEvent(level, msg, extra = {}) {
+  const { ip, ...rest } = extra;
   console.log(
     JSON.stringify({
       ts: new Date().toISOString(),
       level,
       msg,
-      ip: extra.ip,
-      ...extra,
+      ...(ip ? { ip } : {}),
+      ...rest,
     })
   );
 }
 
-function normalizeAndValidateUrl(raw) {
+function hostKey(h) {
+  return String(h || '')
+    .replace(/^www\./i, '')
+    .toLowerCase();
+}
+
+function normalizeAndValidateUrlShape(raw) {
   const s = (raw || '').trim();
   if (!s) return { ok: true, url: '' };
   if (s.length > MAX_URL_LENGTH) {
@@ -124,18 +182,87 @@ function normalizeAndValidateUrl(raw) {
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
     return { ok: false, error: 'Only http and https URLs are allowed.' };
   }
-  const host = parsed.hostname.toLowerCase();
-  if (
-    isProd &&
-    (host === 'localhost' ||
-      host === '127.0.0.1' ||
-      host === '0.0.0.0' ||
-      host === '[::1]' ||
-      host.endsWith('.local'))
-  ) {
-    return { ok: false, error: 'Local and loopback URLs are not allowed in production.' };
+  if (parsed.username || parsed.password) {
+    return { ok: false, error: 'URLs with embedded credentials are not allowed.' };
+  }
+  const host = parsed.hostname;
+  if (net.isIP(host) && isUnsafeIpLiteral(host)) {
+    return { ok: false, error: 'That address is not allowed.' };
   }
   return { ok: true, url: parsed.toString() };
+}
+
+async function validateAnalyzeRequest(req, res, next) {
+  try {
+    const hp = (req.body.hp ?? req.body.honeypot ?? '').toString().trim();
+    if (hp.length > 0) {
+      logEvent('warn', 'analyze_honeypot_triggered', { ip: clientIp(req) });
+      res.status(400).json({ error: 'Request rejected.' });
+      return;
+    }
+
+    const urlCheck = normalizeAndValidateUrlShape(req.body.url || '');
+    if (!urlCheck.ok) {
+      res.status(400).json({ error: urlCheck.error });
+      return;
+    }
+    req.body.url = urlCheck.url;
+
+    if (req.body.url) {
+      const ssrf = await assertUrlSafeForServerFetch(req.body.url);
+      if (!ssrf.ok) {
+        res.status(400).json({ error: ssrf.error });
+        return;
+      }
+    }
+
+    const depth = String(req.body.depth || 'homepage').trim();
+    if (!['homepage', 'shallow', 'deep'].includes(depth)) {
+      res.status(400).json({ error: 'Invalid scan depth.' });
+      return;
+    }
+    req.body.depth = depth;
+
+    let options = [];
+    try {
+      options = JSON.parse(req.body.options || '[]');
+    } catch {
+      res.status(400).json({ error: 'Invalid analysis options payload.' });
+      return;
+    }
+    if (!Array.isArray(options)) {
+      res.status(400).json({ error: 'Analysis options must be a JSON array.' });
+      return;
+    }
+    req.body._options = options;
+
+    const files = req.files || [];
+    if (!req.body.url && !files.length) {
+      res.status(400).json({ error: 'Enter a URL and/or upload at least one image.' });
+      return;
+    }
+
+    let i = 0;
+    for (const f of files) {
+      const mime = (f.mimetype || '').toLowerCase();
+      if (!ALLOWED_IMAGE_MIMES.has(mime)) {
+        res.status(400).json({ error: `Unsupported file type. Use PNG, JPG, or WebP only.` });
+        return;
+      }
+      if (!bufferLooksLikeImage(f.buffer, mime)) {
+        res.status(400).json({ error: 'One or more files are not valid images.' });
+        return;
+      }
+      const ext = mime === 'image/png' ? 'png' : mime === 'image/webp' ? 'webp' : 'jpg';
+      f.originalname = `upload-${i}.${ext}`;
+      i += 1;
+    }
+
+    next();
+  } catch (e) {
+    logEvent('error', 'validate_analyze_exception', { ip: clientIp(req), detail: String(e?.message || e) });
+    res.status(400).json({ error: 'Invalid request.' });
+  }
 }
 
 function bufferLooksLikeImage(buf, mime) {
@@ -150,55 +277,6 @@ function bufferLooksLikeImage(buf, mime) {
     return true;
   }
   return false;
-}
-
-function validateAnalyzeRequest(req, res, next) {
-  const urlCheck = normalizeAndValidateUrl(req.body.url || '');
-  if (!urlCheck.ok) {
-    res.status(400).json({ error: urlCheck.error });
-    return;
-  }
-  req.body.url = urlCheck.url;
-
-  const depth = String(req.body.depth || 'homepage').trim();
-  if (!['homepage', 'shallow', 'deep'].includes(depth)) {
-    res.status(400).json({ error: 'Invalid scan depth.' });
-    return;
-  }
-  req.body.depth = depth;
-
-  let options = [];
-  try {
-    options = JSON.parse(req.body.options || '[]');
-  } catch {
-    res.status(400).json({ error: 'Invalid analysis options payload.' });
-    return;
-  }
-  if (!Array.isArray(options)) {
-    res.status(400).json({ error: 'Analysis options must be a JSON array.' });
-    return;
-  }
-  req.body._options = options;
-
-  const files = req.files || [];
-  if (!req.body.url && !files.length) {
-    res.status(400).json({ error: 'Enter a URL and/or upload at least one image.' });
-    return;
-  }
-
-  for (const f of files) {
-    const mime = (f.mimetype || '').toLowerCase();
-    if (!ALLOWED_IMAGE_MIMES.has(mime)) {
-      res.status(400).json({ error: `Unsupported file type "${mime}". Use PNG, JPG, or WebP.` });
-      return;
-    }
-    if (!bufferLooksLikeImage(f.buffer, mime)) {
-      res.status(400).json({ error: 'One or more files are not valid images (content mismatch).' });
-      return;
-    }
-  }
-
-  next();
 }
 
 function analyzeRequestLogger(req, res, next) {
@@ -346,11 +424,25 @@ async function fetchHtmlDetailed(url, depth) {
     return { html: '', meta };
   }
 
+  const initial = new URL(url);
+  const allowedHost = hostKey(initial.hostname);
+
   try {
     const u = url.startsWith('http') ? url : `https://${url}`;
     const res = await axios.get(u, {
       timeout: HTML_FETCH_TIMEOUT_MS,
       maxContentLength: 2_000_000,
+      maxRedirects: MAX_REDIRECTS,
+      beforeRedirect: (opts) => {
+        const proto = opts.protocol || '';
+        if (proto && proto !== 'http:' && proto !== 'https:') {
+          throw new Error('redirect_blocked');
+        }
+        if (opts.auth) throw new Error('redirect_blocked');
+        const h = opts.hostname;
+        if (!h) throw new Error('redirect_blocked');
+        if (hostKey(h) !== allowedHost) throw new Error('redirect_blocked');
+      },
       headers: {
         'User-Agent':
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 CloneAI/1.0',
@@ -404,9 +496,14 @@ async function fetchHtmlDetailed(url, depth) {
   } catch (e) {
     const code = e.code || '';
     const isTimeout = code === 'ECONNABORTED' || /timeout/i.test(e.message || '');
-    console.error('HTML fetch error:', e.message);
+    const isRedirectBlock = e.message === 'redirect_blocked';
+    logEvent('warn', 'html_fetch_failed', {
+      code: code || null,
+      message: e.message,
+      redirectBlock: isRedirectBlock,
+    });
     meta.blocked = true;
-    meta.hint = isTimeout ? 'fetch_timeout' : 'network_or_tls';
+    meta.hint = isTimeout ? 'fetch_timeout' : isRedirectBlock ? 'redirect_blocked' : 'network_or_tls';
     meta.timeout = isTimeout;
     return { html: '', meta };
   }
@@ -435,11 +532,21 @@ const CLAUDE_STREAM_MS = Math.min(
   Math.max(60000, Number(process.env.CLAUDE_STREAM_TIMEOUT_MS) || 180000)
 );
 
+function ssePublicError() {
+  return 'We could not complete this analysis. Please try again.';
+}
+
+function mapClaudeFailureStatus(status) {
+  if (status === 401) return 'Analysis service is misconfigured.';
+  if (status === 429) return 'Analysis service is busy. Try again later.';
+  return 'The analysis service returned an error. Try again later.';
+}
+
 async function runAnalyzePipeline(req, res) {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey || apiKey === 'your_key_here') {
     res.status(500).json({
-      error: 'Server misconfiguration: ANTHROPIC_API_KEY is not set.',
+      error: isProd ? 'Service temporarily unavailable.' : 'Server misconfiguration: ANTHROPIC_API_KEY is not set.',
     });
     return;
   }
@@ -542,8 +649,9 @@ async function runAnalyzePipeline(req, res) {
         send({ type: 'stage', index: 7, phase: 'error' });
         send({
           type: 'error',
-          message:
-            'Claude request timed out. The site or model response was too slow — try again with fewer images or shallower depth.',
+          message: isProd
+            ? 'The analysis timed out. Try fewer images or shallower depth.'
+            : 'Claude request timed out.',
         });
         logEvent('error', 'analyze_claude_timeout', { ip: clientIp(req) });
         res.end();
@@ -555,25 +663,23 @@ async function runAnalyzePipeline(req, res) {
 
     if (!response.ok) {
       const errText = await response.text();
-      let friendly = errText || `Anthropic API error (${response.status})`;
-      try {
-        const j = JSON.parse(errText);
-        if (j?.error?.message) friendly = j.error.message;
-      } catch {
-        /* keep */
-      }
-      if (response.status === 401) friendly = 'Invalid Anthropic API key (check server configuration).';
-      if (response.status === 429) friendly = 'Claude API rate limit or quota exceeded. Try again later.';
+      logEvent('error', 'analyze_claude_http', {
+        ip: clientIp(req),
+        status: response.status,
+        bodySnippet: errText.slice(0, 400),
+      });
       send({ type: 'stage', index: 7, phase: 'error' });
-      send({ type: 'error', message: friendly });
-      logEvent('error', 'analyze_claude_http', { ip: clientIp(req), status: response.status });
+      send({
+        type: 'error',
+        message: isProd ? mapClaudeFailureStatus(response.status) : errText.slice(0, 2000),
+      });
       res.end();
       return;
     }
 
     if (!response.body) {
       send({ type: 'stage', index: 7, phase: 'error' });
-      send({ type: 'error', message: 'No response body from Claude.' });
+      send({ type: 'error', message: ssePublicError() });
       res.end();
       return;
     }
@@ -607,7 +713,7 @@ async function runAnalyzePipeline(req, res) {
         if (ev.type === 'error') {
           send({
             type: 'error',
-            message: ev.error?.message || JSON.stringify(ev.error),
+            message: isProd ? ssePublicError() : ev.error?.message || JSON.stringify(ev.error),
           });
         }
       }
@@ -642,13 +748,16 @@ async function runAnalyzePipeline(req, res) {
     logEvent('info', 'analyze_success', { ip: clientIp(req), ms });
     res.end();
   } catch (err) {
+    logEvent('error', 'analyze_failure', {
+      ip: clientIp(req),
+      detail: String(err?.stack || err?.message || err),
+    });
     console.error(err);
     send({ type: 'stage', index: 7, phase: 'error' });
     send({
       type: 'error',
-      message: err.message || 'Unexpected server error. Please retry.',
+      message: isProd ? ssePublicError() : err.message || ssePublicError(),
     });
-    logEvent('error', 'analyze_failure', { ip: clientIp(req), detail: String(err.message || err) });
     res.end();
   }
 }
@@ -656,7 +765,9 @@ async function runAnalyzePipeline(req, res) {
 app.post(
   '/api/analyze',
   analyzeLimiter,
+  analyzeDailyLimiter,
   requireIngressKey,
+  requireProductionBrowserOrigin,
   upload.array('images', 10),
   validateAnalyzeRequest,
   analyzeRequestLogger,
@@ -675,17 +786,24 @@ app.use((err, _req, res, next) => {
       res.status(400).json({ error: 'Maximum 10 images per request.' });
       return;
     }
-    res.status(400).json({ error: err.message || 'Upload error.' });
+    if (err.code === 'LIMIT_FIELD_COUNT' || err.code === 'LIMIT_PART_COUNT') {
+      res.status(400).json({ error: 'Upload payload is too large or malformed.' });
+      return;
+    }
+    res.status(400).json({ error: 'Upload failed.' });
     return;
   }
-  next(err);
+  logEvent('error', 'unhandled_express_error', { detail: String(err?.stack || err?.message || err) });
+  if (!res.headersSent) {
+    res.status(500).json({ error: isProd ? 'Something went wrong.' : err.message || 'Error' });
+  }
 });
 
 app.listen(PORT, () => {
   console.log(`CloneAI backend listening on port ${PORT}`);
   console.log(
-    `CORS: ${corsOrigins.length ? corsOrigins.join(', ') : isProd ? '(none — set CORS_ORIGINS)' : DEFAULT_DEV_ORIGINS.join(', ')}`
+    `CORS allowlist: ${corsOrigins.length ? corsOrigins.join(', ') : isProd ? '(none — set CORS_ORIGINS)' : DEFAULT_DEV_ORIGINS.join(', ')}`
   );
-  console.log(`Rate limit: ${RATE_PER_MINUTE} requests/minute/IP on /api/analyze`);
+  console.log(`Rate limits: ${RATE_PER_MINUTE}/minute and ${DAILY_MAX}/day per IP on /api/analyze`);
   console.log(`Claude max_tokens: ${MAX_OUTPUT_TOKENS}, stream timeout: ${CLAUDE_STREAM_MS}ms`);
 });

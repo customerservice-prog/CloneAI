@@ -7,6 +7,22 @@ const API_BASE = (() => {
 const API_ANALYZE = API_BASE ? `${API_BASE}/api/analyze` : '';
 const INGRESS_KEY = import.meta.env.VITE_CLONEAI_KEY?.trim();
 
+if (isProd && envBase && !/^https:\/\//i.test(envBase)) {
+  console.warn('[CloneAI] Use HTTPS for VITE_API_URL in production.');
+}
+
+function clientUrlShapeOk(raw) {
+  const s = (raw || '').trim();
+  if (!s) return true;
+  try {
+    const withProto = /^[a-zA-Z][a-zA-Z\d+.-]*:/.test(s) ? s : `https://${s}`;
+    const u = new URL(withProto);
+    return u.protocol === 'http:' || u.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 const OPTION_DEFS = [
   { id: 'layout', label: 'Layout & Structure', desc: 'Grid, flexbox, spacing, containers', defaultOn: true },
   { id: 'typography', label: 'Typography', desc: 'Fonts, sizes, weights, line-height', defaultOn: true },
@@ -180,6 +196,8 @@ function scraperHintText(scraper) {
       'The server could not reach that URL (network, DNS, or TLS). Check the address or rely on screenshots.',
     http_error: `The URL returned HTTP ${scraper.statusCode ?? 'error'}. Try screenshots or another URL.`,
     fetch_timeout: 'Fetching HTML timed out. Try again, use a lighter page, or upload screenshots instead.',
+    redirect_blocked:
+      'The site redirected in a way we block for security. Try the final URL directly or use screenshots.',
   };
   if (scraper.hint === 'ok' || scraper.hint === 'homepage_only' || scraper.hint === 'no_url') return '';
   return map[scraper.hint] || 'HTML context was limited; prioritize uploaded images where possible.';
@@ -627,6 +645,10 @@ async function runAnalyze() {
     alert('Enter a URL and/or upload at least one image.');
     return;
   }
+  if (url && !clientUrlShapeOk(url)) {
+    alert('Enter a valid URL starting with http:// or https:// (or a domain like example.com).');
+    return;
+  }
 
   if (analyzeAbort) analyzeAbort.abort();
   analyzeAbort = new AbortController();
@@ -652,6 +674,7 @@ async function runAnalyze() {
   form.append('depth', depth);
   form.append('options', JSON.stringify(opts));
   form.append('comparePair', $('#compare-pair')?.checked ? '1' : '0');
+  form.append('hp', ($('#form-hp')?.value || '').trim());
   files.forEach((f) => form.append('images', f));
 
   const headers = {};
