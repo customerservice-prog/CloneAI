@@ -262,9 +262,13 @@ function setStageLabel(index, phase, label) {
   if (!stageEl) return;
   if (phase === 'running') {
     const name = label || AGENTS[index]?.name || `Step ${index + 1}`;
-    stageEl.textContent = `Current: ${name}`;
+    if (index === 7) {
+      stageEl.textContent = `Current: ${name} · streaming response…`;
+    } else {
+      stageEl.textContent = `Current: ${name}`;
+    }
   } else if (phase === 'done' && index === 7) {
-    stageEl.textContent = 'Streaming developer brief…';
+    stageEl.textContent = 'Brief Writer complete';
   } else if (phase === 'done') {
     stageEl.textContent = `Completed: ${label || AGENTS[index]?.name || `Step ${index + 1}`}`;
   } else if (phase === 'error') {
