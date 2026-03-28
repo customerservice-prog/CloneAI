@@ -9,8 +9,8 @@ Full-stack AI website clone analyzer: a vanilla Vite frontend and Node.js/Expres
 
 ## Anthropic API key
 
-1. Open `backend/.env`.
-2. Replace `your_key_here` with your real key:
+1. Create `backend/.env` if it is not present (it is not committed).
+2. Add your key:
 
 ```env
 ANTHROPIC_API_KEY=sk-ant-api03-...
