@@ -1,13 +1,15 @@
 /**
- * Launch smoke checks (no Anthropic key required).
+ * Launch smoke checks (no OpenAI key required).
  * Run: npm run smoke  (from backend/)
  * Optional: BASE_URL=http://127.0.0.1:3001 npm run smoke
  */
 const BASE = (process.env.BASE_URL || 'http://127.0.0.1:3001').replace(/\/$/, '');
+const SMOKE_USER = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
 
-async function req(method, path, { form, expectStatus } = {}) {
+async function req(method, path, { form, expectStatus, headers } = {}) {
   const url = `${BASE}${path}`;
   const init = { method };
+  if (headers) init.headers = headers;
   if (form) {
     init.body = form;
   }
@@ -49,7 +51,11 @@ async function main() {
     fd2.set('options', '[]');
     fd2.set('hp', '');
     fd2.set('comparePair', '0');
-    await req('POST', '/api/analyze', { form: fd2, expectStatus: 400 });
+    await req('POST', '/api/analyze', {
+      form: fd2,
+      expectStatus: 400,
+      headers: { 'X-CloneAI-User-Id': SMOKE_USER },
+    });
     ok('POST /api/analyze SSRF 127.0.0.1 → 400');
 
     const fd3 = new FormData();
@@ -58,7 +64,11 @@ async function main() {
     fd3.set('options', '[]');
     fd3.set('hp', 'x');
     fd3.set('comparePair', '0');
-    await req('POST', '/api/analyze', { form: fd3, expectStatus: 400 });
+    await req('POST', '/api/analyze', {
+      form: fd3,
+      expectStatus: 400,
+      headers: { 'X-CloneAI-User-Id': SMOKE_USER },
+    });
     ok('POST /api/analyze honeypot → 400');
   } catch (e) {
     bad('smoke suite', e);

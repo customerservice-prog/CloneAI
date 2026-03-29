@@ -4,7 +4,7 @@ const MAX_WIDTH = 2048;
 const JPEG_QUALITY = 82;
 
 /**
- * Downscale large screenshots and re-encode as JPEG to reduce Claude payload size.
+ * Downscale large screenshots and re-encode as JPEG to reduce vision-model payload size.
  * Falls back to the original buffer if processing fails.
  */
 export async function optimizeImageForModel(buffer, mime) {

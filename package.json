@@ -1,0 +1,10 @@
+{
+  "name": "cloneai",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "test": "npm test --prefix backend",
+    "smoke": "npm run smoke --prefix backend"
+  }
+}

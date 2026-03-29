@@ -1,18 +1,24 @@
 # CloneAI
 
-Production-oriented full-stack AI website clone analyzer: Vite + vanilla frontend, Node/Express backend, Claude streaming over SSE.
+Production-oriented full-stack AI website clone analyzer: Vite + vanilla frontend, Node/Express backend, OpenAI streaming over SSE.
 
 ## Prerequisites
 
 - Node.js 20+ recommended (Sharp prebuilds)
-- [Anthropic API key](https://console.anthropic.com/)
+- [OpenAI API key](https://platform.openai.com/api-keys)
 
 ## Backend (`backend/.env`)
 
-Required:
+Copy `backend/.env.example` to `backend/.env` and set your key. Required:
 
 ```env
-ANTHROPIC_API_KEY=sk-ant-api03-...
+OPENAI_API_KEY=sk-...
+```
+
+Optional model override (default **`gpt-4o`**):
+
+```env
+OPENAI_MODEL=gpt-4o
 ```
 
 Recommended for production:
@@ -31,9 +37,37 @@ CORS_ORIGINS=https://your-app.vercel.app
 | `RATE_LIMIT_DAILY_PER_IP` | Max analyses per IP per 24h (default **200**, clamped 20–5000). |
 | `HTML_FETCH_TIMEOUT_MS` | HTML fetch timeout (default **15000**, clamped 8s–20s). |
 | `HTML_FETCH_MAX_REDIRECTS` | Follow redirects only on the **same registrable host** (default **2**, max **5**). |
-| `CLAUDE_MAX_TOKENS` | Output cap (default **8000**, max **8192**). |
-| `CLAUDE_STREAM_TIMEOUT_MS` | Abort Claude stream if stalled (default **180000**). |
+| `OPENAI_MAX_TOKENS` | Output cap (default **8000**, max **16384**). |
+| `OPENAI_STREAM_TIMEOUT_MS` | Abort OpenAI stream if stalled (default **180000**). |
+| `CLAUDE_MAX_TOKENS` / `CLAUDE_STREAM_TIMEOUT_MS` | Legacy fallbacks if the `OPENAI_*` vars are unset. |
+| `HTML_FETCH_MAX_CONTENT_LENGTH` | Axios max HTML download size (default matches `MAX_HTML_BYTES`, ceiling **50MB**). |
+| `MAX_HTML_BYTES` | HTML kept to discover image URLs (default **8MB**, max **25MB**). |
+| `MAX_HTML_FOR_MODEL` | Max HTML characters sent to the model (default **120000**, max **250000**). |
+| `IMAGE_HARVEST_MAX` | **Unset / blank / `0` = no limit** (every image URL found in HTML). Otherwise max count. |
+| `IMAGE_HARVEST_MAX_BYTES` | Per-image cap (default **50MB**). |
+| `IMAGE_HARVEST_ZIP_CAP` | **Unset / blank / `0` = no limit** on total ZIP payload (uses RAM). |
+| `IMAGE_HARVEST_CONCURRENCY` | Parallel downloads (default **12**, max **32**). |
+| `CRAWL_MAX_PAGES` | **Deep** scan: max same-host HTML pages to fetch (default **100**, max **250**). **Shallow** uses `min(25, CRAWL_MAX_PAGES)`. **Homepage / 1 page** skips BFS. |
+| `CRAWL_FETCH_CONCURRENCY` | Parallel HTML fetches during crawl (default **20**, max **40**). |
+| `CRAWL_SCREENSHOT_CONCURRENCY` | Parallel Playwright tabs for full-page PNGs (default **10**, max **24**). |
+| `SCREENSHOT_TIMEOUT_MS` | Per-page navigation timeout for screenshots (default **50000**, max **120000**). |
+| `ENABLE_PAGE_SCREENSHOTS` | Set to `false` to skip Playwright snapshots (images-only ZIP). |
+| `ENABLE_INTERACTION_CRAWL` | Set to `false` to skip theme/demo clicks and checkout walk (default: on when screenshots on). |
+| `INTERACTION_HUB_PAGES` | Max crawled URLs used as “hubs” for clicking theme grids (default **12**, max **25**). |
+| `INTERACTION_THEME_CLICKS_PER_HUB` | Max theme/demo/preview clicks per hub page, reloading hub between clicks (default **100**, max **200**). |
+| `INTERACTION_CHECKOUT_MAX_STEPS` | Max “Next / Continue / Pay” steps on first cart/checkout URL found (default **15**, max **30**). |
+| `INTERACTION_EXTRA_URL_CAP` | Extra same-host pages to fetch after URLs discovered from interactions (default **120**, max **300**). |
+| `SITE_ASSET_TTL_MS` | How long the one-click ZIP download link stays valid (default **30 minutes**). |
 | `RELAX_ANALYZE_ORIGIN_CHECK` | Set to `true` only if you must call `/api/analyze` without a browser `Origin` (discouraged). |
+| `BILLING_ENABLED` | Set to `true` to enforce usage limits and require `X-CloneAI-User-Id` on `/api/analyze`. |
+| `STRIPE_SECRET_KEY` | Stripe secret key (subscriptions + one-time extra run). |
+| `STRIPE_WEBHOOK_SECRET` | Signing secret for `POST /api/billing/webhook` (register URL in Stripe Dashboard). |
+| `STRIPE_PRICE_STARTER` / `STRIPE_PRICE_PRO` | Recurring price IDs ($5/mo and $12/mo). |
+| `STRIPE_PRICE_EXTRA_RUN` | One-time price ID ($3) for bonus runs. |
+| `FRONTEND_URL` | Origin for Stripe Checkout `success_url` / `cancel_url` (e.g. `https://your-app.vercel.app`). |
+| `BILLING_DATA_PATH` | Optional path to `billing.json` store (default: `backend/data/billing.json`). |
+
+Full Stripe test matrix: [docs/BILLING_TESTING.md](docs/BILLING_TESTING.md).
 
 ## Frontend (local / Vercel)
 
@@ -49,8 +83,11 @@ CORS_ORIGINS=https://your-app.vercel.app
 ```bash
 cd backend
 npm install
+npx playwright install chromium
 npm start
 ```
+
+The first time (or on a new machine), **`npx playwright install chromium`** is required so full-page snapshots work.
 
 **Automated smoke checks** (with the server running on port 3001):
 
@@ -59,7 +96,16 @@ cd backend
 npm run smoke
 ```
 
-Covers health, empty input, SSRF rejection on `127.0.0.1`, and honeypot rejection. End-to-end streaming still needs a valid `ANTHROPIC_API_KEY` and manual browser checks.
+Covers health, empty input, SSRF rejection on `127.0.0.1`, and honeypot rejection. End-to-end streaming still needs a valid `OPENAI_API_KEY` and manual browser checks.
+
+**Billing logic tests** (no Stripe network; run anytime):
+
+```bash
+cd backend
+npm test
+```
+
+From the **repository root** you can also run `npm test` or `npm run smoke` (they delegate to `backend/`).
 
 **Frontend**
 
@@ -89,9 +135,12 @@ Root `frontend`, framework Vite, output `dist`, set `VITE_API_URL` to the public
 - **Uploads:** PNG/JPEG/WebP only, magic-byte verification, **20MB × 10**, Multer field/part limits; files renamed to `upload-N.ext` server-side.
 - **Honeypot:** Hidden `hp` field must be empty.
 - **Errors:** Production uses generic client messages; stack traces and internals stay in logs only.
-- **Secrets:** Anthropic key server-only; never returned to the browser.
-- **Sharp** re-encodes images before Claude.
-- **Logs:** `analyze_request`, `analyze_success`, `analyze_failure`, `analyze_claude_timeout`, `analyze_honeypot_triggered`, `analyze_blocked_origin`, `html_fetch_failed`, etc.
+- **Secrets:** OpenAI key server-only; never returned to the browser.
+- **Sharp** re-encodes **uploaded** screenshots before the vision model; **harvested** site images are stored as downloaded (no recompression).
+- **Multi-page crawl:** **Shallow** / **Deep** runs a same-host BFS (internal `<a href>` links only), with parallel fetches (`CRAWL_FETCH_CONCURRENCY`). **Playwright** captures a **full-page PNG per crawled URL** into `snapshots/` inside the ZIP.
+- **Interaction crawl (heuristic):** On hub pages, Playwright **clicks** theme/demo/preview/template controls (up to `INTERACTION_THEME_CLICKS_PER_HUB` per hub), saves PNGs under **`snapshots/interaction/`**, and queues discovered same-host URLs for HTML fetch. If a **cart/checkout** URL exists in the crawl, it walks **Continue / Next / Pay**-style controls up to `INTERACTION_CHECKOUT_MAX_STEPS` with per-step screenshots. This is **best-effort** (selectors and labels vary by vendor; it is not a guarantee for every theme store or payment flow). Disable with `ENABLE_INTERACTION_CRAWL=false`.
+- **Assets bundle:** `GET /api/site-images/:token` returns **`site-assets.zip`** (images + `snapshots/` + `_urls.txt` + `_snapshots.txt`). Set `ENABLE_PAGE_SCREENSHOTS=false` to skip Chromium. Pure SPAs may still hide links from HTML-only crawls.
+- **Logs:** `analyze_request`, `analyze_success`, `analyze_failure`, `analyze_openai_timeout`, `analyze_honeypot_triggered`, `analyze_blocked_origin`, `html_fetch_failed`, etc.
 
 ## License
 

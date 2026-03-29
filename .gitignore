@@ -4,3 +4,4 @@ backend/.env
 .env
 *.log
 .DS_Store
+backend/data/
