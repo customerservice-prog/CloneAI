@@ -1,15 +1,53 @@
 const isProd = import.meta.env.PROD;
 const envBase = import.meta.env.VITE_API_URL?.trim();
+const sameOriginApi = import.meta.env.VITE_SAME_ORIGIN_API === 'true';
+
+function readMetaApiOrigin() {
+  try {
+    const m = document.querySelector('meta[name="cloneai-api-origin"]');
+    return (m?.getAttribute('content') || '').trim().replace(/\/$/, '');
+  } catch {
+    return '';
+  }
+}
+
 const API_BASE = (() => {
-  if (isProd && !envBase) return '';
-  return (envBase || 'http://localhost:3001').replace(/\/$/, '');
+  try {
+    const winO =
+      typeof window !== 'undefined' ? String(window.__CLONEAI_API_BASE__ || '').trim().replace(/\/$/, '') : '';
+    const meta = readMetaApiOrigin();
+    let raw = winO || envBase || meta;
+    if (!raw && isProd && sameOriginApi && typeof window !== 'undefined') {
+      raw = window.location.origin.replace(/\/$/, '');
+    }
+    if (isProd && !raw) return '';
+    return (raw || 'http://localhost:3001').replace(/\/$/, '');
+  } catch {
+    return isProd ? '' : 'http://localhost:3001';
+  }
 })();
 const API_ANALYZE = API_BASE ? `${API_BASE}/api/analyze` : '';
+const API_ANALYZE_REVISE = API_BASE ? `${API_BASE}/api/analyze-revise` : '';
 const API_BILLING_STATUS = API_BASE ? `${API_BASE}/api/billing/status` : '';
 const API_BILLING_CHECKOUT = API_BASE ? `${API_BASE}/api/billing/checkout` : '';
+const API_BILLING_CLAIM = API_BASE ? `${API_BASE}/api/billing/claim-account` : '';
+const API_AUTH_LOGIN = API_BASE ? `${API_BASE}/api/auth/login` : '';
 const API_ANALYTICS_TRACK = API_BASE ? `${API_BASE}/api/analytics/track` : '';
+const API_LEADS_DFY = API_BASE ? `${API_BASE}/api/leads/dfy` : '';
 const PUBLIC_APP_FALLBACK = (import.meta.env.VITE_PUBLIC_APP_URL || '').trim().replace(/\/$/, '');
 const INGRESS_KEY = import.meta.env.VITE_CLONEAI_KEY?.trim();
+const TURNSTILE_SITE_KEY = import.meta.env.VITE_TURNSTILE_SITE_KEY?.trim();
+const LS_BRIEF_OK = 'cloneai_brief_ok';
+const LS_PREF_STRIP_WM = 'cloneai_pref_strip_wm';
+const LS_PREF_TRIM_IMG_BG = 'cloneai_pref_trim_img_bg';
+const LS_PREF_ASSET_HARVEST = 'cloneai_pref_asset_harvest';
+const LS_PREF_CLIENT_DELIVERY = 'cloneai_pref_client_delivery';
+const LS_PREF_SERVICE_PKG = 'cloneai_pref_service_pkg';
+const WATERMARK_FOOTER = '\n\n---\n\n*Generated with CloneAI — upgrade to remove watermark.*';
+
+/** @type {string | null} */
+let turnstileWidgetId = null;
+let turnstileToken = '';
 
 /** @type {{ plan: string | null, billingEnabled: boolean, isFreePlan: boolean, appOrigin: string | null } | null} */
 let lastStreamBilling = null;
@@ -22,6 +60,20 @@ const billingCache = {
   remaining: 1,
 };
 
+let billingStatusRequestId = 0;
+let planNoticeAutoHideTimer = null;
+
+/** Throttle repeated “fix your config” toasts so the header can stay minimal. */
+const CONFIG_TOAST_THROTTLE_MS = 22000;
+let lastConfigToastAt = 0;
+
+function showConfigToastOnce(text, duration = 4000) {
+  const now = Date.now();
+  if (now - lastConfigToastAt < CONFIG_TOAST_THROTTLE_MS) return;
+  lastConfigToastAt = now;
+  showToast(text, { variant: 'warning', duration });
+}
+
 const EXAMPLE_URLS = [
   'https://stripe.com',
   'https://vercel.com',
@@ -32,8 +84,8 @@ const LS_USER_ID = 'cloneai_user_id';
 const USER_UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-if (isProd && envBase && !/^https:\/\//i.test(envBase)) {
-  console.warn('[CloneAI] Use HTTPS for VITE_API_URL in production.');
+if (isProd && API_BASE && !/^https:\/\//i.test(API_BASE)) {
+  console.warn('[CloneAI] Use HTTPS for the API URL in production.');
 }
 
 function getCloneAiUserId() {
@@ -48,6 +100,17 @@ function getCloneAiUserId() {
   }
 }
 
+function setCloneAiUserId(id) {
+  const s = String(id || '').trim().toLowerCase();
+  if (!USER_UUID_RE.test(s)) return false;
+  try {
+    localStorage.setItem(LS_USER_ID, s);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function analyzeFetchHeaders() {
   const headers = { 'X-CloneAI-User-Id': getCloneAiUserId() };
   if (INGRESS_KEY) headers['X-CloneAI-Key'] = INGRESS_KEY;
@@ -59,6 +122,10 @@ function billingJsonHeaders() {
     'Content-Type': 'application/json',
     ...analyzeFetchHeaders(),
   };
+}
+
+function planIsProOrPower(plan) {
+  return plan === 'pro' || plan === 'power';
 }
 
 function isLimitReachedPayload(body) {
@@ -83,6 +150,78 @@ function trackClientEvent(event, meta = {}) {
   }).catch(() => {});
 }
 
+function needsTurnstileUi() {
+  try {
+    return Boolean(TURNSTILE_SITE_KEY) && localStorage.getItem(LS_BRIEF_OK) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function loadTurnstileScript() {
+  return new Promise((resolve, reject) => {
+    if (window.turnstile) return resolve();
+    const s = document.createElement('script');
+    s.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+    s.async = true;
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error('Turnstile load failed'));
+    document.head.appendChild(s);
+  });
+}
+
+async function ensureTurnstileMounted() {
+  if (!TURNSTILE_SITE_KEY) return;
+  if (!needsTurnstileUi()) {
+    $('#turnstile-wrap')?.setAttribute('hidden', '');
+    $('#turnstile-hint')?.setAttribute('hidden', '');
+    return;
+  }
+  const wrap = $('#turnstile-wrap');
+  const hint = $('#turnstile-hint');
+  if (!wrap) return;
+  wrap.removeAttribute('hidden');
+  hint?.removeAttribute('hidden');
+  try {
+    await loadTurnstileScript();
+  } catch {
+    return;
+  }
+  if (!window.turnstile) return;
+  if (turnstileWidgetId != null) {
+    try {
+      window.turnstile.remove(turnstileWidgetId);
+    } catch {
+      /* ignore */
+    }
+    turnstileWidgetId = null;
+  }
+  turnstileToken = '';
+  turnstileWidgetId = window.turnstile.render(wrap, {
+    sitekey: TURNSTILE_SITE_KEY,
+    callback: (token) => {
+      turnstileToken = token;
+    },
+    'expired-callback': () => {
+      turnstileToken = '';
+    },
+    'error-callback': () => {
+      turnstileToken = '';
+    },
+  });
+}
+
+function resetTurnstileAfterRun() {
+  turnstileToken = '';
+  if (window.turnstile?.reset && turnstileWidgetId != null) {
+    try {
+      window.turnstile.reset(turnstileWidgetId);
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
 function clearBillingModalOpen() {
   const p = $('#modal-pricing');
   const w = $('#modal-paywall');
@@ -91,11 +230,21 @@ function clearBillingModalOpen() {
   }
 }
 
+function updatePricingCheckoutHint() {
+  if (!API_BILLING_CHECKOUT) {
+    showConfigToastOnce(
+      'Live checkout needs an API URL: set VITE_API_URL (or VITE_SAME_ORIGIN_API / cloneai-api-origin meta / __CLONEAI_API_BASE__).',
+      4500
+    );
+  }
+}
+
 function openPricingModal(source = 'modal') {
   trackClientEvent('upgrade_clicked', { source });
   $('#modal-paywall')?.setAttribute('hidden', '');
   $('#modal-pricing')?.removeAttribute('hidden');
   document.body.classList.add('paywall-open');
+  updatePricingCheckoutHint();
 }
 
 function closePricingModal() {
@@ -108,12 +257,13 @@ function openPaywallModal(limitBody) {
   const modal = $('#modal-paywall');
   const detail = $('#paywall-detail');
   if (!modal || !detail) return;
+  showToast('Run limit reached — pick a plan or an extra run to continue.', { variant: 'warning', duration: 3600 });
   if (isLimitReachedPayload(limitBody)) {
     const plan = (limitBody.plan || 'current').toString();
     detail.textContent = `You’ve used ${limitBody.used} of ${limitBody.limit} analyses on your ${plan} plan. Upgrade or buy one extra run ($3) to continue.`;
   } else {
     detail.textContent =
-      'Upgrade in one click to keep generating briefs — or grab a single extra run.';
+      'Upgrade in one click to keep running full analyses — or grab a single extra run.';
   }
   $('#modal-pricing')?.setAttribute('hidden', '');
   modal.removeAttribute('hidden');
@@ -130,28 +280,60 @@ async function refreshBillingStatus() {
   const usageEl = $('#header-usage');
   const urgentEl = $('#header-usage-urgent');
   const upBtn = $('#header-upgrade-btn');
+  const loginBtn = $('#header-login-btn');
+  const syncLoginBtn = (visible) => {
+    if (loginBtn) loginBtn.classList.toggle('hidden', !visible);
+  };
   if (!usageEl || !upBtn || !usageWrap) return;
+  const reqId = ++billingStatusRequestId;
   try {
     if (!API_BILLING_STATUS) {
       billingCache.enabled = false;
       billingCache.plan = 'guest';
       usageWrap.classList.remove('hidden');
-      usageEl.textContent = 'Runs: not tracked (set billing on the API for limits)';
+      usageEl.textContent = 'Runs: not synced';
+      showConfigToastOnce(
+        'Connect the API (VITE_API_URL or same-origin / meta) to show live run limits and checkout.',
+        4200
+      );
       urgentEl?.classList.add('hidden');
-      upBtn.classList.add('hidden');
+      upBtn.classList.remove('hidden');
+      upBtn.textContent = 'Plans';
+      syncLoginBtn(false);
       updatePlanGatedControls();
       updateExportGatedControls();
       return;
     }
     const res = await fetch(API_BILLING_STATUS, { headers: analyzeFetchHeaders() });
+    if (reqId !== billingStatusRequestId) return;
     const data = await res.json().catch(() => ({}));
+    if (reqId !== billingStatusRequestId) return;
+    if (!res.ok || typeof data.enabled !== 'boolean') {
+      billingCache.enabled = false;
+      billingCache.plan = 'guest';
+      usageWrap.classList.remove('hidden');
+      usageEl.textContent = 'Runs: not synced';
+      showConfigToastOnce(
+        'Could not load run balance — check API URL, VITE_CLONEAI_KEY, and CORS_ORIGINS.',
+        4200
+      );
+      urgentEl?.classList.add('hidden');
+      upBtn.classList.remove('hidden');
+      upBtn.textContent = 'Plans';
+      syncLoginBtn(false);
+      updatePlanGatedControls();
+      updateExportGatedControls();
+      return;
+    }
     if (!data.enabled) {
       billingCache.enabled = false;
       billingCache.plan = 'guest';
       usageWrap.classList.remove('hidden');
       usageEl.textContent = 'Runs: unlimited (billing off on server)';
       urgentEl?.classList.add('hidden');
-      upBtn.classList.add('hidden');
+      upBtn.classList.remove('hidden');
+      upBtn.textContent = 'Plans';
+      syncLoginBtn(false);
       updatePlanGatedControls();
       updateExportGatedControls();
       return;
@@ -164,15 +346,23 @@ async function refreshBillingStatus() {
 
     usageWrap.classList.remove('hidden');
     upBtn.classList.remove('hidden');
+    syncLoginBtn(true);
     const planLabel =
-      data.plan === 'free' ? 'Free' : data.plan === 'starter' ? 'Starter' : data.plan === 'pro' ? 'Pro' : data.plan;
-    let line = `${data.used} / ${data.limit} runs used`;
-    line += data.plan === 'free' ? ' (lifetime)' : ' this month';
-    if (data.bonusRuns > 0) line += ` · +${data.bonusRuns} extra`;
-    usageEl.textContent = `${planLabel} · ${line}`;
-
-    const lim = Number(data.limit) || 1;
+      data.plan === 'free'
+        ? 'Free'
+        : data.plan === 'starter'
+          ? 'Starter'
+          : data.plan === 'pro'
+            ? 'Pro'
+            : data.plan === 'power'
+              ? 'Power'
+              : data.plan;
     const used = Number(data.used) || 0;
+    const lim = Number(data.limit) || 1;
+    let suffix = data.plan === 'free' ? 'lifetime' : 'this month';
+    if (data.bonusRuns > 0) suffix += ` · +${data.bonusRuns} bonus`;
+    usageEl.innerHTML = `<strong>${used} / ${lim}</strong> runs used · ${escapeHtml(planLabel)} <span style="opacity:.85">(${suffix})</span>`;
+
     const ratio = lim > 0 ? used / lim : 0;
     if (urgentEl) {
       const near = ratio >= 0.8 && (data.remaining === undefined || Number(data.remaining) <= Math.ceil(lim * 0.25));
@@ -184,10 +374,20 @@ async function refreshBillingStatus() {
     updatePlanGatedControls();
     updateExportGatedControls();
   } catch {
+    if (reqId !== billingStatusRequestId) return;
     billingCache.enabled = false;
-    usageWrap.classList.add('hidden');
+    billingCache.plan = 'guest';
+    usageWrap.classList.remove('hidden');
+    usageEl.textContent = 'Runs: not synced';
+    showConfigToastOnce(
+      'Could not load run balance — check API URL, VITE_CLONEAI_KEY, and CORS.',
+      4200
+    );
     urgentEl?.classList.add('hidden');
-    upBtn.classList.add('hidden');
+    upBtn.classList.remove('hidden');
+    upBtn.textContent = 'Plans';
+    syncLoginBtn(false);
+    updatePlanGatedControls();
     updateExportGatedControls();
   }
 }
@@ -212,6 +412,7 @@ function depthPillLocked(pillDepth) {
 }
 
 function updatePlanGatedControls() {
+  const hintDepth = $('#plan-gate-depth-hint');
   $$('.depth-pill').forEach((pill) => {
     const d = pill.dataset.depth;
     const locked = depthPillLocked(d);
@@ -219,24 +420,85 @@ function updatePlanGatedControls() {
     pill.disabled = locked;
   });
 
+  if (hintDepth) {
+    if (!billingCache.enabled || billingCache.plan === 'guest') {
+      hintDepth.textContent = '';
+      hintDepth.classList.add('hidden');
+    } else if (billingCache.plan === 'free') {
+      hintDepth.textContent =
+        'Free: one homepage scan. Upgrade for multi-page crawls and more runs.';
+      hintDepth.classList.remove('hidden');
+    } else if (billingCache.plan === 'starter') {
+      hintDepth.textContent =
+        'Starter: up to ~25 pages. Deep crawl and URL+images combo need Pro or Power.';
+      hintDepth.classList.remove('hidden');
+    } else {
+      hintDepth.textContent = '';
+      hintDepth.classList.add('hidden');
+    }
+  }
+
   const bothTab = $('.tab[data-tab="both"]');
+  const bothBadge = $('#tab-both-badge');
   if (bothTab) {
-    const lockBoth = billingCache.enabled && billingCache.plan === 'free';
+    const lockBoth =
+      billingCache.enabled && (billingCache.plan === 'free' || billingCache.plan === 'starter');
     bothTab.classList.toggle('tab-locked', lockBoth);
     bothTab.disabled = lockBoth;
     if (lockBoth && activeTab === 'both') setTab('url');
+    if (bothBadge) bothBadge.hidden = !lockBoth;
   }
+}
+
+function updateStickyUpgradeVisibility() {
+  const su = $('#sticky-upgrade-btn');
+  if (!su) return;
+  const show =
+    billingCache.enabled && !planIsProOrPower(billingCache.plan) && billingCache.plan !== 'guest';
+  su.hidden = !show;
+}
+
+function updateExportGatedControls() {
+  const setLocked = (el, locked, title) => {
+    if (!el) return;
+    el.disabled = locked;
+    el.classList.toggle('btn-export-locked', locked);
+    el.title = locked ? title || 'Upgrade to unlock' : '';
+  };
+
+  if (!billingCache.enabled || billingCache.plan === 'guest') {
+    setLocked($('#download-txt-btn'), false, '');
+    setLocked($('#download-pdf-btn'), false, '');
+    setLocked($('#copy-cursor-prompt-btn'), false, '');
+    updateStickyUpgradeVisibility();
+    return;
+  }
+
+  const p = billingCache.plan;
+  if (p === 'free') {
+    setLocked($('#download-txt-btn'), true, 'Starter includes .txt download.');
+    setLocked($('#download-pdf-btn'), true, 'PDF export is included with Pro or Power.');
+    setLocked($('#copy-cursor-prompt-btn'), true, 'Cursor handoff is included with Pro or Power.');
+  } else if (p === 'starter') {
+    setLocked($('#download-txt-btn'), false, '');
+    setLocked($('#download-pdf-btn'), true, 'PDF export is included with Pro or Power.');
+    setLocked($('#copy-cursor-prompt-btn'), true, 'Cursor handoff is included with Pro or Power.');
+  } else {
+    setLocked($('#download-txt-btn'), false, '');
+    setLocked($('#download-pdf-btn'), false, '');
+    setLocked($('#copy-cursor-prompt-btn'), false, '');
+  }
+  updateStickyUpgradeVisibility();
 }
 
 function updateProgressUpsell() {
   const el = $('#progress-upsell');
   if (!el) return;
   const inProgress = $('#progress-section') && !$('#progress-section').hidden;
-  const limited = depth !== 'deep';
   const show =
     inProgress &&
-    limited &&
-    (!billingCache.enabled || (billingCache.plan !== 'pro' && billingCache.plan !== 'guest'));
+    billingCache.enabled &&
+    (billingCache.plan === 'free' || billingCache.plan === 'starter');
   el.hidden = !show;
 }
 
@@ -247,26 +509,84 @@ function updatePostResultUpsell() {
   const show =
     visible &&
     billingCache.enabled &&
-    billingCache.plan !== 'pro' &&
+    !planIsProOrPower(billingCache.plan) &&
     fullBriefText.trim().length > 0;
   el.hidden = !show;
+}
+
+function loadOutputPrefs() {
+  try {
+    const sw = localStorage.getItem(LS_PREF_STRIP_WM) === '1';
+    const tg = localStorage.getItem(LS_PREF_TRIM_IMG_BG) === '1';
+    const cd = localStorage.getItem(LS_PREF_CLIENT_DELIVERY) === '1';
+    const ah = localStorage.getItem(LS_PREF_ASSET_HARVEST) === '1';
+    const pkg = localStorage.getItem(LS_PREF_SERVICE_PKG) || '';
+    const elSw = $('#pref-strip-watermarks');
+    const elTg = $('#pref-remove-image-bg');
+    const elAh = $('#asset-harvest-toggle');
+    const elCd = $('#pref-client-delivery');
+    const elPkg = $('#service-package-select');
+    if (elSw) elSw.checked = sw;
+    if (elTg) elTg.checked = tg;
+    if (elAh) elAh.checked = ah;
+    if (elCd) elCd.checked = cd;
+    if (elPkg && ['', 'basic', 'standard', 'premium'].includes(pkg)) elPkg.value = pkg;
+  } catch {
+    /* ignore */
+  }
+}
+
+function persistOutputPrefs() {
+  try {
+    if ($('#pref-strip-watermarks')?.checked) localStorage.setItem(LS_PREF_STRIP_WM, '1');
+    else localStorage.removeItem(LS_PREF_STRIP_WM);
+    if ($('#pref-remove-image-bg')?.checked) localStorage.setItem(LS_PREF_TRIM_IMG_BG, '1');
+    else localStorage.removeItem(LS_PREF_TRIM_IMG_BG);
+    if ($('#asset-harvest-toggle')?.checked) localStorage.setItem(LS_PREF_ASSET_HARVEST, '1');
+    else localStorage.removeItem(LS_PREF_ASSET_HARVEST);
+    if ($('#pref-client-delivery')?.checked) localStorage.setItem(LS_PREF_CLIENT_DELIVERY, '1');
+    else localStorage.removeItem(LS_PREF_CLIENT_DELIVERY);
+    const pv = ($('#service-package-select')?.value || '').trim();
+    if (pv && ['basic', 'standard', 'premium'].includes(pv)) localStorage.setItem(LS_PREF_SERVICE_PKG, pv);
+    else localStorage.removeItem(LS_PREF_SERVICE_PKG);
+  } catch {
+    /* ignore */
+  }
+}
+
+function applyStripWatermarkPreferenceToBrief() {
+  if (!$('#pref-strip-watermarks')?.checked || !fullBriefText.trim()) return;
+  if (fullBriefText.endsWith(WATERMARK_FOOTER)) {
+    fullBriefText = fullBriefText.slice(0, -WATERMARK_FOOTER.length);
+  } else {
+    fullBriefText = fullBriefText.replace(
+      /\r?\n\r?\n---\r?\n\r?\n\*Generated with CloneAI — upgrade to remove watermark\.\*\s*$/m,
+      ''
+    );
+  }
+  if ($('#results-section') && !$('#results-section').hidden) {
+    $('#summary-content').innerHTML = renderMarkdown(fullBriefText);
+  }
 }
 
 function updateReportChrome() {
   const wm = $('#report-watermark');
   const box = $('#summary-box');
-  const freeFmt = billingCache.enabled && billingCache.plan === 'free';
+  const stripWm = $('#pref-strip-watermarks')?.checked;
+  const freeFmt = billingCache.enabled && billingCache.plan === 'free' && !stripWm;
   if (wm) wm.hidden = !freeFmt;
   if (box) {
     box.classList.toggle('summary-box-free', freeFmt);
-    box.classList.toggle('summary-box-pro', billingCache.enabled && billingCache.plan === 'pro');
+    box.classList.toggle('summary-box-pro', billingCache.enabled && planIsProOrPower(billingCache.plan));
   }
   const linkInput = $('#report-app-link');
   if (linkInput) {
     try {
-      linkInput.value = `${window.location.origin}${window.location.pathname || '/'}`;
+      linkInput.value =
+        PUBLIC_APP_FALLBACK ||
+        `${window.location.origin}${window.location.pathname || '/'}`;
     } catch {
-      linkInput.value = '';
+      linkInput.value = PUBLIC_APP_FALLBACK || '';
     }
   }
 }
@@ -296,7 +616,7 @@ function buildTryAnotherChips() {
 
 async function startBillingCheckout(product, source = 'ui') {
   if (!API_BILLING_CHECKOUT) {
-    alert('API URL is not configured.');
+    updatePricingCheckoutHint();
     return;
   }
   trackClientEvent('checkout_started', { product: String(product), source: String(source || 'ui') });
@@ -309,44 +629,132 @@ async function startBillingCheckout(product, source = 'ui') {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      alert(data.error || 'Could not start checkout. Try again.');
+      const errText =
+        data.error ||
+        (res.status === 403 ? 'Access denied (check VITE_CLONEAI_KEY vs CLONEAI_INGRESS_KEY).' : null) ||
+        'Could not start checkout. Try again.';
+      showToast(String(errText), { variant: 'error', duration: 5200 });
       return;
     }
     if (data.url) {
       window.location.href = data.url;
       return;
     }
-    alert('Checkout did not return a redirect URL.');
+    showToast('Checkout did not return a redirect URL.', { variant: 'error', duration: 4800 });
   } catch (e) {
-    alert(e.message || 'Checkout failed.');
+    showToast(e.message || 'Checkout failed — check API URL and CORS_ORIGINS.', {
+      variant: 'error',
+      duration: 5200,
+    });
+  }
+}
+
+function stripCheckoutQueryParams(url) {
+  url.searchParams.delete('checkout');
+  url.searchParams.delete('kind');
+  url.searchParams.delete('plan');
+  url.searchParams.delete('session_id');
+}
+
+function openCredentialsModal(login, password) {
+  const modal = $('#modal-credentials');
+  const loginEl = $('#credentials-login-field');
+  const passEl = $('#credentials-password-field');
+  if (!modal || !loginEl || !passEl) return;
+  loginEl.value = login || '';
+  passEl.value = password || '';
+  modal.removeAttribute('hidden');
+  document.body.classList.add('paywall-open');
+}
+
+function closeCredentialsModal() {
+  $('#modal-credentials')?.setAttribute('hidden', '');
+  const p = $('#credentials-password-field');
+  if (p) p.value = '';
+  clearBillingModalOpen();
+}
+
+function openLoginModal() {
+  const modal = $('#modal-login');
+  if (!modal) return;
+  modal.removeAttribute('hidden');
+  document.body.classList.add('paywall-open');
+  $('#login-form')?.querySelector('input[name="email"]')?.focus();
+}
+
+function closeLoginModal() {
+  $('#modal-login')?.setAttribute('hidden', '');
+  clearBillingModalOpen();
+}
+
+async function tryClaimCheckoutAccount(sessionId) {
+  if (!API_BILLING_CLAIM) {
+    showToast('Account setup needs API URL — your plan will sync when the server is reachable.');
+    await refreshBillingStatus();
+    return;
+  }
+  try {
+    const res = await fetch(API_BILLING_CLAIM, {
+      method: 'POST',
+      headers: billingJsonHeaders(),
+      body: JSON.stringify({ sessionId: String(sessionId || '').trim() }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      if (res.status === 409) {
+        showToast(String(data.error || 'Plan still updating — retry in a moment.'));
+      } else {
+        showToast(String(data.error || 'Could not finish account setup.'));
+      }
+      await refreshBillingStatus();
+      return;
+    }
+    if (data.alreadyDelivered) {
+      showToast('Login was already created for this browser — use Log in with your email.');
+      await refreshBillingStatus();
+      return;
+    }
+    if (data.login && data.password) {
+      openCredentialsModal(data.login, data.password);
+    }
+    await refreshBillingStatus();
+  } catch {
+    showToast('Network error finishing account setup.');
+    await refreshBillingStatus();
   }
 }
 
 function handleCheckoutReturnQuery() {
-  try {
-    const params = new URLSearchParams(window.location.search);
-    if (params.get('checkout') === 'success') {
-      trackClientEvent('payment_completed', {
-        plan: params.get('plan') || '',
-        kind: params.get('kind') || '',
-      });
-      showToast('Payment received — refreshing your plan…');
-      refreshBillingStatus();
-      const url = new URL(window.location.href);
-      url.searchParams.delete('checkout');
-      url.searchParams.delete('kind');
-      url.searchParams.delete('plan');
-      window.history.replaceState({}, '', url.pathname + url.search);
+  void (async () => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      if (params.get('checkout') === 'success') {
+        trackClientEvent('payment_completed', {
+          plan: params.get('plan') || '',
+          kind: params.get('kind') || '',
+        });
+        const sessionId = params.get('session_id');
+        const plan = (params.get('plan') || '').toLowerCase();
+        if (sessionId && (plan === 'starter' || plan === 'pro' || plan === 'power')) {
+          await tryClaimCheckoutAccount(sessionId);
+        } else {
+          showToast('Payment received — refreshing your plan…');
+          await refreshBillingStatus();
+        }
+        const url = new URL(window.location.href);
+        stripCheckoutQueryParams(url);
+        window.history.replaceState({}, '', url.pathname + url.search);
+      }
+      if (params.get('checkout') === 'cancel') {
+        showToast('Checkout canceled');
+        const url = new URL(window.location.href);
+        stripCheckoutQueryParams(url);
+        window.history.replaceState({}, '', url.pathname + url.search);
+      }
+    } catch {
+      /* ignore */
     }
-    if (params.get('checkout') === 'cancel') {
-      showToast('Checkout canceled');
-      const url = new URL(window.location.href);
-      url.searchParams.delete('checkout');
-      window.history.replaceState({}, '', url.pathname + url.search);
-    }
-  } catch {
-    /* ignore */
-  }
+  })();
 }
 
 function clientUrlShapeOk(raw) {
@@ -414,7 +822,7 @@ const OPTION_DEFS = [
   {
     id: 'media',
     label: 'Images & Media',
-    desc: 'Dimensions, placement, alt text',
+    desc: 'Placement, alt text; ZIP harvests images from every crawled page (use multi-page depth for large catalogs)',
     defaultOn: true,
     depthWeight: 2,
   },
@@ -479,9 +887,9 @@ const AGENTS = [
   },
   {
     icon: '✍',
-    name: 'Brief Writer',
-    desc: 'Generating developer report (OpenAI)',
-    doneLine: '✓ Brief ready',
+    name: 'Report writer',
+    desc: 'Generating full markdown specification (OpenAI)',
+    doneLine: '✓ Report ready',
   },
 ];
 
@@ -605,6 +1013,17 @@ function extractMetrics(md) {
   return { issues, sections, words };
 }
 
+/** @returns {{ markdown: string } | null} */
+function extractReportSection12(md) {
+  const s = String(md || '');
+  const start = s.search(/^##\s*12\./m);
+  if (start === -1) return null;
+  const tail = s.slice(start);
+  const endRel = tail.search(/^##\s*13\./m);
+  const block = (endRel === -1 ? tail : tail.slice(0, endRel)).trim();
+  return block ? { markdown: block } : null;
+}
+
 function computeCoverage(md) {
   if (!md.trim()) return 0;
   let hit = 0;
@@ -698,7 +1117,9 @@ function applyMetaScraper(scraper) {
   }
   if (scraper?.deepWarning) parts.push(scraper.deepWarning);
   if (scraper?.modelHtmlTruncated) {
-    parts.push('HTML was truncated for the AI context window; the brief still uses the full page for image harvesting where possible.');
+    parts.push(
+      'HTML was truncated for the AI context window; image harvesting still uses the full crawled HTML per page (not the shortened model view).'
+    );
   }
   if (scraper?.crawlPageCount > 1) {
     parts.push(
@@ -712,12 +1133,33 @@ function applyMetaScraper(scraper) {
       `Playwright interaction crawl added ${scraper.interactionSnapshots} extra PNG(s) under snapshots/interaction/ (theme clicks and/or checkout steps).`
     );
   }
+  if (scraper?.crawlPartialMessage) {
+    parts.push(scraper.crawlPartialMessage);
+  }
+  if (scraper?.assetHarvestMode) {
+    parts.push('Deep Asset Harvest was on: crawl prioritized media discovery; the AI saw a trimmed HTML slice per page.');
+  }
+  const dup = Number(scraper?.harvestContentDuplicatesSkipped) || 0;
+  if (dup > 0) {
+    parts.push(`${dup} duplicate image file(s) skipped (same bytes as an earlier URL).`);
+  }
   if (parts.length) {
     el.textContent = parts.join(' ');
     el.hidden = false;
   } else {
     el.textContent = '';
     el.hidden = true;
+  }
+
+  const hEl = $('#harvest-live-stats');
+  if (hEl && (scraper?.crawlPageCount != null || scraper?.imagesDiscoveredCount != null)) {
+    const p = scraper.crawlPageCount != null ? scraper.crawlPageCount : '—';
+    const im = scraper.imagesDiscoveredCount != null ? scraper.imagesDiscoveredCount : null;
+    hEl.hidden = false;
+    hEl.textContent =
+      im != null
+        ? `Crawl: ${p} page(s) · ${im} unique image URL(s) discovered (ZIP count may be lower after plan/server caps).`
+        : `Crawl: ${p} page(s).`;
   }
 }
 
@@ -736,14 +1178,17 @@ function humanizeError(status, rawMessage, body) {
     if (/misconfiguration|OPENAI_API_KEY|not set/i.test(msg)) {
       return 'The analysis service is not configured (API key). Contact the site administrator.';
     }
-    return msg || 'Server error. Please retry in a moment.';
+    return (
+      msg ||
+      'Server error. Please retry in a moment. If this keeps happening, upgrading can include higher limits and deeper crawls for more reliable runs.'
+    );
   }
   if (msg) return msg;
   if (body?.error) return String(body.error);
-  return `Something went wrong (${status || 'network'}). Tap Re-run to retry.`;
+  return `Something went wrong (${status || 'network'}). Try again, or upgrade for deeper scans and higher limits if you hit caps often.`;
 }
 
-const CTA_IDLE = 'Generate Developer Brief';
+const CTA_IDLE = 'Generate Developer Blueprint';
 
 function setAnalyzeLoading(on) {
   const btn = $('#analyze-btn');
@@ -752,7 +1197,7 @@ function setAnalyzeLoading(on) {
   btn.classList.toggle('is-loading', on);
   btn.disabled = on;
   btn.setAttribute('aria-busy', on ? 'true' : 'false');
-  label.textContent = on ? 'Analyzing & building your brief…' : CTA_IDLE;
+  label.textContent = on ? 'Crawling, harvesting assets & writing your blueprint…' : CTA_IDLE;
 }
 
 function optionDepthScore() {
@@ -775,7 +1220,7 @@ function updateDepthEstimate() {
     sub = 'turn on at least one area';
   } else if (score <= 10) {
     tier = 'Focused';
-    sub = 'lighter brief, faster to read';
+    sub = 'lighter report, faster to read';
   } else if (score <= 22) {
     tier = 'Standard';
     sub = 'balanced detail for most rebuilds';
@@ -859,7 +1304,7 @@ function buildAgentList() {
         <span class="agent-name">${escapeHtml(a.name)}</span>
         <span class="agent-desc" data-agent-desc>${escapeHtml(a.desc)}</span>
       </div>
-      <span class="agent-status waiting" data-status>waiting</span>
+      <span class="agent-status waiting" data-status>⬜ Waiting</span>
     `;
     list.appendChild(li);
   });
@@ -874,15 +1319,15 @@ function setAgentStatus(index, status) {
   row.classList.toggle('agent-row-active', status === 'running');
   badge.className = `agent-status ${status}`;
   if (status === 'running') {
-    badge.innerHTML = '<span class="spin">⟳</span> working…';
+    badge.innerHTML = '<span class="spin">⏳</span> Running…';
     if (descEl && agent) descEl.textContent = agent.desc;
   } else if (status === 'done') {
-    badge.textContent = agent?.doneLine || '✓ done';
+    badge.textContent = agent?.doneLine || '✔ Completed';
     if (descEl && agent) descEl.textContent = agent.desc;
   } else if (status === 'error') {
-    badge.textContent = '✗ error';
+    badge.textContent = '✗ Error';
   } else {
-    badge.textContent = 'waiting';
+    badge.textContent = '⬜ Waiting';
     if (descEl && agent) descEl.textContent = agent.desc;
   }
 }
@@ -904,7 +1349,7 @@ function setStageLabel(index, phase, label) {
       stageEl.textContent = `Current: ${name}`;
     }
   } else if (phase === 'done' && index === 7) {
-    stageEl.textContent = 'Brief Writer complete';
+    stageEl.textContent = 'Report writer complete';
   } else if (phase === 'done') {
     stageEl.textContent = `Completed: ${label || AGENTS[index]?.name || `Step ${index + 1}`}`;
   } else if (phase === 'error') {
@@ -1035,8 +1480,12 @@ function setupDropzone(zoneId, fileInputId, thumbGridId, getList, setList) {
 }
 
 function setTab(tab) {
-  if (tab === 'both' && billingCache.enabled && billingCache.plan === 'free') {
-    showToast('URL + images together is on Starter and Pro');
+  if (
+    tab === 'both' &&
+    billingCache.enabled &&
+    (billingCache.plan === 'free' || billingCache.plan === 'starter')
+  ) {
+    showToast('URL + images together needs Pro or Power.', { variant: 'warning', duration: 3200 });
     openPricingModal('tab_both_locked');
     return;
   }
@@ -1064,18 +1513,26 @@ function setTab(tab) {
   updateFlowWizard();
 }
 
-function showToast(text = 'Copied to clipboard') {
+function showToast(text = 'Copied to clipboard', opts = {}) {
   const toast = $('#toast');
+  if (!toast) return;
+  const v = opts.variant;
+  const variant = v === 'error' ? 'error' : v === 'warning' ? 'warning' : 'default';
+  const defaultDur = variant === 'error' ? 5200 : variant === 'warning' ? 3200 : 2200;
+  const duration = typeof opts.duration === 'number' ? opts.duration : defaultDur;
   toast.textContent = text;
   toast.hidden = false;
+  toast.classList.toggle('toast-error', variant === 'error');
+  toast.classList.toggle('toast-warn', variant === 'warning');
   requestAnimationFrame(() => toast.classList.add('show'));
   clearTimeout(showToast._t);
   showToast._t = setTimeout(() => {
     toast.classList.remove('show');
     setTimeout(() => {
       toast.hidden = true;
+      toast.classList.remove('toast-error', 'toast-warn');
     }, 280);
-  }, 2200);
+  }, duration);
 }
 
 async function downloadSiteImagesZip() {
@@ -1107,7 +1564,7 @@ async function downloadSiteImagesZip() {
     URL.revokeObjectURL(a.href);
     showToast('Saved site-assets.zip');
   } catch (e) {
-    alert(e.message || 'Download failed');
+    showToast(e.message || 'Download failed', { variant: 'error', duration: 4000 });
   } finally {
     if (main) main.disabled = false;
     if (sticky) sticky.disabled = false;
@@ -1141,19 +1598,20 @@ async function writeClipboard(text) {
 
 function buildCursorPrompt() {
   const brief = fullBriefText.trim();
-  return `You are a senior front-end engineer. Rebuild or refactor a website using the following developer brief as the single source of truth. Follow structure, sections, and issue list; only ask questions if the brief is ambiguous.
+  return `You are a senior front-end engineer. Rebuild or refactor a website using the following site analysis specification as the single source of truth. Follow structure, sections, and issue list; only ask questions if the spec is ambiguous.
 
 ---
-DEVELOPER BRIEF (Markdown)
+SITE ANALYSIS (Markdown)
 ---
 
 ${brief}
 
 ---
-End of brief. Start with a short implementation plan, then proceed step by step.`;
+End of specification. Start with a short implementation plan, then proceed step by step.`;
 }
 
 async function copyBrief() {
+  trackClientEvent('copy_report_clicked');
   const text = fullBriefText;
   if (!text) {
     showToast('Nothing to copy yet');
@@ -1163,7 +1621,40 @@ async function copyBrief() {
   showToast(ok ? 'Copied to clipboard' : 'Copy failed — select text manually');
 }
 
+async function shareReport() {
+  const text = fullBriefText.trim();
+  if (!text) {
+    showToast('Nothing to share yet');
+    return;
+  }
+  trackClientEvent('share_report_clicked');
+  const url =
+    PUBLIC_APP_FALLBACK || `${window.location.origin}${window.location.pathname || '/'}`;
+  const title = 'Website blueprint — CloneAI';
+  try {
+    if (navigator.share) {
+      await navigator.share({
+        title,
+        text: 'Generated with CloneAI — developer-ready site blueprint.',
+        url,
+      });
+      return;
+    }
+  } catch {
+    /* user cancelled or share failed */
+  }
+  const chunk = text.length > 12000 ? `${text.slice(0, 12000)}\n\n…(truncated)` : text;
+  const ok = await writeClipboard(`${title}\n${url}\n\n---\n\n${chunk}`);
+  showToast(ok ? 'Copied link + report text for sharing' : 'Copy failed — try Copy instead');
+}
+
 async function copyCursorPrompt() {
+  if (billingCache.enabled && billingCache.plan !== 'guest' && !planIsProOrPower(billingCache.plan)) {
+    showToast('Cursor handoff is included with Pro or Power.', { variant: 'warning', duration: 3200 });
+    openPricingModal('export_cursor');
+    return;
+  }
+  trackClientEvent('export_clicked', { format: 'cursor_prompt' });
   const text = buildCursorPrompt();
   if (!fullBriefText.trim()) {
     showToast('Nothing to copy yet');
@@ -1174,6 +1665,16 @@ async function copyCursorPrompt() {
 }
 
 function downloadBriefTxt() {
+  if (
+    billingCache.enabled &&
+    billingCache.plan !== 'guest' &&
+    billingCache.plan === 'free'
+  ) {
+    showToast('Upgrade to Starter to download .txt.', { variant: 'warning', duration: 3200 });
+    openPricingModal('export_txt');
+    return;
+  }
+  trackClientEvent('export_clicked', { format: 'txt' });
   const text = fullBriefText.trim();
   if (!text) {
     showToast('Nothing to download yet');
@@ -1182,16 +1683,22 @@ function downloadBriefTxt() {
   const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
-  a.download = 'developer-brief.txt';
+  a.download = 'site-analysis-report.txt';
   a.rel = 'noopener';
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(a.href);
-  showToast('Saved developer-brief.txt');
+  showToast('Saved site-analysis-report.txt');
 }
 
 function printBriefPdf() {
+  if (billingCache.enabled && billingCache.plan !== 'guest' && !planIsProOrPower(billingCache.plan)) {
+    showToast('PDF export is included with Pro or Power.', { variant: 'warning', duration: 3200 });
+    openPricingModal('export_pdf');
+    return;
+  }
+  trackClientEvent('export_clicked', { format: 'pdf' });
   const text = fullBriefText.trim();
   if (!text) {
     showToast('Nothing to print yet');
@@ -1203,13 +1710,13 @@ function printBriefPdf() {
     return;
   }
   const safe = escapeHtml(text);
-  w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"/><title>Developer brief</title>
+  w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"/><title>Site analysis report</title>
 <style>
 body{font-family:system-ui,-apple-system,sans-serif;padding:1.75rem;max-width:52rem;margin:0 auto;color:#111;line-height:1.5;font-size:11pt;}
 pre{white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,monospace;font-size:9.5pt;}
 h1{font-size:1.1rem;margin:0 0 1rem;}
 @media print{body{padding:0.5in}}
-</style></head><body><h1>CloneAI — Developer brief</h1><pre>${safe}</pre>
+</style></head><body><h1>CloneAI — Site analysis</h1><pre>${safe}</pre>
 <script>window.onload=function(){window.print();};<\/script></body></html>`);
   w.document.close();
 }
@@ -1273,19 +1780,44 @@ async function parseSseStream(response, { onText, signal } = {}) {
           if (banner) {
             banner.textContent = data.messages.join(' ');
             banner.hidden = false;
+            clearTimeout(planNoticeAutoHideTimer);
+            planNoticeAutoHideTimer = setTimeout(() => {
+              planNoticeAutoHideTimer = null;
+              banner.hidden = true;
+              banner.textContent = '';
+            }, 4200);
+          }
+        }
+        if (data.type === 'harvest_progress') {
+          const hEl = $('#harvest-live-stats');
+          if (hEl) {
+            hEl.hidden = false;
+            const pc = Number(data.pagesCrawled) || 0;
+            const ql = Number(data.queueLength) || 0;
+            hEl.textContent = `Live: ${pc} page(s) crawled · ${ql} link(s) queued`;
           }
         }
         if (data.type === 'stage') {
           applyStageEvent(data);
           if (data.phase === 'done' && typeof data.index === 'number' && data.index < 7) {
-            const slow = billingCache.enabled && billingCache.plan === 'pro' ? 1 : 1.45;
+            const slow = billingCache.enabled && planIsProOrPower(billingCache.plan) ? 1 : 1.45;
             const ms = Math.floor((320 + Math.random() * 220) * slow);
             await new Promise((r) => setTimeout(r, ms));
           }
         }
         if (data.type === 'meta') {
+          if (data.billing && typeof data.billing === 'object') {
+            lastStreamBilling = {
+              plan: data.billing.plan ?? null,
+              billingEnabled: Boolean(data.billing.billingEnabled),
+              isFreePlan: Boolean(data.billing.isFreePlan),
+              appOrigin: data.billing.appOrigin ? String(data.billing.appOrigin).trim() : null,
+            };
+          }
           if (data.scraper) applyMetaScraper(data.scraper);
           if (data.assets) applyAssetsMeta(data.assets);
+          const pp = $('#priority-processing-pill');
+          if (pp) pp.classList.toggle('hidden', !data.priorityQueue);
         }
         if (data.type === 'warning' && data.message) {
           fullBriefText += data.message;
@@ -1329,11 +1861,228 @@ function updateScorecard(md) {
   covEl.className = `metric-value ${cov >= 85 ? 'metric-green' : cov >= 55 ? 'metric-accent' : 'issue-mid'}`;
 }
 
+function openIssuesModal() {
+  const overlay = $('#modal-issues');
+  const body = $('#issues-modal-content');
+  if (!overlay || !body) return;
+  const sec = extractReportSection12(fullBriefText);
+  if (!sec) {
+    body.innerHTML =
+      '<p>No <strong>section 12</strong> block was found in this report. Scroll the full report below or re-run analysis.</p>';
+  } else {
+    body.innerHTML = renderMarkdown(sec.markdown);
+  }
+  overlay.removeAttribute('hidden');
+}
+
+function closeIssuesModal() {
+  $('#modal-issues')?.setAttribute('hidden', '');
+}
+
+function downloadIssuesListTxt() {
+  const sec = extractReportSection12(fullBriefText);
+  if (!sec?.markdown?.trim()) {
+    showToast('No issues section to download', { variant: 'warning', duration: 2800 });
+    return;
+  }
+  const blob = new Blob([`${sec.markdown}\n`], { type: 'text/plain;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'cloneai-section-12-issues.txt';
+  a.rel = 'noopener';
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(a.href);
+  showToast('Saved cloneai-section-12-issues.txt');
+}
+
+async function runReviseBrief() {
+  if (!API_ANALYZE_REVISE) {
+    showConfigToastOnce('Set VITE_API_URL to your API base URL in the host env and redeploy.', 4500);
+    return;
+  }
+  const backup = fullBriefText.trim();
+  if (backup.length < 80) {
+    showToast('Report is too short to revise.', { variant: 'warning', duration: 2800 });
+    return;
+  }
+  if (TURNSTILE_SITE_KEY && needsTurnstileUi()) {
+    await ensureTurnstileMounted();
+    if (!turnstileToken) {
+      showToast('Complete the verification below, then try again.', { variant: 'warning', duration: 3200 });
+      return;
+    }
+  }
+
+  const fixNote = ($('#issues-fix-note')?.value || '').trim();
+  closeIssuesModal();
+
+  if (analyzeAbort) analyzeAbort.abort();
+  analyzeAbort = new AbortController();
+  const { signal } = analyzeAbort;
+
+  $('#progress-section').hidden = false;
+  $('#results-section').hidden = true;
+  const planBanner = $('#mid-flow-plan-notice');
+  if (planBanner) {
+    planBanner.hidden = true;
+    planBanner.textContent = '';
+  }
+  $('#try-another-section')?.setAttribute('hidden', '');
+  $('#analysis-hint').hidden = true;
+  $('#analysis-hint').textContent = '';
+  fullBriefText = '';
+  displayIndex = 0;
+  streamActive = true;
+  $('#summary-content').innerHTML = '';
+  $('#type-cursor').classList.remove('hidden');
+  $('#progress-stage').textContent = 'Revising report…';
+  buildAgentList();
+  setProgress(4);
+  setAnalyzeLoading(true);
+
+  trackClientEvent('revise_started', { tab: activeTab });
+
+  try {
+    const res = await fetch(API_ANALYZE_REVISE, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...analyzeFetchHeaders(),
+      },
+      body: JSON.stringify({
+        priorBrief: backup,
+        fixNote,
+        hp: '',
+        cf_turnstile_response: turnstileToken || '',
+        promoCode: ($('#promo-code-input')?.value || '').trim(),
+      }),
+      signal,
+    });
+
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      if (res.status === 403 && body.error === 'LIMIT_REACHED') {
+        streamActive = false;
+        stopTypewriter();
+        $('#progress-section').hidden = true;
+        openPaywallModal(body);
+        fullBriefText = backup;
+        return;
+      }
+      if (res.status === 403 && isFeatureLockedPayload(body)) {
+        streamActive = false;
+        stopTypewriter();
+        $('#progress-section').hidden = true;
+        showToast(body.message || 'This action needs a paid plan.', { variant: 'warning', duration: 3400 });
+        openPricingModal('feature_locked');
+        fullBriefText = backup;
+        return;
+      }
+      if (res.status === 400 && body.error === 'MISSING_USER_ID') {
+        streamActive = false;
+        stopTypewriter();
+        $('#progress-section').hidden = true;
+        showToast('Session issue — refresh the page and try again.', { variant: 'warning', duration: 3800 });
+        fullBriefText = backup;
+        return;
+      }
+      if (
+        res.status === 400 &&
+        /verification|Human verification|Verification required/i.test(String(body.error || ''))
+      ) {
+        streamActive = false;
+        stopTypewriter();
+        $('#progress-section').hidden = true;
+        void ensureTurnstileMounted();
+        showToast(String(body.error || 'Verification required.'), { variant: 'warning', duration: 3400 });
+        fullBriefText = backup;
+        return;
+      }
+      throw new Error(humanizeError(res.status, body.error, body));
+    }
+
+    const ct = res.headers.get('content-type') || '';
+    if (!ct.includes('text/event-stream')) {
+      const body = await res.json().catch(() => ({}));
+      if (res.status === 403 && isLimitReachedPayload(body)) {
+        streamActive = false;
+        stopTypewriter();
+        $('#progress-section').hidden = true;
+        void refreshBillingStatus();
+        openPaywallModal(body);
+        fullBriefText = backup;
+        return;
+      }
+      throw new Error(humanizeError(res.status, body.error, body));
+    }
+
+    startTypewriter();
+    await parseSseStream(res, {
+      signal,
+      onText: () => {
+        bumpStreamProgress();
+        scrollSummaryIfNeeded();
+      },
+    });
+
+    streamActive = false;
+    const stripWm = $('#pref-strip-watermarks')?.checked;
+    if (billingCache.enabled && billingCache.plan === 'free' && !stripWm) {
+      fullBriefText += WATERMARK_FOOTER;
+    }
+    setProgress(100);
+    $('#progress-stage').textContent = 'Complete';
+
+    stopTypewriter();
+    while (displayIndex < fullBriefText.length) {
+      displayIndex = Math.min(fullBriefText.length, displayIndex + 20);
+      $('#summary-content').innerHTML = renderMarkdown(fullBriefText.slice(0, displayIndex));
+      scrollSummaryIfNeeded();
+      await new Promise((r) => requestAnimationFrame(r));
+    }
+    $('#summary-content').innerHTML = renderMarkdown(fullBriefText);
+    $('#type-cursor').classList.add('hidden');
+
+    updateScorecard(fullBriefText);
+
+    $('#progress-section').hidden = true;
+    $('#results-section').hidden = false;
+    await refreshBillingStatus();
+    resetTurnstileAfterRun();
+    void ensureTurnstileMounted();
+    trackClientEvent('revise_completed', { tab: activeTab });
+    updatePostResultUpsell();
+    updateReportChrome();
+    $('#try-another-section')?.removeAttribute('hidden');
+    showToast('Revised report ready — download .txt or PDF as usual.');
+  } catch (e) {
+    console.error(e);
+    streamActive = false;
+    stopTypewriter();
+    fullBriefText = backup;
+    let errMsg = e.name === 'AbortError' ? 'Revision cancelled.' : e.message || String(e);
+    if (/failed to fetch|networkerror|load failed/i.test(errMsg)) {
+      errMsg =
+        'Network error — check your connection and API URL (VITE_API_URL), then try Apply AI fixes again.';
+    }
+    showToast(errMsg, { variant: 'warning', duration: 4200 });
+    $('#progress-section').hidden = true;
+    $('#results-section').hidden = false;
+    $('#summary-content').innerHTML = renderMarkdown(fullBriefText);
+    $('#type-cursor').classList.add('hidden');
+    trackClientEvent('revise_failed', { message: String(errMsg || '').slice(0, 120) });
+  } finally {
+    setAnalyzeLoading(false);
+    updateFlowWizard();
+    updateProgressUpsell();
+  }
+}
+
 async function runAnalyze() {
   if (!API_ANALYZE) {
-    alert(
-      'Production configuration error: set VITE_API_URL to your API base URL in Vercel (or .env) and redeploy.'
-    );
+    showConfigToastOnce('Set VITE_API_URL to your API base URL in the host env and redeploy.', 4500);
     return;
   }
 
@@ -1342,16 +2091,24 @@ async function runAnalyze() {
   const url = getUrlValue();
   const files = getFilesForRequest();
   if (!url && !files.length) {
-    alert('Enter a URL and/or upload at least one image.');
+    showToast('Enter a URL and/or upload at least one image.', { variant: 'warning', duration: 2800 });
     return;
   }
   if (selectedOptions.size === 0) {
-    alert('Select at least one analysis option (or turn toggles back on).');
+    showToast('Select at least one analysis option (or turn toggles back on).', { variant: 'warning', duration: 2800 });
     return;
   }
   if (url && !clientUrlShapeOk(url)) {
-    alert('Enter a valid URL starting with http:// or https:// (or a domain like example.com).');
+    showToast('Enter a valid URL (http/https or a domain like example.com).', { variant: 'warning', duration: 3000 });
     return;
+  }
+
+  if (TURNSTILE_SITE_KEY && needsTurnstileUi()) {
+    await ensureTurnstileMounted();
+    if (!turnstileToken) {
+      showToast('Complete the verification below, then tap Generate again.', { variant: 'warning', duration: 3200 });
+      return;
+    }
   }
 
   if (analyzeAbort) analyzeAbort.abort();
@@ -1369,6 +2126,11 @@ async function runAnalyze() {
   updateProgressUpsell();
   $('#analysis-hint').hidden = true;
   $('#analysis-hint').textContent = '';
+  const hStat = $('#harvest-live-stats');
+  if (hStat) {
+    hStat.hidden = true;
+    hStat.textContent = '';
+  }
   syncZipButtons({});
   fullBriefText = '';
   displayIndex = 0;
@@ -1386,7 +2148,16 @@ async function runAnalyze() {
   form.append('depth', depth);
   form.append('options', JSON.stringify(opts));
   form.append('comparePair', $('#compare-pair')?.checked ? '1' : '0');
+  form.append('removeImageBackground', $('#pref-remove-image-bg')?.checked ? '1' : '0');
+  form.append('assetHarvest', $('#asset-harvest-toggle')?.checked ? '1' : '0');
+  form.append('clientDelivery', $('#pref-client-delivery')?.checked ? '1' : '0');
+  const svcPkg = ($('#service-package-select')?.value || '').trim();
+  if (svcPkg && ['basic', 'standard', 'premium'].includes(svcPkg)) {
+    form.append('servicePackage', svcPkg);
+  }
   form.append('hp', ($('#form-hp')?.value || '').trim());
+  const promoVal = ($('#promo-code-input')?.value || '').trim();
+  if (promoVal) form.append('promoCode', promoVal);
   files.forEach((f) => form.append('images', f));
 
   const headers = analyzeFetchHeaders();
@@ -1396,11 +2167,10 @@ async function runAnalyze() {
 
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
-      if (res.status === 403 && isLimitReachedPayload(body)) {
+      if (res.status === 403 && body.error === 'LIMIT_REACHED') {
         streamActive = false;
         stopTypewriter();
         $('#progress-section').hidden = true;
-        void refreshBillingStatus();
         openPaywallModal(body);
         return;
       }
@@ -1408,7 +2178,7 @@ async function runAnalyze() {
         streamActive = false;
         stopTypewriter();
         $('#progress-section').hidden = true;
-        showToast(body.message || 'This input needs a paid plan');
+        showToast(body.message || 'This input needs a paid plan.', { variant: 'warning', duration: 3400 });
         openPricingModal('feature_locked');
         return;
       }
@@ -1416,7 +2186,23 @@ async function runAnalyze() {
         streamActive = false;
         stopTypewriter();
         $('#progress-section').hidden = true;
-        alert('Session issue: please refresh the page and try again.');
+        showToast('Session issue — refresh the page and try again.', { variant: 'warning', duration: 3800 });
+        return;
+      }
+      if (
+        res.status === 400 &&
+        /verification|Human verification|Verification required/i.test(String(body.error || ''))
+      ) {
+        streamActive = false;
+        stopTypewriter();
+        $('#progress-section').hidden = true;
+        try {
+          localStorage.setItem(LS_BRIEF_OK, '1');
+        } catch {
+          /* ignore */
+        }
+        void ensureTurnstileMounted();
+        showToast(String(body.error || 'Verification required.'), { variant: 'warning', duration: 3400 });
         return;
       }
       throw new Error(humanizeError(res.status, body.error, body));
@@ -1436,7 +2222,7 @@ async function runAnalyze() {
         streamActive = false;
         stopTypewriter();
         $('#progress-section').hidden = true;
-        showToast(body.message || 'This input needs a paid plan');
+        showToast(body.message || 'This input needs a paid plan.', { variant: 'warning', duration: 3400 });
         openPricingModal('feature_locked');
         return;
       }
@@ -1454,6 +2240,10 @@ async function runAnalyze() {
     });
 
     streamActive = false;
+    const stripWm = $('#pref-strip-watermarks')?.checked;
+    if (billingCache.enabled && billingCache.plan === 'free' && !stripWm) {
+      fullBriefText += WATERMARK_FOOTER;
+    }
     setProgress(100);
     $('#progress-stage').textContent = 'Complete';
 
@@ -1472,7 +2262,14 @@ async function runAnalyze() {
     $('#progress-section').hidden = true;
     $('#results-section').hidden = false;
     await refreshBillingStatus();
-    trackClientEvent('run_completed', { depth });
+    try {
+      localStorage.setItem(LS_BRIEF_OK, '1');
+    } catch {
+      /* ignore */
+    }
+    resetTurnstileAfterRun();
+    void ensureTurnstileMounted();
+    trackClientEvent('run_completed', { depth, tab: activeTab });
     updatePostResultUpsell();
     updateReportChrome();
     $('#try-another-section')?.removeAttribute('hidden');
@@ -1511,7 +2308,10 @@ async function runAnalyze() {
     updatePostResultUpsell();
     updateReportChrome();
     $('#try-another-section')?.removeAttribute('hidden');
-    trackClientEvent('run_failed', { message: String(errMsg || '').slice(0, 120) });
+    trackClientEvent('run_failed', {
+      message: String(errMsg || '').slice(0, 120),
+      detail: String(e?.message || e).slice(0, 160),
+    });
   } finally {
     setAnalyzeLoading(false);
     updateFlowWizard();
@@ -1526,6 +2326,7 @@ function init() {
 
   buildOptionsGrid();
   buildAgentList();
+  void ensureTurnstileMounted();
 
   $$('.tab').forEach((t) => {
     t.addEventListener('click', () => setTab(t.dataset.tab));
@@ -1533,6 +2334,7 @@ function init() {
 
   $$('.depth-pill').forEach((p) => {
     p.addEventListener('click', () => {
+      if (p.disabled) return;
       depth = p.dataset.depth;
       $$('.depth-pill').forEach((x) => x.classList.toggle('active', x.dataset.depth === depth));
       updateFlowWizard();
@@ -1558,6 +2360,17 @@ function init() {
     }
   );
 
+  loadOutputPrefs();
+  $('#pref-strip-watermarks')?.addEventListener('change', () => {
+    persistOutputPrefs();
+    applyStripWatermarkPreferenceToBrief();
+    updateReportChrome();
+  });
+  $('#pref-remove-image-bg')?.addEventListener('change', persistOutputPrefs);
+  $('#asset-harvest-toggle')?.addEventListener('change', persistOutputPrefs);
+  $('#pref-client-delivery')?.addEventListener('change', persistOutputPrefs);
+  $('#service-package-select')?.addEventListener('change', persistOutputPrefs);
+
   $('#analyze-btn').addEventListener('click', () => runAnalyze());
   const rerun = () => {
     $('#results-section').hidden = true;
@@ -1568,18 +2381,33 @@ function init() {
   $('#copy-brief-btn').addEventListener('click', () => copyBrief());
   $('#copy-toolbar-btn').addEventListener('click', () => copyBrief());
   $('#sticky-copy-btn')?.addEventListener('click', () => copyBrief());
+  $('#sticky-share-btn')?.addEventListener('click', () => void shareReport());
+  $('#post-result-share-btn')?.addEventListener('click', () => void shareReport());
+  $('#sticky-upgrade-btn')?.addEventListener('click', () => startBillingCheckout('pro', 'sticky_bar'));
+  $('#header-plans-btn')?.addEventListener('click', () => openPricingModal('header_plans'));
   $('#download-images-btn')?.addEventListener('click', () => downloadSiteImagesZip());
   $('#sticky-download-zip-btn')?.addEventListener('click', () => downloadSiteImagesZip());
   $('#download-txt-btn')?.addEventListener('click', () => downloadBriefTxt());
   $('#download-pdf-btn')?.addEventListener('click', () => printBriefPdf());
   $('#copy-cursor-prompt-btn')?.addEventListener('click', () => copyCursorPrompt());
 
+  $('#issues-metric-btn')?.addEventListener('click', () => openIssuesModal());
+  $('#modal-issues-close')?.addEventListener('click', () => closeIssuesModal());
+  $('#modal-issues')?.addEventListener('click', (e) => {
+    if (e.target.id === 'modal-issues') closeIssuesModal();
+  });
+  $('#issues-download-txt-btn')?.addEventListener('click', () => downloadIssuesListTxt());
+  $('#issues-apply-fixes-btn')?.addEventListener('click', () => void runReviseBrief());
+
   $('#url-input')?.addEventListener('input', () => updateFlowWizard());
   $('#url-input-both')?.addEventListener('input', () => updateFlowWizard());
 
   $('#header-upgrade-btn')?.addEventListener('click', () => openPricingModal('header'));
-  $('#progress-upsell-btn')?.addEventListener('click', () => openPricingModal('progress_upsell'));
-  $('#post-result-upgrade-btn')?.addEventListener('click', () => openPricingModal('post_result'));
+  $('#header-login-btn')?.addEventListener('click', () => {
+    closePricingModal();
+    closePaywallModal();
+    openLoginModal();
+  });
   $('#report-copy-link-btn')?.addEventListener('click', async () => {
     const v = ($('#report-app-link')?.value || window.location.origin || '').trim();
     if (!v) {
@@ -1617,18 +2445,33 @@ function init() {
   });
   $('#paywall-see-plans')?.addEventListener('click', () => {
     closePaywallModal();
-    openPricingModal();
+    openPricingModal('paywall_see_plans');
   });
   document.addEventListener('click', (e) => {
     const t = e.target.closest('[data-checkout]');
     if (!t) return;
-    const host = t.closest('#modal-pricing, #modal-paywall');
-    if (!host) return;
+    e.preventDefault();
     const product = t.getAttribute('data-checkout');
-    if (product) startBillingCheckout(product);
+    const explicit = t.getAttribute('data-billing-source');
+    const host = t.closest('#modal-paywall');
+    const source =
+      explicit || (host ? 'paywall_checkout' : 'pricing_checkout');
+    if (product) void startBillingCheckout(product, source);
   });
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
+    if (!$('#modal-credentials')?.hasAttribute('hidden')) {
+      closeCredentialsModal();
+      return;
+    }
+    if (!$('#modal-login')?.hasAttribute('hidden')) {
+      closeLoginModal();
+      return;
+    }
+    if (!$('#modal-issues')?.hasAttribute('hidden')) {
+      closeIssuesModal();
+      return;
+    }
     if (!$('#modal-paywall')?.hasAttribute('hidden')) closePaywallModal();
     else if (!$('#modal-pricing')?.hasAttribute('hidden')) closePricingModal();
   });
@@ -1636,14 +2479,114 @@ function init() {
   handleCheckoutReturnQuery();
   buildTryAnotherChips();
   refreshBillingStatus();
+  updateExportGatedControls();
+  trackClientEvent('landing_page_view');
+
+  $('#dfy-open-btn')?.addEventListener('click', () => {
+    trackClientEvent('lead_form_opened');
+    $('#modal-dfy')?.removeAttribute('hidden');
+    document.body.classList.add('paywall-open');
+  });
+  $('#modal-dfy-close')?.addEventListener('click', () => {
+    $('#modal-dfy')?.setAttribute('hidden', '');
+    document.body.classList.remove('paywall-open');
+  });
+  $('#modal-dfy')?.addEventListener('click', (e) => {
+    if (e.target.id === 'modal-dfy') {
+      $('#modal-dfy')?.setAttribute('hidden', '');
+      document.body.classList.remove('paywall-open');
+    }
+  });
+  $('#modal-credentials-close')?.addEventListener('click', () => closeCredentialsModal());
+  $('#credentials-done-btn')?.addEventListener('click', () => closeCredentialsModal());
+  $('#modal-credentials')?.addEventListener('click', (e) => {
+    if (e.target.id === 'modal-credentials') closeCredentialsModal();
+  });
+  $('#credentials-copy-email')?.addEventListener('click', async () => {
+    const v = ($('#credentials-login-field')?.value || '').trim();
+    const ok = await writeClipboard(v);
+    showToast(ok ? 'Email copied' : 'Copy failed');
+  });
+  $('#credentials-copy-password')?.addEventListener('click', async () => {
+    const v = ($('#credentials-password-field')?.value || '').trim();
+    const ok = await writeClipboard(v);
+    showToast(ok ? 'Password copied' : 'Copy failed');
+  });
+
+  $('#modal-login-close')?.addEventListener('click', () => closeLoginModal());
+  $('#modal-login')?.addEventListener('click', (e) => {
+    if (e.target.id === 'modal-login') closeLoginModal();
+  });
+  $('#login-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (!API_AUTH_LOGIN) {
+      showToast('Log in requires API URL and key (same as checkout).');
+      return;
+    }
+    const fd = new FormData(e.target);
+    const email = String(fd.get('email') || '').trim();
+    const password = String(fd.get('password') || '');
+    try {
+      const res = await fetch(API_AUTH_LOGIN, {
+        method: 'POST',
+        headers: billingJsonHeaders(),
+        body: JSON.stringify({ login: email, password }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        showToast(String(data.error || 'Sign in failed'));
+        return;
+      }
+      if (data.userId && setCloneAiUserId(data.userId)) {
+        closeLoginModal();
+        e.target.reset();
+        showToast('Signed in — your plan limits apply on this device.');
+        await refreshBillingStatus();
+        return;
+      }
+      showToast('Invalid response from server');
+    } catch {
+      showToast('Network error — try again');
+    }
+  });
+
+  $('#dfy-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (!API_LEADS_DFY) {
+      showToast('API not configured');
+      return;
+    }
+    const fd = new FormData(e.target);
+    const payload = {
+      name: String(fd.get('name') || '').trim(),
+      email: String(fd.get('email') || '').trim(),
+      website: String(fd.get('website') || '').trim(),
+      budget: String(fd.get('budget') || '').trim(),
+      notes: String(fd.get('notes') || '').trim(),
+    };
+    try {
+      const res = await fetch(API_LEADS_DFY, {
+        method: 'POST',
+        headers: billingJsonHeaders(),
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        showToast(data.error || 'Could not send — try again');
+        return;
+      }
+      showToast('Thanks — we will follow up shortly.');
+      e.target.reset();
+      $('#modal-dfy')?.setAttribute('hidden', '');
+      document.body.classList.remove('paywall-open');
+    } catch {
+      showToast('Network error — try again');
+    }
+  });
 
   setTab('url');
   updateDepthEstimate();
   updateFlowWizard();
-}
-
-init();
-teFlowWizard();
 }
 
 init();

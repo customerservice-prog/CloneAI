@@ -18,6 +18,20 @@ export function normalizeUrlKey(href) {
   }
 }
 
+/** Skip low-value / boilerplate routes to save crawl + token budget. */
+export function isSkippableCrawlPath(pathname) {
+  const p = String(pathname || '').toLowerCase();
+  if (!p || p === '/') return false;
+  const patterns = [
+    /\/(login|signin|sign-in|signup|sign-up|register|logout|signout)(\/|$)/,
+    /\/(privacy|terms|legal|cookie|cookies|gdpr|ccpa|accessibility)(\/|$|-)/,
+    /\/(admin|dashboard|wp-admin|wp-login|cpanel)(\/|$)/,
+    /\/account\/(login|signin|register)(\/|$)/,
+    /\.(pdf|zip|gz|tar|xml|rss|atom)$/,
+  ];
+  return patterns.some((re) => re.test(p));
+}
+
 const A_HREF_RE = /<a\s[^>]*\bhref\s*=\s*(["'])([^"']*?)\1/gi;
 
 export function extractInternalLinks(html, pageUrl, allowedHostKey) {
@@ -52,6 +66,7 @@ export function extractInternalLinks(html, pageUrl, allowedHostKey) {
     }
     if (parsed.username || parsed.password) continue;
     if (hostKeyFromHostname(parsed.hostname) !== allowedHostKey) continue;
+    if (isSkippableCrawlPath(parsed.pathname || '')) continue;
     const host = parsed.hostname;
     if (net.isIP(host) && isUnsafeIpLiteral(host)) continue;
     const key = normalizeUrlKey(abs);
@@ -104,7 +119,9 @@ async function axiosFetchHtml(targetUrl, allowedHostKey, { timeoutMs, maxContent
 
 /**
  * BFS crawl same-host pages. Seed page is already fetched (html + url).
- * @returns {Promise<{ url: string, html: string }[]>}
+ * Does not drop pages that share a similar header — only URL de-duplication.
+ * @param {{ onProgress?: (p: { pagesCrawled: number, queueLength: number }) => void }} [opts]
+ * @returns {Promise<{ results: { url: string, html: string }[], stopReason: 'exhausted' | 'page_cap' | 'timeout', queueRemaining: number }>}
  */
 export async function crawlFromSeed(startUrl, seedHtml, {
   maxPages = 20,
@@ -113,16 +130,21 @@ export async function crawlFromSeed(startUrl, seedHtml, {
   maxHtmlBytes = 8 * 1024 * 1024,
   maxContentLength = 50 * 1024 * 1024,
   maxRedirects = 2,
+  maxCrawlWallClockMs = 120000,
+  onProgress,
 } = {}) {
   let initial;
   try {
     initial = new URL(startUrl.startsWith('http') ? startUrl : `https://${startUrl}`);
   } catch {
-    return [];
+    return { results: [], stopReason: 'exhausted', queueRemaining: 0 };
   }
   const allowedHostKey = hostKeyFromHostname(initial.hostname);
   const startKey = normalizeUrlKey(initial.href);
-  if (!startKey || !seedHtml || seedHtml.length < 200) return [];
+  if (!startKey || !seedHtml || seedHtml.length < 200)
+    return { results: [], stopReason: 'exhausted', queueRemaining: 0 };
+
+  const deadline = Date.now() + Math.max(10_000, Math.min(600_000, maxCrawlWallClockMs));
 
   const visited = new Set();
   const queue = [];
@@ -136,14 +158,24 @@ export async function crawlFromSeed(startUrl, seedHtml, {
   }
 
   visited.add(startKey);
+  const seedSlice = seedHtml.length > maxHtmlBytes ? seedHtml.slice(0, maxHtmlBytes) : seedHtml;
   results.push({
     url: startKey,
-    html: seedHtml.length > maxHtmlBytes ? seedHtml.slice(0, maxHtmlBytes) : seedHtml,
+    html: seedSlice,
   });
 
   for (const link of extractInternalLinks(seedHtml, startKey, allowedHostKey)) {
     enqueue(link);
   }
+
+  try {
+    onProgress?.({ pagesCrawled: results.length, queueLength: queue.length });
+  } catch {
+    /* ignore */
+  }
+
+  /** Allow large discovery queues on media-heavy sites (visited set caps real work). */
+  const maxQueuedLinks = Math.max(maxPages * 500, 5000);
 
   async function fetchOne(pageUrl) {
     if (pageUrl === startKey) return null;
@@ -156,10 +188,15 @@ export async function crawlFromSeed(startUrl, seedHtml, {
         maxRedirects,
       });
       if (!ok) return null;
-      const slice = html.length > maxHtmlBytes ? html.slice(0, maxHtmlBytes) : html;
-      const cap = maxPages * 100;
+      let slice = html.length > maxHtmlBytes ? html.slice(0, maxHtmlBytes) : html;
+      try {
+        const path = new URL(pageUrl).pathname || '';
+        if (isSkippableCrawlPath(path)) return null;
+      } catch {
+        /* skip */
+      }
       for (const link of extractInternalLinks(slice, pageUrl, allowedHostKey)) {
-        if (queue.length + results.length >= cap) break;
+        if (queue.length >= maxQueuedLinks) break;
         enqueue(link);
       }
       return { url: pageUrl, html: slice };
@@ -168,7 +205,13 @@ export async function crawlFromSeed(startUrl, seedHtml, {
     }
   }
 
+  let stopReason = 'exhausted';
+
   while (results.length < maxPages && queue.length > 0) {
+    if (Date.now() > deadline) {
+      stopReason = 'timeout';
+      break;
+    }
     const batch = [];
     while (queue.length > 0 && batch.length < fetchConcurrency && results.length + batch.length < maxPages) {
       const next = queue.shift();
@@ -180,9 +223,22 @@ export async function crawlFromSeed(startUrl, seedHtml, {
     for (const item of settled) {
       if (item && results.length < maxPages) results.push(item);
     }
+    try {
+      onProgress?.({ pagesCrawled: results.length, queueLength: queue.length });
+    } catch {
+      /* ignore */
+    }
+    if (results.length >= maxPages) {
+      stopReason = 'page_cap';
+      break;
+    }
   }
 
-  return results;
+  if (stopReason === 'exhausted' && (queue.length > 0 || results.length >= maxPages)) {
+    stopReason = results.length >= maxPages ? 'page_cap' : 'exhausted';
+  }
+
+  return { results, stopReason, queueRemaining: queue.length };
 }
 
 /**

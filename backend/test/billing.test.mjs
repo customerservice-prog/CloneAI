@@ -8,6 +8,7 @@ const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cloneai-billing-'));
 process.env.BILLING_ENABLED = 'true';
 process.env.STRIPE_PRICE_STARTER = 'price_starter_test';
 process.env.STRIPE_PRICE_PRO = 'price_pro_test';
+process.env.STRIPE_PRICE_POWER = 'price_power_test';
 process.env.BILLING_DATA_PATH = path.join(baseDir, '_bootstrap.json');
 fs.writeFileSync(
   process.env.BILLING_DATA_PATH,
@@ -83,6 +84,16 @@ test('TEST 3: pro — 50 runs OK, 51st blocked', async () => {
   applySubscriptionFromCheckoutSync(uid, PLANS.PRO, 'cus', 'sub', 'price_pro_test');
   for (let i = 0; i < 50; i += 1) {
     await tryBeginRun(uid);
+  }
+  const r = await tryBeginRun(uid);
+  assert.equal(r.ok, false);
+});
+
+test('TEST 3b: power — 100 runs OK, 101st blocked', async () => {
+  applySubscriptionFromCheckoutSync(uid, PLANS.POWER, 'cus', 'sub', 'price_power_test');
+  for (let i = 0; i < 100; i += 1) {
+    const r = await tryBeginRun(uid);
+    assert.equal(r.ok, true, `run ${i + 1}`);
   }
   const r = await tryBeginRun(uid);
   assert.equal(r.ok, false);
@@ -250,4 +261,21 @@ test('subscription checkout resets monthly usage counter', async () => {
   const s = await getUsageSnapshot(uid);
   assert.equal(s.plan, PLANS.PRO);
   assert.equal(s.used, 0);
+});
+
+test('customer.subscription.updated maps price to Power', async () => {
+  applySubscriptionFromCheckoutSync(uid, PLANS.STARTER, 'cus', 'sub_pw', 'price_starter_test');
+  await applyStripeEvent({
+    id: 'evt_sub_updated_power',
+    type: 'customer.subscription.updated',
+    data: {
+      object: {
+        id: 'sub_pw',
+        metadata: { cloneaiUserId: uid },
+        items: { data: [{ price: { id: 'price_power_test' } }] },
+      },
+    },
+  });
+  const s = await getUsageSnapshot(uid);
+  assert.equal(s.plan, PLANS.POWER);
 });

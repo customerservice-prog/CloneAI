@@ -24,9 +24,9 @@ export function withBillingLock(fn) {
 export function defaultAnalytics() {
   return {
     runsTotal: 0,
-    runsByPlan: { free: 0, starter: 0, pro: 0 },
-    checkoutsStarted: { starter: 0, pro: 0, extra: 0 },
-    conversions: { starter: 0, pro: 0, extra: 0 },
+    runsByPlan: { free: 0, starter: 0, pro: 0, power: 0 },
+    checkoutsStarted: { starter: 0, pro: 0, power: 0, extra: 0, deep_extract: 0 },
+    conversions: { starter: 0, pro: 0, power: 0, extra: 0, deep_extract: 0 },
     webhookFailures: 0,
   };
 }

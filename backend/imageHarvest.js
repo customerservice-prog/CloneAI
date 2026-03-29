@@ -1,8 +1,10 @@
 import axios from 'axios';
 import archiver from 'archiver';
+import { createHash } from 'node:crypto';
 import { assertUrlSafeForServerFetch } from './ssrf.js';
 
-const IMG_ATTR_RE = /<(img|source|video|link|meta)\b([^>]*?)>/gis;
+const IMG_ATTR_RE = /<(img|source|video|link|meta|picture)\b([^>]*?)>/gis;
+const STYLE_BLOCK_RE = /<style\b[^>]*>([\s\S]*?)<\/style>/gi;
 
 function attrVal(tag, name) {
   const re = new RegExp(`\\b${name}\\s*=\\s*(["'])(.*?)\\1`, 'is');
@@ -52,6 +54,44 @@ function resolveHref(raw, baseHref) {
   }
 }
 
+const TRACKING_PARAMS = new Set([
+  'utm_source',
+  'utm_medium',
+  'utm_campaign',
+  'utm_content',
+  'utm_term',
+  'fbclid',
+  'gclid',
+  'mc_cid',
+  'mc_eid',
+  '_ga',
+]);
+
+/** Stable key for deduplicating image URLs (tracking params stripped). */
+export function normalizeHarvestUrlKey(href) {
+  try {
+    const u = new URL(href);
+    u.hash = '';
+    for (const p of TRACKING_PARAMS) u.searchParams.delete(p);
+    return u.href;
+  } catch {
+    return null;
+  }
+}
+
+/** Deduplicate while preserving first-seen order. */
+export function dedupeHarvestUrls(urls) {
+  const seen = new Set();
+  const out = [];
+  for (const u of urls) {
+    const k = normalizeHarvestUrlKey(u);
+    if (!k || seen.has(k)) continue;
+    seen.add(k);
+    out.push(u);
+  }
+  return out;
+}
+
 /** Collect image-like URLs in document order (deduped). */
 export function collectImageUrls(html, pageUrl) {
   if (!html || !pageUrl) return [];
@@ -90,11 +130,33 @@ export function collectImageUrls(html, pageUrl) {
         const u = bestUrlFromSrcset(dataSrcset, baseHref);
         if (u) push(u);
       }
-      for (const a of ['src', 'data-src', 'data-lazy-src', 'data-original']) {
+      for (const a of [
+        'src',
+        'data-src',
+        'data-srcset',
+        'data-lazy-src',
+        'data-original',
+        'data-lazy',
+        'data-zoom-image',
+        'data-large_image',
+        'data-large-image',
+        'data-bg',
+        'data-background',
+        'data-background-image',
+        'data-image',
+        'data-img',
+        'data-url',
+        'data-href',
+      ]) {
         const v = attrVal(inner, a);
         if (v) {
-          const u = resolveHref(v, baseHref);
-          if (u) push(u);
+          if (a === 'data-srcset' || /srcset$/i.test(a)) {
+            const u = bestUrlFromSrcset(v, baseHref);
+            if (u) push(u);
+          } else {
+            const u = resolveHref(v, baseHref);
+            if (u) push(u);
+          }
         }
       }
     }
@@ -145,14 +207,66 @@ export function collectImageUrls(html, pageUrl) {
         if (u) push(u);
       }
     }
+
+    if (tagName === 'picture') {
+      for (const a of ['src', 'data-src', 'href']) {
+        const v = attrVal(inner, a);
+        if (v) {
+          const u = resolveHref(v, baseHref);
+          if (u) push(u);
+        }
+      }
+    }
   }
 
-  // Inline styles: background-image: url(...)
+  // <img ...> anywhere (catches malformed or non-standard wrappers)
+  const looseImg = /<img\b[^>]*>/gi;
+  let lim;
+  while ((lim = looseImg.exec(html)) !== null) {
+    const frag = lim[0];
+    const srcset = attrVal(frag, 'srcset') || attrVal(frag, 'data-srcset');
+    if (srcset) {
+      const u = bestUrlFromSrcset(srcset, baseHref);
+      if (u) push(u);
+    }
+    for (const a of ['src', 'data-src', 'data-lazy-src', 'data-original']) {
+      const v = attrVal(frag, a);
+      if (v && !/srcset$/i.test(a)) {
+        const u = resolveHref(v, baseHref);
+        if (u) push(u);
+      }
+    }
+  }
+
+  // Inline + <style> blocks: background-image: url(...)
   const urlInStyle = /url\(\s*["']?([^"')]+)["']?\s*\)/gi;
-  let um;
-  while ((um = urlInStyle.exec(html)) !== null) {
-    const u = resolveHref(um[1], baseHref);
+  const scanCss = (block) => {
+    if (!block) return;
+    let um;
+    urlInStyle.lastIndex = 0;
+    while ((um = urlInStyle.exec(block)) !== null) {
+      const u = resolveHref(um[1], baseHref);
+      if (u) push(u);
+    }
+  };
+  let sb;
+  STYLE_BLOCK_RE.lastIndex = 0;
+  while ((sb = STYLE_BLOCK_RE.exec(html)) !== null) {
+    scanCss(sb[1]);
+  }
+  scanCss(html);
+
+  // Absolute image URLs embedded in JSON/config blobs (common on storefronts)
+  const looseRe =
+    /https?:\/\/[^"'\\\s<>(){}\[\]`]{8,2000}\.(?:jpg|jpeg|png|webp|gif|avif)\b(?:\?[^"'\\\s<>]{0,800})?/gi;
+  let looseHits = 0;
+  const looseCap = 8000;
+  let lm;
+  while ((lm = looseRe.exec(html)) !== null && looseHits < looseCap) {
+    const raw = lm[0].replace(/&amp;/g, '&');
+    const u = resolveHref(raw, baseHref);
     if (u) push(u);
+    looseHits += 1;
   }
 
   return ordered;
@@ -172,6 +286,11 @@ function extFromContentType(ct) {
 function sanitizeZipName(i, ext) {
   const n = String(i + 1).padStart(6, '0');
   return `image-${n}.${ext}`;
+}
+
+/** SHA-256 hex of raw bytes — used to skip identical images from different URLs. */
+export function imageBytesFingerprint(buf) {
+  return createHash('sha256').update(buf).digest('hex');
 }
 
 async function poolMap(items, concurrency, fn) {
@@ -248,6 +367,12 @@ export async function fetchHarvestedImages(urls, {
   for (let i = 0; i < results.length; i += 1) {
     const r = results[i];
     if (!r) continue;
+    const fp = imageBytesFingerprint(r.buffer);
+    if (seenContent.has(fp)) {
+      contentDuplicatesSkipped += 1;
+      continue;
+    }
+    seenContent.add(fp);
     if (total + r.buffer.length > totalCap) {
       errors.push('ZIP total size cap reached (set IMAGE_HARVEST_ZIP_CAP=0 for no cap).');
       break;
@@ -263,6 +388,7 @@ export async function fetchHarvestedImages(urls, {
   return {
     entries,
     skipped: slice.length - entries.length,
+    contentDuplicatesSkipped,
     errors: errors.slice(0, 250),
   };
 }
@@ -270,9 +396,10 @@ export async function fetchHarvestedImages(urls, {
 /**
  * @param {{ name: string, buffer: Buffer, sourceUrl?: string }[]} entries
  * @param {{ name: string, buffer: Buffer, url: string }[]} [snapshots]
+ * @param {{ name: string, buffer: Buffer }[]} [extras] — e.g. crawled HTML under extract/
  */
-export async function zipImageEntries(entries, snapshots = []) {
-  if (!entries.length && !snapshots.length) return null;
+export async function zipImageEntries(entries, snapshots = [], extras = []) {
+  if (!entries.length && !snapshots.length && !(extras && extras.length)) return null;
   return new Promise((resolve, reject) => {
     const chunks = [];
     const archive = archiver('zip', { zlib: { level: 6 } });
@@ -284,6 +411,9 @@ export async function zipImageEntries(entries, snapshots = []) {
     }
     for (const s of snapshots) {
       if (s.buffer?.length) archive.append(s.buffer, { name: s.name });
+    }
+    for (const x of extras || []) {
+      if (x?.buffer?.length && x?.name) archive.append(x.buffer, { name: x.name });
     }
     if (entries.length) {
       const manifest = entries.map((e) => `${e.name}\t${e.sourceUrl || ''}`).join('\n');

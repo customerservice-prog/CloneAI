@@ -4,13 +4,15 @@ export const PLANS = {
   FREE: 'free',
   STARTER: 'starter',
   PRO: 'pro',
+  POWER: 'power',
 };
 
-/** @typedef {{ plan: string, freeRunsUsed: number, monthKey: string, runsThisMonth: number, bonusRuns: number, stripeCustomerId?: string, stripeSubscriptionId?: string, stripePriceId?: string, createdAt?: string, updatedAt?: string }} UserRow */
+/** @typedef {{ plan: string, freeRunsUsed: number, monthKey: string, runsThisMonth: number, bonusRuns: number, stripeCustomerId?: string, stripeSubscriptionId?: string, stripePriceId?: string, loginEmail?: string, passwordHash?: string, credentialsDelivered?: boolean, createdAt?: string, updatedAt?: string }} UserRow */
 
 const FREE_LIFETIME_MAX = 1;
 const STARTER_MONTHLY = 10;
 const PRO_MONTHLY = 50;
+const POWER_MONTHLY = 100;
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -24,6 +26,28 @@ export function normalizeUserId(raw) {
   if (!s || s.length > 64) return null;
   if (!UUID_RE.test(s)) return null;
   return s.toLowerCase();
+}
+
+const LOGIN_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/** @param {string | undefined | null} raw */
+export function normalizeAccountEmail(raw) {
+  const s = String(raw || '').trim().toLowerCase().slice(0, 254);
+  if (!s || !LOGIN_EMAIL_RE.test(s)) return null;
+  return s;
+}
+
+export function findConflictingLoginEmailOwner(state, email, excludeUserId) {
+  const e = String(email || '').toLowerCase();
+  for (const [id, u] of Object.entries(state.users || {})) {
+    if (excludeUserId && id === excludeUserId) continue;
+    if ((u.loginEmail || '').toLowerCase() === e) return id;
+  }
+  return null;
+}
+
+export function ensureBillingUser(state, userId) {
+  return ensureUser(state, userId);
 }
 
 function monthKeyUtc(d = new Date()) {
@@ -71,35 +95,16 @@ export function evaluateAnalyzeFeatureGate(plan, input) {
   const p = plan || PLANS.FREE;
   const hasUrl = Boolean(input?.hasUrl);
   const imageCount = Math.max(0, Number(input?.imageCount) || 0);
-  const depth = String(input?.depth || 'homepage').trim();
   const combo = hasUrl && imageCount > 0;
 
-  if (p === PLANS.FREE) {
-    if (combo) {
-      return {
-        ok: false,
-        code: 'FEATURE_LOCKED',
-        feature: 'combo',
-        message:
-          'Combining a URL with screenshots requires Starter or Pro. Use URL only or images only on Free, or upgrade.',
-        upgradeHint: true,
-      };
-    }
-    return { ok: true };
-  }
-
-  if (p === PLANS.STARTER) {
-    if (depth === 'deep') {
-      return {
-        ok: false,
-        code: 'FEATURE_LOCKED',
-        feature: 'full_crawl',
-        message:
-          'Full-site crawl (100+ pages) is a Pro feature. Starter includes balanced multi-page scans (~25 pages).',
-        upgradeHint: true,
-      };
-    }
-    return { ok: true };
+  if (p === PLANS.FREE && combo) {
+    return {
+      ok: false,
+      code: 'FEATURE_LOCKED',
+      feature: 'combo',
+      message:
+        'Combining URL and screenshots is not available on the free plan. Use URL only, images only, or upgrade to Starter or Pro.',
+    };
   }
 
   return { ok: true };
@@ -108,6 +113,7 @@ export function evaluateAnalyzeFeatureGate(plan, input) {
 function monthlyLimit(plan) {
   if (plan === PLANS.STARTER) return STARTER_MONTHLY;
   if (plan === PLANS.PRO) return PRO_MONTHLY;
+  if (plan === PLANS.POWER) return POWER_MONTHLY;
   return FREE_LIFETIME_MAX;
 }
 
@@ -135,7 +141,10 @@ export function recordCheckoutStartedSync(product) {
   const state = loadState();
   if (!state.analytics) return;
   if (!state.analytics.checkoutsStarted) state.analytics.checkoutsStarted = {};
-  const k = product === 'starter' || product === 'pro' || product === 'extra' ? product : 'extra';
+  const k =
+    product === 'starter' || product === 'pro' || product === 'power' || product === 'extra' || product === 'deep_extract'
+      ? product
+      : 'extra';
   state.analytics.checkoutsStarted[k] = (state.analytics.checkoutsStarted[k] || 0) + 1;
   saveState(state);
 }
@@ -147,7 +156,10 @@ export async function recordCheckoutStarted(product) {
 function bumpConversionAnalytics(state, kind) {
   if (!state.analytics) return;
   if (!state.analytics.conversions) state.analytics.conversions = {};
-  const k = kind === 'starter' || kind === 'pro' || kind === 'extra' ? kind : 'extra';
+  const k =
+    kind === 'starter' || kind === 'pro' || kind === 'power' || kind === 'extra' || kind === 'deep_extract'
+      ? kind
+      : 'extra';
   state.analytics.conversions[k] = (state.analytics.conversions[k] || 0) + 1;
 }
 
@@ -162,18 +174,52 @@ export async function recordWebhookFailure() {
   return withBillingLock(() => recordWebhookFailureSync());
 }
 
+function rollupAdminCostFromProductEvents(pe) {
+  const day = new Date().toISOString().slice(0, 10);
+  let runsTodayUtc = 0;
+  let estUsdToday = 0;
+  let promptTokensSumRecent = 0;
+  let completionTokensSumRecent = 0;
+  let runCompletedWithUsage = 0;
+  for (const ev of pe) {
+    if (ev.event !== 'run_completed') continue;
+    const m = ev.meta && typeof ev.meta === 'object' ? ev.meta : {};
+    if (String(ev.at || '').slice(0, 10) === day) {
+      runsTodayUtc += 1;
+      estUsdToday += Number(m.estUsd) || 0;
+    }
+    if (m.promptTokens != null || m.completionTokens != null) {
+      runCompletedWithUsage += 1;
+      promptTokensSumRecent += Number(m.promptTokens) || 0;
+      completionTokensSumRecent += Number(m.completionTokens) || 0;
+    }
+  }
+  return {
+    runsTodayUtc,
+    estUsdToday: Math.round(estUsdToday * 10000) / 10000,
+    runCompletedEventsInWindow: pe.filter((e) => e.event === 'run_completed').length,
+    runCompletedWithUsageInWindow: runCompletedWithUsage,
+    promptTokensSumRecent,
+    completionTokensSumRecent,
+    note:
+      'Token and USD sums are derived from the last stored product events (max ~200), not guaranteed all-time totals.',
+  };
+}
+
 export function getAnalyticsSnapshotSync() {
   const state = loadState();
   const base = defaultAnalytics();
   const a = state.analytics || {};
   const pe = Array.isArray(state.productEvents) ? state.productEvents : [];
+  const recent = pe.slice(-200);
   return {
     ...base,
     ...a,
     runsByPlan: { ...base.runsByPlan, ...(a.runsByPlan || {}) },
     checkoutsStarted: { ...base.checkoutsStarted, ...(a.checkoutsStarted || {}) },
     conversions: { ...base.conversions, ...(a.conversions || {}) },
-    productEventsRecent: pe.slice(-200),
+    productEventsRecent: recent,
+    adminCost: rollupAdminCostFromProductEvents(recent),
   };
 }
 
@@ -347,8 +393,10 @@ function pruneEvents(state) {
 export function planFromStripePriceId(priceId) {
   const starter = process.env.STRIPE_PRICE_STARTER?.trim();
   const pro = process.env.STRIPE_PRICE_PRO?.trim();
+  const power = process.env.STRIPE_PRICE_POWER?.trim();
   if (priceId && starter && priceId === starter) return PLANS.STARTER;
   if (priceId && pro && priceId === pro) return PLANS.PRO;
+  if (priceId && power && priceId === power) return PLANS.POWER;
   return null;
 }
 
@@ -439,12 +487,12 @@ export async function applyStripeEvent(event) {
 
       if (session.mode === 'payment') {
         const kind = session.metadata?.kind;
-        if (kind === 'extra_run') {
+        if (kind === 'extra_run' || kind === 'deep_extract') {
           const u = ensureUser(state, userId);
           u.bonusRuns = (u.bonusRuns || 0) + 1;
           u.updatedAt = new Date().toISOString();
-          bumpConversionAnalytics(state, 'extra');
-          appendProductEventToState(state, userId, u.plan, 'payment_completed', { kind: 'extra_run' });
+          bumpConversionAnalytics(state, kind === 'deep_extract' ? 'deep_extract' : 'extra');
+          appendProductEventToState(state, userId, u.plan, 'payment_completed', { kind });
         }
         state.events[id] = { at: new Date().toISOString() };
         pruneEvents(state);
@@ -470,7 +518,15 @@ export async function applyStripeEvent(event) {
           rollMonth(u);
           u.runsThisMonth = 0;
           u.updatedAt = new Date().toISOString();
-          bumpConversionAnalytics(state, plan === PLANS.PRO ? 'pro' : 'starter');
+          const emailRaw = session.customer_details?.email || session.customer_email || '';
+          const le = normalizeAccountEmail(emailRaw);
+          if (le && !findConflictingLoginEmailOwner(state, le, userId)) {
+            u.loginEmail = le;
+          }
+          bumpConversionAnalytics(
+            state,
+            plan === PLANS.POWER ? 'power' : plan === PLANS.PRO ? 'pro' : 'starter'
+          );
           appendProductEventToState(state, userId, plan, 'payment_completed', { kind: 'subscription' });
         }
         state.events[id] = { at: new Date().toISOString() };
@@ -486,7 +542,11 @@ export async function applyStripeEvent(event) {
       const item = sub?.items?.data?.[0];
       const priceId = item?.price?.id;
       let plan = priceId ? planFromStripePriceId(String(priceId)) : null;
-      if (!plan && sub?.metadata?.plan && [PLANS.STARTER, PLANS.PRO].includes(sub.metadata.plan)) {
+      if (
+        !plan &&
+        sub?.metadata?.plan &&
+        [PLANS.STARTER, PLANS.PRO, PLANS.POWER].includes(sub.metadata.plan)
+      ) {
         plan = sub.metadata.plan;
       }
       if (userId && plan && state.users[userId]) {

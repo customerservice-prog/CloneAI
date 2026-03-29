@@ -5,6 +5,10 @@
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "test": "npm test --prefix backend",
-    "smoke": "npm run smoke --prefix backend"
+    "smoke": "npm run smoke --prefix backend",
+    "build": "npm run build --prefix frontend",
+    "verify": "npm test --prefix backend && npm run build --prefix frontend",
+    "launch-check": "npm run launch-check --prefix backend",
+    "launch-check:prod": "npm run launch-check:prod --prefix backend"
   }
 }

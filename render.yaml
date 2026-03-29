@@ -1,0 +1,31 @@
+# Render Blueprint (optional). Set secrets in the Render dashboard; do not commit them here.
+# https://render.com/docs/blueprint-spec
+#
+# Dashboard env (minimum for live + billing):
+#   OPENAI_API_KEY
+#   CORS_ORIGINS          = https://your-frontend.vercel.app  (exact origin, comma-separated if several)
+#   FRONTEND_URL          = same as primary frontend (Stripe success/cancel redirects)
+#   BILLING_ENABLED       = true
+#   STRIPE_SECRET_KEY     = sk_live_...
+#   STRIPE_WEBHOOK_SECRET = whsec_...  (after adding webhook URL below)
+#   STRIPE_PRICE_STARTER  / STRIPE_PRICE_PRO / STRIPE_PRICE_EXTRA_RUN = price_...
+# Optional: CLONEAI_INGRESS_KEY (+ VITE_CLONEAI_KEY on Vercel), TURNSTILE_*, CLONEAI_PROMO_CODE
+#
+# Stripe webhook endpoint (Live mode): https://<this-service-host>/api/billing/webhook
+# Events: checkout.session.completed, customer.subscription.updated, customer.subscription.deleted, invoice.payment_failed
+# Or run: cd backend && npm run stripe-webhook:create -- https://<host>/api/billing/webhook
+services:
+  - type: web
+    name: cloneai-api
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: starter
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "3001"
+      - key: BILLING_ENABLED
+        value: "true"

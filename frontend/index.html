@@ -3,6 +3,8 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Optional: production API origin if not set at build (VITE_API_URL). Replace content in deploy. -->
+    <meta name="cloneai-api-origin" content="" />
     <title>CloneAI — AI-powered website analysis</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -29,10 +31,12 @@
           />
         </div>
         <div class="header-actions">
+          <button type="button" class="btn-header-login" id="header-plans-btn">Plans</button>
           <span class="header-usage-wrap hidden" id="header-usage-wrap" aria-live="polite">
             <span class="header-usage" id="header-usage"></span>
             <span class="header-usage-urgent hidden" id="header-usage-urgent">You're almost out of runs</span>
           </span>
+          <button type="button" class="btn-header-login hidden" id="header-login-btn">Log in</button>
           <button type="button" class="btn-header-upgrade hidden" id="header-upgrade-btn">Upgrade</button>
         </div>
       </div>
@@ -53,44 +57,69 @@
           Clone Any Website<br />
           <span class="hero-accent">Perfectly.</span>
         </h1>
-        <p class="hero-tagline">Generate a complete developer breakdown of any website in seconds.</p>
+        <p class="hero-blueprint-lead">Generate a complete developer-ready blueprint from any website in seconds.</p>
+        <p class="hero-trust-line">Used by <strong>developers</strong>, <strong>freelancers</strong>, and <strong>agencies</strong> to rebuild sites faster.</p>
+        <p class="hero-tagline">Full-site crawl, harvested images &amp; snapshots, plus a build-ready specification — in one run.</p>
+        <p class="hero-value-line">
+          Save hours of manual analysis — get execution clarity and a build-ready blueprint for freelancers, agencies, and teams.
+        </p>
+        <ol class="hero-steps" aria-label="How it works in three steps">
+          <li><span class="hero-step-num" aria-hidden="true">1</span> Paste a URL or upload screenshots</li>
+          <li><span class="hero-step-num" aria-hidden="true">2</span> Let AI analyze layout, styling, and components</li>
+          <li><span class="hero-step-num" aria-hidden="true">3</span> Get a developer-ready brief you can ship from immediately</li>
+        </ol>
         <p class="hero-pill">
           <span class="hero-pill-dot" aria-hidden="true"></span>
-          AI Agent Suite
+          Site analysis, asset harvest &amp; clone specification
         </p>
         <p class="hero-sub">
-          Drop a URL or upload screenshots. AI agents map <strong>layout, categories, every item card, images, and copy</strong> — so you can rebuild the site structure, not just the hero.
+          Used for <strong>migrations</strong>, <strong>audits</strong>, <strong>replatforming</strong>, and <strong>developer onboarding</strong> — turn any website into an implementation brief, not a guess.
         </p>
         <p class="hero-trust">
-          Trusted for <strong>migrations</strong>, <strong>design audits</strong>, and <strong>developer onboarding</strong> — one structured brief you can hand to engineering.
+          Built for developers, freelancers, and agencies. <strong>No database setup</strong> — start free in seconds.
         </p>
+        <ul class="hero-use-cases" aria-label="Use cases">
+          <li>Clone websites faster</li>
+          <li>Audit a clone in progress</li>
+          <li>Plan platform migrations</li>
+          <li>Hand off clean build specs</li>
+        </ul>
         <p class="how-it-works">
-          <strong>How it works:</strong> choose URL, images, or both → toggle analysis areas → <strong>Generate brief</strong>. Your report streams live; then copy, download <strong>.txt</strong>, save <strong>PDF</strong>, or grab a <strong>Cursor / VS Code</strong> prompt. Starter code export is on the roadmap.
+          <strong>Exports:</strong> copy always; <strong>.txt</strong> on Starter+; <strong>PDF</strong> and Cursor-style handoff on Pro.
         </p>
       </section>
 
       <nav class="flow-wizard" id="flow-wizard" aria-label="Setup steps">
         <div class="flow-step flow-step-active" id="flow-step-1" data-flow="1">
-          <span class="flow-step-num" aria-hidden="true">1</span>
+          <span class="flow-step-visual" aria-hidden="true">
+            <span class="flow-step-icon">📥</span>
+            <span class="flow-step-num">1</span>
+          </span>
           <span class="flow-step-body">
-            <span class="flow-step-title">Choose input method</span>
-            <span class="flow-step-sub">URL, screenshots, or both</span>
+            <span class="flow-step-title">Input</span>
+            <span class="flow-step-sub">Paste a URL and/or upload screenshots</span>
           </span>
         </div>
         <span class="flow-connector" aria-hidden="true"></span>
         <div class="flow-step" id="flow-step-2" data-flow="2">
-          <span class="flow-step-num" aria-hidden="true">2</span>
+          <span class="flow-step-visual" aria-hidden="true">
+            <span class="flow-step-icon">🔬</span>
+            <span class="flow-step-num">2</span>
+          </span>
           <span class="flow-step-body">
-            <span class="flow-step-title">Select analysis options</span>
-            <span class="flow-step-sub">Depth &amp; focus areas</span>
+            <span class="flow-step-title">Analyze</span>
+            <span class="flow-step-sub">Choose depth &amp; what the AI should emphasize</span>
           </span>
         </div>
         <span class="flow-connector" aria-hidden="true"></span>
         <div class="flow-step" id="flow-step-3" data-flow="3">
-          <span class="flow-step-num" aria-hidden="true">3</span>
+          <span class="flow-step-visual" aria-hidden="true">
+            <span class="flow-step-icon">📋</span>
+            <span class="flow-step-num">3</span>
+          </span>
           <span class="flow-step-body">
-            <span class="flow-step-title">Run analysis</span>
-            <span class="flow-step-sub">Stream your brief</span>
+            <span class="flow-step-title">Get developer brief</span>
+            <span class="flow-step-sub">Stream your blueprint, then export or share</span>
           </span>
         </div>
       </nav>
@@ -99,8 +128,8 @@
         <div class="tabs" role="tablist">
           <button type="button" class="tab active" data-tab="url" role="tab" aria-selected="true">URL Input</button>
           <button type="button" class="tab" data-tab="images" role="tab" aria-selected="false">Image Upload</button>
-          <button type="button" class="tab" data-tab="both" role="tab" aria-selected="false" title="Starter and Pro">
-            URL + Images
+          <button type="button" class="tab" data-tab="both" role="tab" aria-selected="false">
+            URL + Images <span class="tab-pro-badge" id="tab-both-badge" hidden>Pro+</span>
           </button>
         </div>
 
@@ -114,13 +143,21 @@
               placeholder="https://example.com"
               autocomplete="url"
             />
-            <p class="depth-label">Scan depth <span class="depth-label-hint">(same-host pages + snapshots + images)</span></p>
+            <p class="depth-label">
+              Scan depth
+              <span class="depth-label-hint">(same-host pages + snapshots + harvested images)</span>
+            </p>
+            <p class="depth-micro-credits">
+              <span class="depth-micro-ico" aria-hidden="true">⚡</span>
+              <strong>Deeper scans</strong> use more of your plan’s runs and take longer — pick the smallest depth that fits the job.
+            </p>
+            <p class="plan-gate-hint hidden" id="plan-gate-depth-hint"></p>
             <div class="depth-pills" role="group" aria-label="Scan depth">
               <button
                 type="button"
                 class="depth-pill active"
                 data-depth="homepage"
-                title="Fastest: only the page you enter. Best for quick hero or landing reviews."
+                title="Fastest: homepage only. Lowest run cost. Best for quick landing-page reviews."
               >
                 1 page
               </button>
@@ -128,7 +165,7 @@
                 type="button"
                 class="depth-pill"
                 data-depth="shallow"
-                title="Balanced: up to ~25 internal pages on the same site. Good default for most clones."
+                title="Balanced: up to ~25 internal pages. Good default for most multi-section clones."
               >
                 Up to ~25 pages
               </button>
@@ -136,10 +173,23 @@
                 type="button"
                 class="depth-pill"
                 data-depth="deep"
-                title="Deepest crawl (100+ URLs cap). Slowest; use when you need full-site coverage."
+                title="Deepest: up to ~300 pages on Pro (higher on Power). Longer runs; use for large catalogs and asset harvest."
               >
-                Full crawl (100+)
+                Full crawl (300+)
               </button>
+            </div>
+            <label class="asset-harvest-row">
+              <input type="checkbox" id="asset-harvest-toggle" />
+              <span class="asset-harvest-label">
+                <strong>Deep Asset Harvest</strong> — prioritize discovering images &amp; media (smaller HTML to the AI;
+                higher image caps on paid plans).
+              </span>
+            </label>
+            <p class="harvest-live-stats muted" id="harvest-live-stats" hidden aria-live="polite"></p>
+            <div class="depth-pill-hint-grid" aria-hidden="true">
+              <span><strong>1 page</strong> — fast, homepage only, lightest on runs</span>
+              <span><strong>~25 pages</strong> — balanced depth for most sites</span>
+              <span><strong>Full crawl</strong> — slowest; maximum same-host coverage</span>
             </div>
             <p class="depth-legend">
               <span><strong>1 page</strong> — fastest, homepage only</span>
@@ -194,7 +244,7 @@
         <div class="options-section-head">
           <h2 class="options-heading">Analysis options</h2>
           <p class="options-micro">
-            Each toggle tells the AI where to go deep. <strong>Layout &amp; Structure</strong> includes spacing, grid, containers, and the overall layout system. Turn off areas you do not need to keep the brief tighter.
+            Each toggle tells the AI where to go deep. <strong>Layout &amp; Structure</strong> includes spacing, grid, containers, and the overall layout system. Turn off areas you do not need to keep the written report tighter (crawl and image harvest still follow your scan depth).
           </p>
           <p class="options-estimate" id="depth-estimate" aria-live="polite">
             Estimated analysis depth: <strong>Standard</strong> <span class="options-estimate-sub">(based on selected areas)</span>
@@ -205,24 +255,84 @@
           <input type="checkbox" id="compare-pair" />
           <span class="compare-text">Compare original vs clone (upload screenshots in order: original first, then clone)</span>
         </label>
+        <div class="export-prefs" aria-label="Output preferences">
+          <p class="export-prefs-title">Output &amp; delivery</p>
+          <label class="export-pref-row export-pref-stack">
+            <span class="export-pref-text">
+              <strong>Service package (Fiverr / client tiers)</strong>
+              <span class="export-pref-hint">Shapes how deep the written blueprint goes. Crawl depth still follows your pills above.</span>
+              <select id="service-package-select" class="export-pref-select" aria-label="Service package preset">
+                <option value="">Full analysis — respect toggles above</option>
+                <option value="basic">Basic — homepage &amp; above-the-fold breakdown</option>
+                <option value="standard">Standard — multi-page structure &amp; key sections</option>
+                <option value="premium">Premium — full blueprint + implementation-ready notes</option>
+              </select>
+            </span>
+          </label>
+          <label class="export-pref-row">
+            <input type="checkbox" id="pref-client-delivery" />
+            <span class="export-pref-text">
+              <strong>Client delivery mode</strong>
+              <span class="export-pref-hint">Cleaner, client-ready tone; fewer internal “how we analyzed” notes.</span>
+            </span>
+          </label>
+          <label class="export-pref-row">
+            <input type="checkbox" id="pref-remove-image-bg" />
+            <span class="export-pref-text">
+              <strong>Remove flat backgrounds on uploads</strong>
+              <span class="export-pref-hint">Trims solid-color borders and margins (screenshots on white/gray). Not full AI matting.</span>
+            </span>
+          </label>
+          <label class="export-pref-row">
+            <input type="checkbox" id="pref-strip-watermarks" />
+            <span class="export-pref-text">
+              <strong>No watermarks</strong>
+              <span class="export-pref-hint">Hides the on-screen badge and the “Generated with CloneAI” footer in the report text.</span>
+            </span>
+          </label>
+        </div>
+        <details class="promo-details">
+          <summary class="promo-summary">Promo code</summary>
+          <label class="promo-label" for="promo-code-input">
+            Optional — validated on the server only
+            <input
+              type="password"
+              id="promo-code-input"
+              class="promo-input"
+              autocomplete="off"
+              maxlength="128"
+              placeholder="Enter code"
+            />
+          </label>
+        </details>
       </section>
 
       <button type="button" class="analyze-btn" id="analyze-btn">
         <span class="analyze-btn-shine" aria-hidden="true"></span>
-        <span class="analyze-btn-label" id="analyze-btn-label">Generate Developer Brief</span>
+        <span class="analyze-btn-label" id="analyze-btn-label">Run full site analysis</span>
       </button>
 
       <section class="progress-card" id="progress-section" hidden>
         <div class="progress-upsell" id="progress-upsell" hidden>
           <p class="progress-upsell-text">
-            Want deeper analysis? <strong>Upgrade to Pro</strong> for full-site crawl and higher monthly limits.
+            Want <strong>deeper analysis</strong>, <strong>full-site crawls</strong>, or <strong>URL + screenshots</strong> in one run?
+            <strong>Upgrade to Pro</strong> — most popular with agencies.
           </p>
-          <button type="button" class="btn-upsell-inline" id="progress-upsell-btn">View Pro</button>
+          <button
+            type="button"
+            class="btn-upsell-inline"
+            id="progress-upsell-btn"
+            data-checkout="pro"
+            data-billing-source="progress_upsell"
+          >
+            View Pro
+          </button>
         </div>
         <p class="plan-notice-banner" id="mid-flow-plan-notice" hidden></p>
         <div class="progress-head">
           <div class="progress-head-text">
             <h2 class="progress-title">AI agents at work</h2>
+            <span class="priority-pill hidden" id="priority-processing-pill">Priority processing</span>
             <p class="progress-stage" id="progress-stage" aria-live="polite"></p>
           </div>
           <span class="progress-pct" id="progress-pct">0%</span>
@@ -235,10 +345,15 @@
 
       <section class="results-section" id="results-section" hidden>
         <div class="scorecard" id="scorecard">
-          <div class="metric-card">
-            <span class="metric-label">Issues Found</span>
+          <button
+            type="button"
+            class="metric-card metric-card-interactive"
+            id="issues-metric-btn"
+            aria-label="View issues from section 12 and optional AI fixes"
+          >
+            <span class="metric-label">Issues Found <span class="metric-hint">(tap)</span></span>
             <span class="metric-value" id="metric-issues">—</span>
-          </div>
+          </button>
           <div class="metric-card">
             <span class="metric-label">Section Count</span>
             <span class="metric-value metric-green" id="metric-sections">—</span>
@@ -255,9 +370,11 @@
 
         <div class="results-sticky" id="results-sticky">
           <div class="results-sticky-inner">
-            <span class="results-sticky-brand">Developer Brief</span>
+            <span class="results-sticky-brand">Site analysis</span>
             <div class="results-sticky-actions">
               <button type="button" class="btn-sticky btn-sticky-primary" id="sticky-copy-btn">Copy</button>
+              <button type="button" class="btn-sticky" id="sticky-share-btn">Share report</button>
+              <button type="button" class="btn-sticky btn-sticky-upgrade hidden" id="sticky-upgrade-btn">Upgrade</button>
               <button type="button" class="btn-sticky" id="sticky-rerun-btn">Re-run</button>
               <button type="button" class="btn-sticky" id="download-txt-btn">Download .txt</button>
               <button type="button" class="btn-sticky" id="download-pdf-btn">Save PDF</button>
@@ -269,11 +386,29 @@
 
         <div class="post-result-upsell" id="post-result-upsell" hidden>
           <div class="post-result-upsell-inner">
-            <p class="post-result-upsell-title">Unlock deeper scans + more runs</p>
+            <p class="post-result-upsell-kicker">You just got real output</p>
+            <p class="post-result-upsell-title">Ready to analyze more sites?</p>
             <p class="post-result-upsell-sub">
-              <strong>Pro</strong> includes full crawl, URL + screenshots together, and 50 analyses per month — best value for steady use.
+              Unlock <strong>deeper scans</strong>, <strong>remove the watermark</strong>, <strong>premium exports</strong>, and more runs — <strong>Pro</strong> is best value for agencies.
             </p>
-            <button type="button" class="btn-plan btn-plan-primary" id="post-result-upgrade-btn">Upgrade Now</button>
+            <div class="post-result-cta-row">
+              <button
+                type="button"
+                class="btn-plan btn-plan-primary"
+                id="post-result-upgrade-btn"
+                data-checkout="pro"
+                data-billing-source="post_result_pro"
+              >
+                Upgrade to Pro
+              </button>
+              <button type="button" class="btn-plan btn-plan-outline" id="dfy-open-btn">
+                Want this rebuilt for you?
+              </button>
+            </div>
+            <p class="post-result-share-hint">
+              <button type="button" class="link-like" id="post-result-share-btn">Share this report</button>
+              — or send builders to CloneAI.
+            </p>
           </div>
         </div>
         <div class="results-head">
@@ -338,50 +473,139 @@
         <button type="button" class="modal-close" id="modal-pricing-close" aria-label="Close">×</button>
         <h2 id="modal-pricing-title" class="modal-title">Plans &amp; pricing</h2>
         <p class="modal-sub">Save time, build faster — pick a plan that matches how many sites you audit each month.</p>
-        <div class="pricing-grid">
+        <div class="pricing-grid pricing-grid-4">
           <article class="plan-card">
             <h3 class="plan-name">Free</h3>
             <p class="plan-price"><span class="plan-price-num">$0</span></p>
+            <p class="plan-tagline">Best for trying the product</p>
             <p class="plan-runs">1 analysis <strong>lifetime</strong></p>
             <ul class="plan-features">
-              <li>Single-page URL or screenshots (not combined)</li>
-              <li>Full streaming brief + watermark</li>
-              <li>Try before you buy</li>
+              <li>Homepage scan only</li>
+              <li>URL <em>or</em> images — not combined</li>
+              <li>Watermark on report · copy only</li>
             </ul>
-            <button type="button" class="btn-plan btn-plan-muted" data-close-pricing>Continue on Free</button>
+            <button type="button" class="btn-plan btn-plan-muted" data-close-pricing>Start Free</button>
           </article>
           <article class="plan-card">
             <h3 class="plan-name">Starter</h3>
+            <p class="plan-tagline">Best for freelancers &amp; solo devs</p>
             <p class="plan-price"><span class="plan-price-num">$5</span><span class="plan-price-unit">/month</span></p>
             <p class="plan-runs"><strong>10</strong> analyses / month</p>
             <ul class="plan-features">
-              <li>Balanced multi-page crawl (~25 pages)</li>
-              <li>URL + images together</li>
-              <li>All analysis toggles</li>
+              <li>Up to ~25 pages per scan</li>
+              <li>URL only or images only (combo = Pro or Power)</li>
+              <li>All toggles · no watermark · .txt export</li>
             </ul>
-            <button type="button" class="btn-plan btn-plan-outline" data-checkout="starter">Subscribe</button>
+            <button
+              type="button"
+              class="btn-plan btn-plan-outline"
+              data-checkout="starter"
+              data-billing-source="pricing_starter"
+            >
+              Get Starter
+            </button>
           </article>
           <article class="plan-card plan-card-popular">
             <span class="plan-badge">Most Popular</span>
-            <h3 class="plan-name">Pro</h3>
+            <h3 class="plan-name">Pro <span class="plan-best-value">Best value</span></h3>
+            <p class="plan-tagline">Best for agencies &amp; power users</p>
             <p class="plan-price">
               <span class="plan-price-num">$12</span><span class="plan-price-unit">/month</span>
-              <span class="plan-best-value">Best Value</span>
             </p>
             <p class="plan-runs"><strong>50</strong> analyses / month</p>
             <ul class="plan-features">
-              <li>Full-site crawl (100+ pages)</li>
-              <li>Everything in Starter</li>
-              <li>Best for agencies &amp; power users</li>
+              <li>Deep crawl (~300 pages) + URL + images combo</li>
+              <li>Heavy image harvest (1000+ URLs on plan caps)</li>
+              <li>Premium exports (PDF, Cursor handoff)</li>
+              <li>Priority processing in-app</li>
             </ul>
-            <button type="button" class="btn-plan btn-plan-primary" data-checkout="pro">Go Pro</button>
+            <button
+              type="button"
+              class="btn-plan btn-plan-primary"
+              data-checkout="pro"
+              data-billing-source="pricing_pro"
+            >
+              Upgrade to Pro
+            </button>
+          </article>
+          <article class="plan-card plan-card-power">
+            <span class="plan-badge plan-badge-power">Max assets</span>
+            <h3 class="plan-name">Power</h3>
+            <p class="plan-tagline">Studios &amp; theme-heavy storefronts</p>
+            <p class="plan-price">
+              <span class="plan-price-num">$19</span><span class="plan-price-unit">/month</span>
+            </p>
+            <p class="plan-runs"><strong>100</strong> analyses / month</p>
+            <ul class="plan-features">
+              <li>Highest crawl &amp; image caps + Asset Harvest headroom</li>
+              <li>Same exports &amp; priority as Pro</li>
+            </ul>
+            <button
+              type="button"
+              class="btn-plan btn-plan-outline"
+              data-checkout="power"
+              data-billing-source="pricing_power"
+            >
+              Get Power
+            </button>
           </article>
         </div>
         <p class="pricing-foot">
-          <button type="button" class="link-like" data-checkout="extra" id="pricing-extra-link">
+          <button
+            type="button"
+            class="link-like"
+            data-checkout="extra"
+            id="pricing-extra-link"
+            data-billing-source="pricing_extra"
+          >
             Need just one more run? Buy an extra analysis for $3 (one-time).
           </button>
         </p>
+        <p class="pricing-foot pricing-foot-second">
+          <button
+            type="button"
+            class="link-like"
+            data-checkout="deep_extract"
+            id="pricing-deep-extract-link"
+            data-billing-source="pricing_deep_extract"
+          >
+            One deep extraction run — $5 (bonus run + tracked as deep scan).
+          </button>
+        </p>
+      </div>
+    </div>
+
+    <div class="modal-overlay" id="modal-issues" hidden>
+      <div
+        class="modal modal-issues"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="modal-issues-title"
+        tabindex="-1"
+      >
+        <button type="button" class="modal-close" id="modal-issues-close" aria-label="Close">×</button>
+        <h2 id="modal-issues-title" class="modal-title">Critical issues (section 12)</h2>
+        <p class="modal-sub">
+          Pulled from your current report. Download the list anytime. <strong>Apply AI fixes</strong> rewrites the
+          full brief (uses <strong>one analysis run</strong>); your original assets ZIP link stays valid.
+        </p>
+        <div class="issues-modal-scroll">
+          <div class="issues-modal-content summary-content" id="issues-modal-content"></div>
+        </div>
+        <label class="issues-fix-label" for="issues-fix-note"
+          >Optional focus for revision
+          <textarea
+            id="issues-fix-note"
+            class="issues-fix-note"
+            rows="2"
+            maxlength="3000"
+            placeholder="e.g. Expand footer links and fix section 7 ordering"
+          ></textarea>
+        </label>
+        <div class="issues-modal-actions">
+          <button type="button" class="btn-outline" id="issues-download-txt-btn">Download issues (.txt)</button>
+          <button type="button" class="btn-filled" id="issues-apply-fixes-btn">Apply AI fixes</button>
+        </div>
       </div>
     </div>
 
@@ -396,16 +620,104 @@
         <button type="button" class="modal-close" id="modal-paywall-close" aria-label="Close">×</button>
         <h2 id="modal-paywall-title" class="modal-title">You’ve reached your limit</h2>
         <p class="modal-sub" id="paywall-detail">
-          Upgrade in one click to keep generating briefs — or grab a single extra run.
+          Upgrade in one click to keep running full analyses — or grab a single extra run.
         </p>
         <div class="paywall-actions">
-          <button type="button" class="btn-plan btn-plan-primary" data-checkout="pro">Upgrade to Pro — $12/mo</button>
-          <button type="button" class="btn-plan btn-plan-outline" data-checkout="starter">Starter — $5/mo</button>
-          <button type="button" class="btn-plan btn-plan-muted" data-checkout="extra" id="paywall-extra-btn">
+          <button
+            type="button"
+            class="btn-plan btn-plan-primary"
+            data-checkout="pro"
+            data-billing-source="paywall_pro"
+          >
+            Upgrade to Pro — $12/mo
+          </button>
+          <button
+            type="button"
+            class="btn-plan btn-plan-outline"
+            data-checkout="starter"
+            data-billing-source="paywall_starter"
+          >
+            Starter — $5/mo
+          </button>
+          <button
+            type="button"
+            class="btn-plan btn-plan-muted"
+            data-checkout="extra"
+            id="paywall-extra-btn"
+            data-billing-source="paywall_extra"
+          >
             Buy 1 extra run — $3
           </button>
         </div>
         <p class="paywall-hint"><button type="button" class="link-like" id="paywall-see-plans">See all plans</button></p>
+      </div>
+    </div>
+
+    <div class="modal-overlay" id="modal-credentials" hidden>
+      <div
+        class="modal modal-account"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="modal-credentials-title"
+        tabindex="-1"
+      >
+        <button type="button" class="modal-close" id="modal-credentials-close" aria-label="Close">×</button>
+        <h2 id="modal-credentials-title" class="modal-title">Your account is ready</h2>
+        <p class="modal-sub">
+          Save these credentials. Use them to <strong>Log in</strong> on this or another device. This password is not shown again.
+        </p>
+        <div class="account-field-block">
+          <label class="account-field-label" for="credentials-login-field">Email (login)</label>
+          <div class="account-field-row">
+            <input type="text" readonly class="account-readonly-input" id="credentials-login-field" autocomplete="username" />
+            <button type="button" class="btn-outline" id="credentials-copy-email">Copy</button>
+          </div>
+        </div>
+        <div class="account-field-block">
+          <label class="account-field-label" for="credentials-password-field">Password</label>
+          <div class="account-field-row">
+            <input type="text" readonly class="account-readonly-input mono-input" id="credentials-password-field" autocomplete="off" spellcheck="false" />
+            <button type="button" class="btn-outline" id="credentials-copy-password">Copy</button>
+          </div>
+        </div>
+        <button type="button" class="btn-plan btn-plan-primary account-done-btn" id="credentials-done-btn">I’ve saved these</button>
+      </div>
+    </div>
+
+    <div class="modal-overlay" id="modal-login" hidden>
+      <div class="modal modal-account" role="dialog" aria-modal="true" aria-labelledby="modal-login-title" tabindex="-1">
+        <button type="button" class="modal-close" id="modal-login-close" aria-label="Close">×</button>
+        <h2 id="modal-login-title" class="modal-title">Log in</h2>
+        <p class="modal-sub">Sign in with the email and password you received after checkout.</p>
+        <form id="login-form" class="dfy-form">
+          <label class="dfy-label"
+            >Email
+            <input type="email" name="email" class="dfy-input" required autocomplete="username" />
+          </label>
+          <label class="dfy-label"
+            >Password
+            <input type="password" name="password" class="dfy-input" required autocomplete="current-password" />
+          </label>
+          <button type="submit" class="btn-plan btn-plan-primary">Sign in</button>
+        </form>
+      </div>
+    </div>
+
+    <div class="modal-overlay" id="modal-dfy" hidden>
+      <div class="modal modal-dfy" role="dialog" aria-modal="true" aria-labelledby="modal-dfy-title" tabindex="-1">
+        <button type="button" class="modal-close" id="modal-dfy-close" aria-label="Close">×</button>
+        <h2 id="modal-dfy-title" class="modal-title">Done-for-you rebuild</h2>
+        <p class="modal-sub">
+          Tell us about the site. We will follow up with scope and pricing (landing pages from $299+, multi-page from $500–$1500+).
+        </p>
+        <form id="dfy-form" class="dfy-form">
+          <label class="dfy-label">Name <input type="text" name="name" class="dfy-input" autocomplete="name" /></label>
+          <label class="dfy-label">Email <input type="email" name="email" class="dfy-input" required autocomplete="email" /></label>
+          <label class="dfy-label">Website to clone <input type="text" name="website" class="dfy-input" placeholder="https://…" /></label>
+          <label class="dfy-label">Budget range <input type="text" name="budget" class="dfy-input" placeholder="e.g. $500–$1k" /></label>
+          <label class="dfy-label">Notes <textarea name="notes" class="dfy-textarea" rows="3"></textarea></label>
+          <button type="submit" class="btn-plan btn-plan-primary">Submit</button>
+        </form>
       </div>
     </div>
 

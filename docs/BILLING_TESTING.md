@@ -9,7 +9,7 @@ Enforcement is **server-side only**. The frontend sends `X-CloneAI-User-Id` (UUI
    - Pro — recurring monthly **$12** → `STRIPE_PRICE_PRO`
    - Optional: Extra run — one-time **$3** → `STRIPE_PRICE_EXTRA_RUN`
 2. In **Developers → Webhooks**, add endpoint: `https://<your-api-host>/api/billing/webhook`
-3. Subscribe to at least: `checkout.session.completed`, `customer.subscription.deleted`, `invoice.payment_failed` (optional log).
+3. Subscribe to at least: `checkout.session.completed`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.payment_failed` (optional log).
 4. Copy signing secret → `STRIPE_WEBHOOK_SECRET`.
 
 Local webhook forwarding:

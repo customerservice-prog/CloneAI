@@ -33,7 +33,7 @@ CORS_ORIGINS=https://your-app.vercel.app
 |----------|---------|
 | `CORS_ORIGINS` | **Required in production:** comma-separated frontend origins (no `*`). Dev defaults include `http://localhost:5173`. |
 | `CLONEAI_INGRESS_KEY` | Optional shared secret; browser sends `X-CloneAI-Key` (set `VITE_CLONEAI_KEY` on the frontend). |
-| `RATE_LIMIT_PER_MINUTE` | Max `POST /api/analyze` per IP per minute (default **8**, clamped 5–30). |
+| `RATE_LIMIT_PER_MINUTE` | Max `POST /api/analyze` per IP per minute (default **10**, clamped **3–15**). |
 | `RATE_LIMIT_DAILY_PER_IP` | Max analyses per IP per 24h (default **200**, clamped 20–5000). |
 | `HTML_FETCH_TIMEOUT_MS` | HTML fetch timeout (default **15000**, clamped 8s–20s). |
 | `HTML_FETCH_MAX_REDIRECTS` | Follow redirects only on the **same registrable host** (default **2**, max **5**). |
@@ -66,6 +66,15 @@ CORS_ORIGINS=https://your-app.vercel.app
 | `STRIPE_PRICE_EXTRA_RUN` | One-time price ID ($3) for bonus runs. |
 | `FRONTEND_URL` | Origin for Stripe Checkout `success_url` / `cancel_url` (e.g. `https://your-app.vercel.app`). |
 | `BILLING_DATA_PATH` | Optional path to `billing.json` store (default: `backend/data/billing.json`). |
+| `CLONEAI_PROMO_CODE` | Optional server secret: valid `promoCode` form field or `X-CloneAI-Promo-Code` header grants a **Pro-class** run for billing checks only (still rate-limited). **Body:** exact string match (no trim). **Header:** trimmed. |
+| `HTML_MODEL_MAX_CHARS_PER_PAGE` | After HTML cleaning, max characters per crawled page sent toward the model budget (default **80k**, max **150k**). |
+| `MAX_ANALYSIS_IMAGES` | Max screenshots per analyze request (default **8**, max **12**). |
+| `MAX_OPENAI_REQUEST_JSON_BYTES` | Hard stop if the OpenAI JSON body exceeds this size (default **14MiB**). |
+| `GLOBAL_ANALYZE_BURST_MAX` / `GLOBAL_ANALYZE_BURST_WINDOW_MS` | Global analyze starts per rolling window (abuse / cost spike guard). |
+| `ANALYZE_MAX_CONCURRENT_PER_USER` | Max parallel analyses per `X-CloneAI-User-Id` (or IP fallback), default **1**. |
+| `OPENAI_API_BASE` | Override API base URL (e.g. proxy or Azure OpenAI-compatible endpoint). |
+| `OPENAI_STREAM_INCLUDE_USAGE` | Set `false` if the chat provider rejects `stream_options.include_usage`. |
+| `COST_ESTIMATE_INPUT_PER_MILLION_USD` / `COST_ESTIMATE_OUTPUT_PER_MILLION_USD` | Optional overrides for `adminCost` USD estimates in `GET /api/billing/analytics`. |
 
 Full Stripe test matrix: [docs/BILLING_TESTING.md](docs/BILLING_TESTING.md).
 
@@ -75,6 +84,8 @@ Full Stripe test matrix: [docs/BILLING_TESTING.md](docs/BILLING_TESTING.md).
 |----------|---------|
 | `VITE_API_URL` | **Required for production builds:** API origin only, e.g. `https://cloneai-api.onrender.com` (no path, no trailing slash). Local dev falls back to `http://localhost:3001`. |
 | `VITE_CLONEAI_KEY` | Matches `CLONEAI_INGRESS_KEY` when enabled. |
+| `VITE_PUBLIC_APP_URL` | Optional; canonical app URL for branding links in exports (see backend table). |
+| `VITE_TURNSTILE_SITE_KEY` | Cloudflare Turnstile (with `TURNSTILE_SECRET_KEY` on the API) for captcha after first successful analyze per IP. |
 
 ## Run locally
 
@@ -119,11 +130,34 @@ Open [http://localhost:5173](http://localhost:5173).
 
 ## Deploy
 
-**Render / Railway (backend)**  
-Root `backend`, start `npm start`, set env vars above. Confirm `GET /api/health`.
+**Pre-flight (local)**  
+From repo root after filling `backend/.env`:
+
+```bash
+npm run launch-check              # OpenAI key + optional ingress length
+npm run launch-check:prod         # + CORS_ORIGINS; if BILLING_ENABLED=true, full Stripe + FRONTEND_URL
+npm run verify                    # tests + production frontend build
+```
+
+**Docker (backend)**  
+Chromium + Playwright are included in the image (no separate `playwright install` on the host).
+
+```bash
+docker build -t cloneai-api ./backend
+docker run --env-file backend/.env -p 3001:3001 cloneai-api
+```
+
+**Render**  
+Optional [`render.yaml`](render.yaml) Blueprint: Docker service, health check `/api/health`. Set secrets in the Render dashboard.
+
+**Node-only (Railway, Fly, etc.)**  
+Root directory `backend`, start command `npm start`, install `npx playwright install chromium` on first deploy or use the Dockerfile.
 
 **Vercel (frontend)**  
-Root `frontend`, framework Vite, output `dist`, set `VITE_API_URL` to the public API origin.
+Project root `frontend`. [`vercel.json`](frontend/vercel.json) sets Vite build/output. Set **`VITE_API_URL`** to the public API origin (no trailing slash).
+
+**CI**  
+GitHub Actions runs `npm run verify` on push/PR to `main` / `master` (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
 
 ## Security & limits (launch checklist)
 
@@ -132,7 +166,7 @@ Root `frontend`, framework Vite, output `dist`, set `VITE_API_URL` to the public
 - **Rate limits:** Per-minute **and** per-24h caps on `/api/analyze` (cost protection).
 - **SSRF:** DNS resolution with blocking of private/link-local/CGNAT ranges and metadata-style hostnames (`backend/ssrf.js`). URLs with embedded credentials are rejected.
 - **Redirects:** Only same host key (after stripping leading `www.`) as the initial URL; `http`/`https` only.
-- **Uploads:** PNG/JPEG/WebP only, magic-byte verification, **20MB × 10**, Multer field/part limits; files renamed to `upload-N.ext` server-side.
+- **Uploads:** PNG/JPEG/WebP only, magic-byte verification, **20MB** per file, up to **10** files in multipart; **analyze** accepts at most **`MAX_ANALYSIS_IMAGES` (default 8)** per run. Files renamed to `upload-N.ext` server-side.
 - **Honeypot:** Hidden `hp` field must be empty.
 - **Errors:** Production uses generic client messages; stack traces and internals stay in logs only.
 - **Secrets:** OpenAI key server-only; never returned to the browser.
