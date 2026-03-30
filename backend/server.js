@@ -680,7 +680,14 @@ async function abortBillingIfNeeded(req) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const jitter = (a, b) => sleep(a + Math.floor(Math.random() * (b - a + 1)));
 
-app.get('/', (_req, res) => {
+app.get('/', (req, res) => {
+  const front = (process.env.FRONTEND_URL || process.env.PUBLIC_APP_URL || '').trim().replace(/\/$/, '');
+  const accept = String(req.get('accept') || '');
+  // Apex domain often points at this API by mistake; send real browsers to the static app.
+  if (front && accept.includes('text/html')) {
+    res.redirect(302, `${front}/`);
+    return;
+  }
   res.type('application/json').send({
     ok: true,
     service: 'cloneai-api',

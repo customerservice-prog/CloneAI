@@ -86,11 +86,23 @@ The frontend repo includes **`frontend/.env.production`** with this URL and **`V
 
 ---
 
+## DNS: do not point the **apex** at the API
+
+If **`https://siteclonerpro.com`** (no `www`) opens a blank page, wrong content, or a browser error, the **apex record** is probably aimed at **Render** (the API). The **website** lives on **Vercel** (or similar).
+
+**Correct setup**
+
+- **`www.siteclonerpro.com`** → your **frontend** host (Vercel).
+- **`siteclonerpro.com` (apex)** → also the **frontend** host (Vercel apex / ALIAS), **or** a **redirect** to `https://www.siteclonerpro.com` in Cloudflare (**Rules** → redirect).
+- **`api.siteclonerpro.com`** (optional) → **Render** if you want a pretty API hostname.
+
+The API already **redirects** browser visits on `/` to **`FRONTEND_URL`** when `FRONTEND_URL` is set on Render, but fixing DNS (or Cloudflare redirect) is still best.
+
 ## Custom domain on Render (optional)
 
 - Render dashboard → your Web Service → **Settings** → **Custom Domains** → follow Render’s DNS instructions.
-- In **Namecheap** → **Advanced DNS**, add exactly what Render shows (often a **CNAME** for `www`).
-- Update **`CORS_ORIGINS`** and **`FRONTEND_URL`** to use `https://yourdomain.com`.
+- Prefer **`api.`** subdomain for the API so **apex** stays on the static app.
+- Update **`CORS_ORIGINS`** and **`FRONTEND_URL`** to match the URLs users see in the browser.
 
 ---
 
