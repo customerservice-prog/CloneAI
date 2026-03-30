@@ -18,7 +18,9 @@ With `backend/.env` filled (OpenAI key), you can also run:
 npm run preflight
 ```
 
-(`verify` + `launch-check`; does not require production CORS.)
+(`verify` + `launch-check:dev`, which forces `NODE_ENV=development` for the check so a global production shell does not false-fail CORS.)
+
+For **strict** production validation (same as Render): `npm run launch-check:prod` (requires full `CORS_ORIGINS`, Stripe webhook, `https` `FRONTEND_URL` unless you intentionally use `LAUNCH_CHECK_RELAX_BILLING_LOCAL` — **never on production hosts**).
 
 This runs backend tests + production Vite build (same as GitHub Actions). Fix failures before any deploy.
 
@@ -56,7 +58,7 @@ npm run launch-check:prod
 
 1. Project root: **`frontend/`** (see `frontend/vercel.json`).
 2. Production build reads **`frontend/.env.production`** (API URL + public app URL). Override in the host UI if needed.
-3. Attach domains: **`www.siteclonerpro.com`** (and apex if you use it).
+3. Attach domains: **`siteclonerpro.com`** (apex) and **`www`** if you use it (canonical in repo is apex).
 4. Redeploy after any env change.
 
 ---

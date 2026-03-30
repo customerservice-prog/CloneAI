@@ -9,8 +9,9 @@
     "adversarial": "npm run adversarial --prefix backend",
     "build": "npm run build --prefix frontend",
     "verify": "npm test --prefix backend && npm run build --prefix frontend",
-    "preflight": "npm run verify && npm run launch-check",
+    "preflight": "npm run verify && npm run launch-check:dev",
     "launch-check": "npm run launch-check --prefix backend",
+    "launch-check:dev": "npm run launch-check:dev --prefix backend",
     "launch-check:prod": "npm run launch-check:prod --prefix backend"
   }
 }

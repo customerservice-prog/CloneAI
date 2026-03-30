@@ -12,6 +12,7 @@
     "smoke": "node scripts/smoke.mjs",
     "adversarial": "node scripts/adversarial-smoke.mjs",
     "launch-check": "node scripts/launch-check.mjs",
+    "launch-check:dev": "node scripts/launch-check-dev.mjs",
     "launch-check:prod": "node scripts/launch-check.mjs --production",
     "stripe-webhook:create": "node scripts/create-stripe-webhook.mjs",
     "test": "node --test-concurrency=1 test/billing.test.mjs && node --test-concurrency=1 test/billing-scale-pro.test.mjs && node --test-concurrency=1 test/security.test.mjs && node --test-concurrency=1 test/costControls.test.mjs && node --test-concurrency=1 test/promoCode.test.mjs"

@@ -141,7 +141,8 @@ Open [http://localhost:5173](http://localhost:5173).
 From repo root after filling `backend/.env`:
 
 ```bash
-npm run launch-check              # OpenAI key + optional ingress length
+npm run launch-check              # OpenAI key + optional ingress length (inherits shell NODE_ENV)
+npm run launch-check:dev          # same, but forces NODE_ENV=development (use if your shell sets production)
 npm run launch-check:prod         # + CORS (https-only origins in prod); if BILLING_ENABLED=true, Stripe + https FRONTEND_URL
 npm run verify                    # tests + production frontend build
 ```
@@ -157,7 +158,7 @@ docker run --env-file backend/.env -p 3001:3001 cloneai-api
 **Render**  
 - **Start here:** [docs/RENDER_EASY.md](docs/RENDER_EASY.md)  
 - **Full launch sequence:** [docs/LAUNCH_PHASES.md](docs/LAUNCH_PHASES.md)  
-- Optional Blueprint: [`render.yaml`](render.yaml) (Docker, `/api/health`). Set `OPENAI_API_KEY` in the dashboard; `CORS_ORIGINS` / `FRONTEND_URL` are preset for `siteclonerpro.com` in the blueprint.
+- Optional Blueprint: [`render.yaml`](render.yaml) (Docker API + optional static `cloneai-web`). Set `OPENAI_API_KEY` in the dashboard; `CORS_ORIGINS` / `FRONTEND_URL` are preset for apex `siteclonerpro.com`. Namecheap DNS: [docs/NAMECHEAP_RENDER.md](docs/NAMECHEAP_RENDER.md).
 
 **Node-only (Railway, Fly, etc.)**  
 Root directory `backend`, start command `npm start`, install `npx playwright install chromium` on first deploy or use the Dockerfile.

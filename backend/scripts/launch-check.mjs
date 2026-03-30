@@ -45,20 +45,31 @@ if (wantProd) {
 }
 
 const billingOn = String(process.env.BILLING_ENABLED || '').toLowerCase() === 'true';
+const relaxBillingLocal =
+  String(process.env.LAUNCH_CHECK_RELAX_BILLING_LOCAL || '').toLowerCase() === 'true';
+
+need(
+  'LAUNCH_CHECK_RELAX_BILLING_LOCAL cannot be used with --production / NODE_ENV=production',
+  !(relaxBillingLocal && wantProd)
+);
 
 if (billingOn) {
   need('STRIPE_SECRET_KEY', Boolean((process.env.STRIPE_SECRET_KEY || '').trim()));
-  need('STRIPE_WEBHOOK_SECRET', Boolean((process.env.STRIPE_WEBHOOK_SECRET || '').trim()));
+  if (!relaxBillingLocal) {
+    need('STRIPE_WEBHOOK_SECRET', Boolean((process.env.STRIPE_WEBHOOK_SECRET || '').trim()));
+  }
   need('STRIPE_PRICE_STARTER', Boolean((process.env.STRIPE_PRICE_STARTER || '').trim()));
   need('STRIPE_PRICE_PRO', Boolean((process.env.STRIPE_PRICE_PRO || '').trim()));
   need('STRIPE_PRICE_EXTRA_RUN', Boolean((process.env.STRIPE_PRICE_EXTRA_RUN || '').trim()));
   const fe = (process.env.FRONTEND_URL || '').trim();
   need('FRONTEND_URL (Stripe success/cancel redirects)', Boolean(fe));
-  need('FRONTEND_URL must start with https:// when billing is on', fe.startsWith('https://'));
-  need(
-    'FRONTEND_URL must not be localhost when billing is on',
-    !/^https?:\/\/(localhost|127\.0\.0\.1)/i.test(fe)
-  );
+  if (!relaxBillingLocal) {
+    need('FRONTEND_URL must start with https:// when billing is on', fe.startsWith('https://'));
+    need(
+      'FRONTEND_URL must not be localhost when billing is on',
+      !/^https?:\/\/(localhost|127\.0\.0\.1)/i.test(fe)
+    );
+  }
   const sk = (process.env.STRIPE_SECRET_KEY || '').trim();
   need(
     'STRIPE_SECRET_KEY should look like sk_live_... or sk_test_...',
@@ -80,6 +91,11 @@ if (issues.length) {
 }
 
 console.log('Launch check passed.');
+if (relaxBillingLocal && billingOn) {
+  console.warn(
+    '(LAUNCH_CHECK_RELAX_BILLING_LOCAL: webhook/FRONTEND URL rules relaxed — never on production hosts)'
+  );
+}
 if (wantProd) {
   console.log('(production rules: CORS + billing bundle verified)');
 } else {
