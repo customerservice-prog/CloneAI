@@ -1,0 +1,3 @@
+# https://siteclonerpro.com — static app on Vercel
+User-agent: *
+Allow: /

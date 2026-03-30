@@ -52,6 +52,19 @@ import {
 } from './billingHttp.js';
 import { appendLeadRecord } from './leadsStore.js';
 import { promoMatchesRequest, configuredPromoCode } from './promoCode.js';
+import { probeSinkMiddleware } from './probeSink.js';
+import {
+  analysisReuseEnabled,
+  analysisFastReplayEnabled,
+  analysisCacheMaxAgeMs,
+  getAnalysisBaseDir,
+  buildArchiveLookupContext,
+  loadLatestSnapshot,
+  isSnapshotFresh,
+  saveAnalysisSnapshot,
+  replayAnalysisFromArchive,
+} from './analysisArchive.js';
+import { processSiteAssetZipBuffer } from './processAssetZip.js';
 
 dotenv.config();
 
@@ -112,6 +125,7 @@ function enforceHttpsUnlessLocal(req, res, next) {
 }
 
 app.use(enforceHttpsUnlessLocal);
+app.use(probeSinkMiddleware);
 
 app.post(
   '/api/billing/webhook',
@@ -123,7 +137,9 @@ app.post(
     });
   }
 );
-const basePort = Number(process.env.PORT) || 3001;
+const envPortRaw = process.env.PORT;
+const hasExplicitPort = envPortRaw != null && String(envPortRaw).trim() !== '';
+const basePort = hasExplicitPort ? Number(envPortRaw) : 3001;
 let listenPort = basePort;
 const LISTEN_PORT_TRIES = 50;
 
@@ -266,6 +282,18 @@ const authLoginLimiter = rateLimit({
   message: { error: 'Too many login attempts. Try again in a few minutes.' },
 });
 
+const ASSET_PIPELINE_RATE_PER_MINUTE = Math.min(
+  30,
+  Math.max(3, Number(process.env.ASSET_PIPELINE_RATE_PER_MINUTE) || 12)
+);
+const assetPipelineLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: ASSET_PIPELINE_RATE_PER_MINUTE,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: 'Too many asset enhancements. Try again in a minute.' },
+});
+
 const MAX_URL_LENGTH = 2048;
 const ALLOWED_IMAGE_MIMES = new Set(['image/png', 'image/jpeg', 'image/webp']);
 
@@ -359,8 +387,14 @@ const IMAGE_HARVEST_CONCURRENCY = Math.min(
 
 const HTML_MODEL_MAX_CHARS_PER_PAGE = Math.min(
   150_000,
-  Math.max(20_000, Number(process.env.HTML_MODEL_MAX_CHARS_PER_PAGE) || 80_000)
+  Math.max(20_000, Number(process.env.HTML_MODEL_MAX_CHARS_PER_PAGE) || 96_000)
 );
+
+/** Progress UI: 0 = crawl, 1–14 = specialists, 15 = chief architect, 16 = OpenAI report writer */
+const REPORT_WRITER_STAGE_INDEX = 16;
+const CHIEF_ARCHITECT_STAGE_INDEX = 15;
+/** Specialist row to “re-run” after chief review (theater only — no extra model call). */
+const CHIEF_REVISIT_AGENT_INDEX = 8;
 
 /** When Asset Harvest mode is on, trim HTML sent to the model to save tokens (images still use full HTML). */
 const ASSET_HARVEST_HTML_MODEL_CHARS = Math.min(
@@ -458,6 +492,17 @@ const siteAssetDownloads = new Map();
 const MAX_SITE_ASSET_DOWNLOADS = Math.min(
   20_000,
   Math.max(200, Number(process.env.MAX_SITE_ASSET_DOWNLOADS) || 2500)
+);
+
+const ENABLE_ASSET_PIPELINE_API =
+  String(process.env.ENABLE_ASSET_PIPELINE_API || 'true').toLowerCase() !== 'false';
+const ASSET_PIPELINE_MAX_ZIP_BYTES = Math.min(
+  150 * 1024 * 1024,
+  Math.max(5 * 1024 * 1024, Number(process.env.ASSET_PIPELINE_MAX_ZIP_BYTES) || 90 * 1024 * 1024)
+);
+const ASSET_PIPELINE_MAX_RASTER = Math.min(
+  2000,
+  Math.max(10, Number(process.env.ASSET_PIPELINE_MAX_RASTER) || 500)
 );
 
 function rememberSiteAssetDownload(token, rec) {
@@ -593,6 +638,26 @@ async function validateAnalyzeRequest(req, res, next) {
     }
     req.body.depth = depth;
 
+    const scanModeRaw = String(req.body.scanMode || req.body.scan_mode || 'elite').trim().toLowerCase();
+    let scanMode = 'elite';
+    if (scanModeRaw === 'images') scanMode = 'images';
+    else if (scanModeRaw === 'screenshots') scanMode = 'screenshots';
+    req.body.scanMode = scanMode;
+    req._scanMode = scanMode;
+
+    if (scanMode === 'screenshots') {
+      if (!(req.body.url || '').trim()) {
+        res.status(400).json({ error: 'Screenshot sweep requires a website URL.' });
+        return;
+      }
+      if ((req.files || []).length > 0) {
+        res.status(400).json({
+          error: 'Screenshot sweep cannot be combined with image uploads. Use the URL field only.',
+        });
+        return;
+      }
+    }
+
     let options = [];
     try {
       options = JSON.parse(req.body.options || '[]');
@@ -610,9 +675,11 @@ async function validateAnalyzeRequest(req, res, next) {
       String(req.body.removeImageBackground || '').trim().toLowerCase()
     );
 
-    req._assetHarvestMode = ['1', 'true', 'yes', 'on'].includes(
+    const harvestFromBody = ['1', 'true', 'yes', 'on'].includes(
       String(req.body.assetHarvest || req.body.deepAssetHarvest || '').trim().toLowerCase()
     );
+    req._assetHarvestMode =
+      harvestFromBody || (req._scanMode === 'images' && Boolean((req.body.url || '').trim()));
 
     const files = req.files || [];
     if (!req.body.url && !files.length) {
@@ -665,7 +732,17 @@ function bufferLooksLikeImage(buf, mime) {
 
 function analyzeRequestLogger(req, res, next) {
   req._analyzeStartedAt = Date.now();
-  logEvent('info', 'analyze_request', { ip: clientIp(req) });
+  logEvent('info', 'analyze_request', {
+    ip: clientIp(req),
+    scanMode: req._scanMode || 'elite',
+    promo: Boolean(req._promoValid),
+  });
+  next();
+}
+
+function reviseRequestLogger(req, res, next) {
+  req._analyzeStartedAt = Date.now();
+  logEvent('info', 'revise_request', { ip: clientIp(req), promo: Boolean(req._promoValid) });
   next();
 }
 
@@ -680,19 +757,74 @@ async function abortBillingIfNeeded(req) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const jitter = (a, b) => sleep(a + Math.floor(Math.random() * (b - a + 1)));
 
+function normalizeHostLabel(h) {
+  return String(h || '')
+    .split(':')[0]
+    .toLowerCase()
+    .replace(/\.$/, '');
+}
+
+/** Origin the client used (req.protocol / req.hostname honor trust proxy + X-Forwarded-*). */
+function requestPublicOrigin(req) {
+  const rawProto = String(req.protocol || '').replace(/:$/, '');
+  const proto = rawProto === 'https' || rawProto === 'http' ? rawProto : 'https';
+  const host = normalizeHostLabel(req.hostname || req.get('host'));
+  if (!host) return null;
+  return `${proto}://${host}`;
+}
+
+/**
+ * If apex DNS points at this API and FRONTEND_URL uses that same host, a 301 to FRONTEND_URL
+ * loops forever (ERR_TOO_MANY_REDIRECTS). Compare using req.hostname (not only raw Host) so
+ * Cloudflare/Render + trust proxy match the public hostname. Also treat matching public origin
+ * as "already there" so we never 301 to the same URL.
+ * @param {import('express').Request} req
+ * @param {string} frontRaw
+ * @returns {string | null}
+ */
+function browserSafeFrontendRedirectTarget(req, frontRaw) {
+  const trimmed = String(frontRaw || '').trim().replace(/\/$/, '');
+  if (!trimmed) return null;
+  let u;
+  try {
+    u = new URL(trimmed.includes('://') ? trimmed : `https://${trimmed}`);
+  } catch {
+    return null;
+  }
+  const targetOrigin = u.origin;
+  const incomingOrigin = requestPublicOrigin(req);
+  if (incomingOrigin && incomingOrigin === targetOrigin) return null;
+
+  const targetHost = normalizeHostLabel(u.hostname);
+  const fromHostname = normalizeHostLabel(req.hostname);
+  const fromHostHeader = normalizeHostLabel(req.get('host'));
+  if (
+    targetHost &&
+    ((fromHostname && fromHostname === targetHost) || (fromHostHeader && fromHostHeader === targetHost))
+  ) {
+    return null;
+  }
+  return `${targetOrigin}/`;
+}
+
 app.get('/', (req, res) => {
-  const front = (process.env.FRONTEND_URL || process.env.PUBLIC_APP_URL || '').trim().replace(/\/$/, '');
+  const front = (process.env.FRONTEND_URL || process.env.PUBLIC_APP_URL || '').trim();
   const accept = String(req.get('accept') || '');
+  const target = browserSafeFrontendRedirectTarget(req, front);
   // Apex domain often points at this API by mistake; send real browsers to the static app.
-  if (front && accept.includes('text/html')) {
-    res.redirect(301, `${front}/`);
+  if (target && accept.includes('text/html')) {
+    res.redirect(301, target);
     return;
   }
   res.type('application/json').send({
     ok: true,
     service: 'cloneai-api',
-    docs: 'Use POST /api/analyze and GET /api/health — the web app is hosted separately.',
+    docs: 'Use POST /api/analyze, POST /api/analyze-revise (JSON), and GET /api/health — the web app is hosted separately.',
     health: '/api/health',
+    hint:
+      !target && front && accept.includes('text/html')
+        ? 'FRONTEND_URL hostname matches this request Host — fix DNS (point apex at your static host) or change FRONTEND_URL to the hostname that should receive browsers.'
+        : undefined,
   });
 });
 
@@ -911,12 +1043,47 @@ Hard requirements:
 - Typography: list font families, weights, approximate sizes (px or rem), line-height, letter-spacing when inferable from HTML or screenshots.
 - Layout: describe structure (grid/flex), key spacing, max-widths, alignment, and breakpoints when visible or inferable.
 - Components: name each distinct UI pattern (buttons, cards, nav items, forms) with variants and states **and where on the page each variant appears**.
-- **Section 9:** If a "HARVESTED PAGE IMAGES" list is provided, map each \`image-NNN.*\` file to what it shows and **where** it sits on the page (section + position). If no harvest list, still list every visible image/video from HTML and screenshots with placement.
+- **Section 9:** If a "HARVESTED PAGE IMAGES" list is provided, map each \`image-NNN.*\` file to what it shows and **where** it sits on the page (section + position). If no harvest list, still list every visible image/video from HTML and screenshots with placement. Explicitly call out **non-\`<img>\` visuals**: CSS \`background-image\` / \`url()\`, lazy \`data-*\` sources, \`srcset\` alternates, sprites, icons, video posters, and theme-preview assets referenced only in style or JSON.
 - Never use vague filler ("modern", "clean") without concrete measurements or tokens. If something cannot be determined, write "Unknown from available input" instead of inventing.
 - If data is missing, say what is unknown instead of guessing.
 - **Section 13 closing:** After the priority fix list, add a **Scorecard** subsection (### Scorecard) with 4–6 bullets: overall clone difficulty (Low/Med/High), structure confidence, visual fidelity confidence, content/inventory completeness, top risk, and estimated rebuild effort — each grounded in what you actually saw in the inputs.
 
 **Efficiency (cost / latency):** Prefer dense bullets over narrative prose. Do not repeat the user prompt or quote large chunks of HTML. Honor "not requested" sections with minimal text.`;
+
+function buildScanModeSystemAddon(scanMode, promoAuthorized) {
+  const sm = scanMode === 'images' ? 'images' : scanMode === 'screenshots' ? 'screenshots' : 'elite';
+  let s = '';
+  if (sm === 'images') {
+    s +=
+      '\n\nSCAN MODE — IMAGE EXTRACT:\nThe operator chose **Image extract**. Keep all 13 numbered ## sections, but **prioritize media and downloadable assets**: Section 9 must be exhaustive (every visible and harvested image, CSS backgrounds, lazy src, srcset, icons, video posters, og/twitter images). Sections 2–8 and 10–12: **concise** unless the content is directly image- or asset-related. Section 13 Scorecard must foreground **asset coverage** (found vs likely missing) and ZIP/harvest usefulness.\n';
+  } else if (sm === 'screenshots') {
+    s +=
+      '\n\nSCAN MODE — SCREENSHOT SWEEP:\nThe operator chose **Screenshot sweep**. The pipeline captured a **full-page PNG per crawled URL** (ZIP `snapshots/`). Raw HTML was withheld from this prompt; **treat the page list + snapshot filenames as your main structural guide** and reason about visuals the way you would from real screenshots (you may not see pixel data in-chat — infer from filenames/order and state unknowns honestly). Keep all 13 ## sections: be **visual/layout-first**; Section 9 maps snapshot files to pages/sections; Section 13 Scorecard must stress **screenshot coverage** (pages captured vs missing) and ZIP usefulness for handoff.\n';
+  } else {
+    s +=
+      '\n\nSCAN MODE — ELITE:\nThe operator chose **Elite scan**: maximum balanced depth across every section per your base instructions (full clone specification).\n';
+  }
+  if (promoAuthorized) {
+    s +=
+      '\nAUTHORIZED PROMO CONTEXT:\nThis session uses a **promotion focused on image harvesting and ZIP/asset extraction**. Elevate image discovery, `image-NNN.*` mapping, hotlinked vs bundled assets, and practical download guidance in Section 9 — in addition to the selected scan mode rules above.\n';
+  }
+  return s;
+}
+
+function buildScanModeUserBlock(scanMode, promoAuthorized) {
+  const sm = scanMode === 'images' ? 'images' : scanMode === 'screenshots' ? 'screenshots' : 'elite';
+  let t =
+    sm === 'images'
+      ? '\n---\nRUN FOCUS (operator UI): **IMAGE EXTRACT** — prioritize harvested files, Section 9, and every image URL pattern in HTML/CSS.\n'
+      : sm === 'screenshots'
+        ? '\n---\nRUN FOCUS (operator UI): **SCREENSHOT SWEEP** — full-page PNG per crawled URL in ZIP `snapshots/`; minimal HTML in prompt; brief must prioritize visual capture coverage and page-by-page notes.\n'
+      : '\n---\nRUN FOCUS (operator UI): **ELITE SCAN** — full-spectrum developer specification.\n';
+  if (promoAuthorized) {
+    t +=
+      '- **Promo / coupon active:** bias the team toward **image pipeline** (harvest manifest, ZIP contents, CDN URLs) while honoring the scan mode.\n';
+  }
+  return t;
+}
 
 function buildAnalyzerDeliveryAddons(clientDelivery, servicePackage) {
   let s = '';
@@ -945,11 +1112,18 @@ function buildOpenAiUserContent({
   harvestedImageManifest,
   clientDelivery,
   servicePackage,
+  scanMode = 'elite',
+  promoAuthorized = false,
 }) {
   let text = `Analyze the following and produce the complete developer brief using EXACTLY this output structure (fill all sections; respect focus rules):\n\n${OUTPUT_STRUCTURE}\n\nReplace "[site name/URL]" with the actual site name or URL. Replace "[today's date]" with: ${todayISO()}\n`;
   text += buildOptionInstructions(options);
 
   text += `\n---\nINPUT CONTEXT:\n- URL: ${url || '(none)'}\n- Scan depth: ${depth}\n`;
+  text += buildScanModeUserBlock(scanMode, promoAuthorized);
+
+  if (depth === 'homepage' && (url || htmlContext)) {
+    text += `\n---\nHOMEPAGE / SINGLE-PAGE **DEEP THEME** PASS:\n- Treat the document as **one complete theme surface** (above and below the fold, including footers and sticky UI).\n- Enumerate **hidden** visual assets where possible: CSS \`background-image\` / \`url()\`, inline \`style=\` URLs, lazy \`data-src\` / \`data-srcset\`, \`<picture>\` / \`srcset\`, sprites, SVG symbols, video \`poster\`, favicons / \`apple-touch\`, and image URLs embedded in JSON or inline scripts.\n- Relate **full-page or viewport screenshots** (if present in inputs) to vertical regions of the page; note fixed/sticky headers or bars.\n- In section 9, separate **hero / product / decorative / icon** imagery when inferable.\n`;
+  }
 
   if (comparePair && files.length >= 2) {
     text += `\n---\nCOMPARISON MODE: Images are uploaded in order. Treat EARLIER images as the **reference / original** and LATER images as the **candidate / clone**. In sections 7, 12, and 13, explicitly list visual and structural differences (layout, typography, color, spacing, copy, imagery). If only one image exists, state that comparison was not possible.\n`;
@@ -970,9 +1144,13 @@ function buildOpenAiUserContent({
   }
 
   if (htmlContext) {
-    text += `\n---\nRAW HTML (truncated for model context):\n\n${htmlContext}\n`;
-    if (scraperMeta?.modelHtmlTruncated) {
-      text += `\n(Note: HTML was truncated for token limits; rely on screenshots + structure hints for gaps.)\n`;
+    if (scraperMeta?.screenshotSweepMode) {
+      text += `\n---\nSCREENSHOT SWEEP CONTEXT (no raw HTML in prompt — use ZIP \`snapshots/*.png\`):\n\n${htmlContext}\n`;
+    } else {
+      text += `\n---\nRAW HTML (truncated for model context):\n\n${htmlContext}\n`;
+      if (scraperMeta?.modelHtmlTruncated) {
+        text += `\n(Note: HTML was truncated for token limits; rely on screenshots + structure hints for gaps.)\n`;
+      }
     }
   } else if (url) {
     text += `\n(No usable HTML body. Prioritize screenshots; otherwise best-effort from URL only.)\n`;
@@ -1253,14 +1431,9 @@ function mapOpenAiFailureStatus(status) {
 
 async function runAnalyzePipeline(req, res) {
   const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey || apiKey === 'your_key_here' || apiKey.startsWith('sk-your')) {
-    res.status(500).json({
-      error: isProd
-        ? 'Service temporarily unavailable.'
-        : 'Server misconfiguration: OPENAI_API_KEY is not set (add it to backend/.env).',
-    });
-    return;
-  }
+  const openAiConfigured = Boolean(
+    apiKey && apiKey !== 'your_key_here' && !apiKey.startsWith('sk-your')
+  );
 
   const ipGate = clientIp(req);
   const slotTry = tryAcquireAnalyzeSlot(req.get('x-cloneai-user-id'), ipGate);
@@ -1442,6 +1615,7 @@ async function runAnalyzePipeline(req, res) {
 
   const send = (obj) => sseWrite(res, obj);
   let streamStopReason = null;
+  let streamedReportText = '';
 
   const appOrigin = (process.env.FRONTEND_URL || process.env.PUBLIC_APP_URL || '').replace(/\/$/, '') || null;
   send({
@@ -1468,11 +1642,72 @@ async function runAnalyzePipeline(req, res) {
     ip: clientIp(req),
     promo: Boolean(promoBypass),
     assetHarvest: Boolean(req._assetHarvestMode),
+    scanMode: req._scanMode || 'elite',
   });
 
   let crawledPages = [];
 
   try {
+    const archiveCtx = buildArchiveLookupContext(req, { openaiModel: OPENAI_MODEL });
+    if (
+      archiveCtx.eligible &&
+      analysisReuseEnabled() &&
+      analysisFastReplayEnabled()
+    ) {
+      const snap = loadLatestSnapshot(
+        getAnalysisBaseDir(),
+        archiveCtx.hostSlug,
+        archiveCtx.fingerprint
+      );
+      if (
+        snap &&
+        isSnapshotFresh(snap, analysisCacheMaxAgeMs()) &&
+        typeof snap.fullText === 'string' &&
+        snap.fullText.length > 80
+      ) {
+        const billingMetaThin =
+          isBillingEnabled() && req._billingPlan
+            ? {
+                planTier: req._billingPlan,
+                priorityQueue: req._billingPlan === PLANS.PRO || req._billingPlan === PLANS.POWER,
+              }
+            : {};
+        await replayAnalysisFromArchive({
+          send,
+          jitter,
+          snapshot: snap,
+          reportWriterStageIndex: REPORT_WRITER_STAGE_INDEX,
+          billingMetaThin,
+        });
+        await abortBillingIfNeeded(req);
+        const ms = Date.now() - (req._analyzeStartedAt || Date.now());
+        logEvent('info', 'analyze_archive_replay', {
+          ip: clientIp(req),
+          ms,
+          host: archiveCtx.hostSlug,
+        });
+        if (!req._promoValid) {
+          noteSuccessfulAnalyzeForCaptcha(clientIp(req));
+        }
+        if (analyzeUserId) {
+          void recordProductEvent(analyzeUserId, isBillingEnabled() ? analyzePlan : null, 'run_completed', {
+            ms,
+            archiveReplay: true,
+            crawlPages: snap.scraperMeta?.crawlPageCount ?? null,
+          });
+        }
+        res.end();
+        return;
+      }
+    }
+
+    if (!openAiConfigured) {
+      send({ type: 'error', message: isProd ? ssePublicError() : 'Server misconfiguration: OPENAI_API_KEY is not set (add it to backend/.env).' });
+      await abortBillingIfNeeded(req);
+      res.end();
+      return;
+    }
+
     send({ type: 'stage', index: 0, phase: 'running', label: 'Multi-page crawl & assets' });
     const { html: rawHtml, meta: scraperMeta } = await fetchHtmlDetailed(url, depth);
 
@@ -1494,6 +1729,7 @@ async function runAnalyzePipeline(req, res) {
 
     const assetHarvestMode = Boolean(req._assetHarvestMode);
     scraperMeta.assetHarvestMode = assetHarvestMode;
+    scraperMeta.runFocus = req._scanMode || 'elite';
     const htmlModelMaxChars = assetHarvestMode ? ASSET_HARVEST_HTML_MODEL_CHARS : HTML_MODEL_MAX_CHARS_PER_PAGE;
     const harvestImageCap = effectiveHarvestImageCap(
       isBillingEnabled() ? analyzePlan : null,
@@ -1578,7 +1814,10 @@ async function runAnalyzePipeline(req, res) {
 
     let interactionSnapshots = [];
 
+    const screenshotSweep = req._scanMode === 'screenshots';
+
     const canInteraction =
+      !screenshotSweep &&
       Boolean(url) &&
       crawledPages.length > 0 &&
       !harvestBlockedHints.has(scraperMeta.hint || '') &&
@@ -1637,37 +1876,60 @@ async function runAnalyzePipeline(req, res) {
       }
     }
 
-    /** Full HTML per URL for image URL discovery (model path truncates/cleans and would miss late-page imgs). */
-    const pagesForImageHarvest = crawledPages.map((p) => ({ url: p.url, html: p.html }));
-
-    crawledPages = crawledPages.map((p) => ({
-      url: p.url,
-      html: cleanHtmlForModel(p.html, { maxChars: htmlModelMaxChars }),
-    }));
-    scraperMeta.htmlModelCleaned = true;
-    scraperMeta.htmlModelMaxCharsPerPage = htmlModelMaxChars;
+    /** Full HTML per URL for image URL discovery (skipped in screenshot sweep). */
+    let pagesForImageHarvest;
+    if (screenshotSweep) {
+      pagesForImageHarvest = [];
+      crawledPages = crawledPages.map((p) => ({ url: p.url, html: '' }));
+      scraperMeta.htmlModelCleaned = true;
+      scraperMeta.htmlModelMaxCharsPerPage = 0;
+      scraperMeta.screenshotSweepMode = true;
+    } else {
+      pagesForImageHarvest = crawledPages.map((p) => ({ url: p.url, html: p.html }));
+      crawledPages = crawledPages.map((p) => ({
+        url: p.url,
+        html: cleanHtmlForModel(p.html, { maxChars: htmlModelMaxChars }),
+      }));
+      scraperMeta.htmlModelCleaned = true;
+      scraperMeta.htmlModelMaxCharsPerPage = htmlModelMaxChars;
+    }
 
     scraperMeta.crawlPageCount = crawledPages.length;
     scraperMeta.crawlMaxPagesRequested = maxCrawlPagesForRun(analyzePlan, depth);
 
-    const firstHtml = crawledPages[0]?.html || rawHtml;
-    let htmlContext = firstHtml;
-    if (htmlContext.length > Math.floor(MAX_HTML_FOR_MODEL * 0.88)) {
-      scraperMeta.modelHtmlTruncated = true;
-      htmlContext = firstHtml.slice(0, Math.floor(MAX_HTML_FOR_MODEL * 0.88));
-    }
-    if (crawledPages.length > 0) {
-      const siteMapLines = crawledPages.map((p, i) => `${i + 1}. ${p.url}`).join('\n');
-      htmlContext += `\n\n---\nCRAWLED PAGES (${crawledPages.length} pages, same host only):\n${siteMapLines}\n---\nZIP includes full-page PNGs under snapshots/, extra theme/checkout steps under snapshots/interaction/ when Playwright interaction crawl ran. Harvested images + HTML + screenshots should be combined for cloning.\n`;
-    }
-    if (htmlContext.length > MAX_HTML_FOR_MODEL) {
-      scraperMeta.modelHtmlTruncated = true;
-      htmlContext = htmlContext.slice(0, MAX_HTML_FOR_MODEL);
+    let firstHtml;
+    let htmlContext;
+    if (screenshotSweep) {
+      firstHtml = '';
+      if (crawledPages.length > 0) {
+        const siteMapLines = crawledPages.map((p, i) => `${i + 1}. ${p.url}`).join('\n');
+        const n = crawledPages.length;
+        htmlContext = `SCREENSHOT SWEEP MODE\nFull-page PNG captures were taken for each URL below and added to the downloadable ZIP under snapshots/ (001-… through ${String(n).padStart(3, '0')}-…).\nThose PNGs are the primary visual record. Raw HTML was omitted from this prompt to save context — infer structure from the URL list and snapshot ordering; state uncertainty where you cannot see pixels.\n\nCAPTURED PAGES (${n}, same host only):\n${siteMapLines}\n`;
+      } else {
+        htmlContext = `SCREENSHOT SWEEP MODE\nNo crawl pages were captured (blocked fetch, empty crawl, or seed URL only without HTML). The ZIP may contain few or no snapshots.\nSeed URL: ${url || '(none)'}\n`;
+      }
+      scraperMeta.modelHtmlTruncated = false;
+    } else {
+      firstHtml = crawledPages[0]?.html || rawHtml;
+      htmlContext = firstHtml;
+      if (htmlContext.length > Math.floor(MAX_HTML_FOR_MODEL * 0.88)) {
+        scraperMeta.modelHtmlTruncated = true;
+        htmlContext = firstHtml.slice(0, Math.floor(MAX_HTML_FOR_MODEL * 0.88));
+      }
+      if (crawledPages.length > 0) {
+        const siteMapLines = crawledPages.map((p, i) => `${i + 1}. ${p.url}`).join('\n');
+        htmlContext += `\n\n---\nCRAWLED PAGES (${crawledPages.length} pages, same host only):\n${siteMapLines}\n---\nZIP includes full-page PNGs under snapshots/, extra theme/checkout steps under snapshots/interaction/ when Playwright interaction crawl ran. Harvested images + HTML + screenshots should be combined for cloning.\n`;
+      }
+      if (htmlContext.length > MAX_HTML_FOR_MODEL) {
+        scraperMeta.modelHtmlTruncated = true;
+        htmlContext = htmlContext.slice(0, MAX_HTML_FOR_MODEL);
+      }
     }
 
-    if (depth === 'deep' && firstHtml.length > 0) {
-      scraperMeta.deepWarning =
-        'Deep scan uses a same-host multi-page crawl; very large pages are truncated per URL for safety.';
+    if (depth === 'deep' && (firstHtml?.length > 0 || screenshotSweep)) {
+      scraperMeta.deepWarning = screenshotSweep
+        ? 'Screenshot sweep uses a same-host multi-page crawl; each URL gets a full-page PNG. Large sites take longer.'
+        : 'Deep scan uses a same-host multi-page crawl; very large pages are truncated per URL for safety.';
     }
 
     let harvestedImageManifest = '';
@@ -1683,7 +1945,7 @@ async function runAnalyzePipeline(req, res) {
     const canHarvest =
       Boolean(url) &&
       crawledPages.length > 0 &&
-      crawledPages.some((p) => p.html.length > 200) &&
+      (screenshotSweep || crawledPages.some((p) => p.html.length > 200)) &&
       !harvestBlockedHints.has(scraperMeta.hint || '');
 
     const snapshotEntries = [];
@@ -1780,24 +2042,70 @@ async function runAnalyzePipeline(req, res) {
             priorityQueue: req._billingPlan === PLANS.PRO || req._billingPlan === PLANS.POWER,
           }
         : {};
-    send({ type: 'meta', scraper: scraperMeta, assets: assetsPayload, ...billingMeta });
+    send({
+      type: 'meta',
+      scraper: scraperMeta,
+      assets: assetsPayload,
+      runFocus: req._scanMode || 'elite',
+      ...billingMeta,
+    });
 
     const stages = [
-      { index: 1, label: 'Layout Analyst' },
-      { index: 2, label: 'Typography Extractor' },
-      { index: 3, label: 'Color Extractor' },
-      { index: 4, label: 'Component Mapper' },
-      { index: 5, label: 'Content Indexer' },
-      { index: 6, label: 'Diff Analyzer' },
+      { index: 1, label: 'DOM & landmark mapper' },
+      { index: 2, label: 'Layout grid & spacing analyst' },
+      { index: 3, label: 'Typography & scale systems' },
+      { index: 4, label: 'Font faces & loading patterns' },
+      { index: 5, label: 'Color tokens & gradients' },
+      { index: 6, label: 'Theme mode scout (light/dark)' },
+      { index: 7, label: 'Component & pattern library' },
+      { index: 8, label: 'States & micro-interactions' },
+      { index: 9, label: 'Content, CTAs & meta copy' },
+      { index: 10, label: 'Catalog / cards / pricing grid' },
+      { index: 11, label: 'Hidden media hunter' },
+      { index: 12, label: 'Full-viewport theme alignment' },
+      { index: 13, label: 'Cross-block consistency' },
+      { index: 14, label: 'A11y & SEO surface pass' },
     ];
 
     for (const s of stages) {
       send({ type: 'stage', index: s.index, phase: 'running', label: s.label });
-      await jitter(320, 680);
+      await jitter(120, 280);
       send({ type: 'stage', index: s.index, phase: 'done' });
     }
 
-    send({ type: 'stage', index: 7, phase: 'running', label: 'Report writer' });
+    send({
+      type: 'stage',
+      index: CHIEF_ARCHITECT_STAGE_INDEX,
+      phase: 'running',
+      label: 'Chief architect — every specialist reports here',
+    });
+    await jitter(280, 520);
+    send({
+      type: 'stage',
+      index: CHIEF_ARCHITECT_STAGE_INDEX,
+      phase: 'done',
+      label: 'Chief architect — stack approved for final brief',
+    });
+    send({
+      type: 'stage',
+      index: CHIEF_REVISIT_AGENT_INDEX,
+      phase: 'running',
+      label: 'States & micro-interactions (chief-requested revisit)',
+    });
+    await jitter(140, 280);
+    send({
+      type: 'stage',
+      index: CHIEF_REVISIT_AGENT_INDEX,
+      phase: 'done',
+      label: 'States & micro-interactions (chief-requested revisit)',
+    });
+
+    send({
+      type: 'stage',
+      index: REPORT_WRITER_STAGE_INDEX,
+      phase: 'running',
+      label: 'Report writer (AI)',
+    });
 
     const optimized = [];
     const imgMaxW = files.length > 6 ? 1280 : files.length > 3 ? 1600 : 2048;
@@ -1821,11 +2129,14 @@ async function runAnalyzePipeline(req, res) {
       harvestedImageManifest,
       clientDelivery: Boolean(req._clientDelivery),
       servicePackage: req._servicePackage || '',
+      scanMode: req._scanMode || 'elite',
+      promoAuthorized: Boolean(req._promoValid),
     });
 
     const systemContent =
       SYSTEM_PROMPT_BASE +
-      buildAnalyzerDeliveryAddons(Boolean(req._clientDelivery), req._servicePackage || '');
+      buildAnalyzerDeliveryAddons(Boolean(req._clientDelivery), req._servicePackage || '') +
+      buildScanModeSystemAddon(req._scanMode || 'elite', Boolean(req._promoValid));
 
     const body = {
       model: OPENAI_MODEL,
@@ -1841,7 +2152,7 @@ async function runAnalyzePipeline(req, res) {
     const payloadJson = JSON.stringify(body);
     const payloadBytes = Buffer.byteLength(payloadJson, 'utf8');
     if (payloadBytes > MAX_OPENAI_REQUEST_JSON_BYTES) {
-      send({ type: 'stage', index: 7, phase: 'error' });
+      send({ type: 'stage', index: REPORT_WRITER_STAGE_INDEX, phase: 'error' });
       send({
         type: 'error',
         message: isProd
@@ -1873,7 +2184,7 @@ async function runAnalyzePipeline(req, res) {
     } catch (e) {
       clearTimeout(streamTimer);
       if (e.name === 'AbortError') {
-        send({ type: 'stage', index: 7, phase: 'error' });
+        send({ type: 'stage', index: REPORT_WRITER_STAGE_INDEX, phase: 'error' });
         send({
           type: 'error',
           message: isProd
@@ -1896,7 +2207,7 @@ async function runAnalyzePipeline(req, res) {
         status: response.status,
         ...(isProd ? {} : { bodySnippet: errText.slice(0, 400) }),
       });
-      send({ type: 'stage', index: 7, phase: 'error' });
+      send({ type: 'stage', index: REPORT_WRITER_STAGE_INDEX, phase: 'error' });
       send({
         type: 'error',
         message: isProd ? mapOpenAiFailureStatus(response.status) : errText.slice(0, 2000),
@@ -1907,7 +2218,7 @@ async function runAnalyzePipeline(req, res) {
     }
 
     if (!response.body) {
-      send({ type: 'stage', index: 7, phase: 'error' });
+      send({ type: 'stage', index: REPORT_WRITER_STAGE_INDEX, phase: 'error' });
       send({ type: 'error', message: ssePublicError() });
       await abortBillingIfNeeded(req);
       res.end();
@@ -1947,6 +2258,7 @@ async function runAnalyzePipeline(req, res) {
         if (!choice) continue;
         const piece = choice.delta?.content;
         if (typeof piece === 'string' && piece.length) {
+          streamedReportText += piece;
           send({ type: 'text', content: piece });
         }
         if (choice.finish_reason) {
@@ -1977,7 +2289,12 @@ async function runAnalyzePipeline(req, res) {
       });
     }
 
-    send({ type: 'stage', index: 7, phase: 'done', label: 'Report writer' });
+    send({
+      type: 'stage',
+      index: REPORT_WRITER_STAGE_INDEX,
+      phase: 'done',
+      label: 'Report writer (AI)',
+    });
     send({ type: 'done' });
 
     const ms = Date.now() - (req._analyzeStartedAt || Date.now());
@@ -2001,6 +2318,40 @@ async function runAnalyzePipeline(req, res) {
         promo: Boolean(req._promoValid),
       });
     }
+
+    const archSave = buildArchiveLookupContext(req, { openaiModel: OPENAI_MODEL });
+    if (archSave.eligible && streamedReportText.length > 80) {
+      let metaJson;
+      let assetsJson;
+      try {
+        metaJson = JSON.parse(JSON.stringify(scraperMeta));
+      } catch {
+        metaJson = { note: 'scraperMeta not serializable; truncated', crawlPageCount: scraperMeta?.crawlPageCount };
+      }
+      try {
+        assetsJson = JSON.parse(JSON.stringify(assetsPayload));
+      } catch {
+        assetsJson = { count: 0, token: null, filename: 'site-assets.zip' };
+      }
+      saveAnalysisSnapshot({
+        baseDir: getAnalysisBaseDir(),
+        hostSlug: archSave.hostSlug,
+        fingerprint: archSave.fingerprint,
+        record: {
+          version: 1,
+          savedAt: new Date().toISOString(),
+          normalizedUrl: archSave.normalizedUrl,
+          depth,
+          options,
+          comparePair,
+          fullText: streamedReportText,
+          openaiModel: OPENAI_MODEL,
+          scraperMeta: metaJson,
+          assetsPayload: assetsJson,
+        },
+      });
+    }
+
     res.end();
   } catch (err) {
     await abortBillingIfNeeded(req);
@@ -2009,7 +2360,345 @@ async function runAnalyzePipeline(req, res) {
       detail: String(err?.stack || err?.message || err),
     });
     if (!isProd) console.error(err);
-    send({ type: 'stage', index: 7, phase: 'error' });
+    send({ type: 'stage', index: REPORT_WRITER_STAGE_INDEX, phase: 'error' });
+    send({
+      type: 'error',
+      message: isProd ? ssePublicError() : err.message || ssePublicError(),
+    });
+    res.end();
+  }
+}
+
+async function runRevisePipeline(req, res) {
+  const apiKey = process.env.OPENAI_API_KEY;
+  const openAiConfigured = Boolean(
+    apiKey && apiKey !== 'your_key_here' && !apiKey.startsWith('sk-your')
+  );
+
+  const ipGate = clientIp(req);
+  const slotTry = tryAcquireAnalyzeSlot(req.get('x-cloneai-user-id'), ipGate);
+  if (!slotTry.ok) {
+    res.status(429).json({
+      error: 'An analysis is already running for this session. Wait for it to finish before starting another.',
+    });
+    return;
+  }
+  const slotKey = slotTry.key;
+  let slotReleased = false;
+  let inFlightAcquired = false;
+  const releaseSlotOnce = () => {
+    if (slotReleased) return;
+    slotReleased = true;
+    releaseAnalyzeSlot(slotKey);
+    if (inFlightAcquired) {
+      inFlightAcquired = false;
+      releaseGlobalAnalyzeInFlightSlot();
+    }
+  };
+
+  let analyzePlan = null;
+  let analyzeUserId = normalizeUserId(req.get('x-cloneai-user-id'));
+  const promoBypass = Boolean(req._promoValid);
+
+  if (isBillingEnabled()) {
+    const billingUserId = normalizeUserId(req.get('x-cloneai-user-id'));
+    if (!billingUserId) {
+      releaseSlotOnce();
+      res.status(400).json({
+        success: false,
+        code: 'MISSING_USER_ID',
+        error: 'MISSING_USER_ID',
+      });
+      return;
+    }
+    analyzeUserId = billingUserId;
+
+    if (promoBypass) {
+      logEvent('info', 'revise_promo_run', { ip: clientIp(req), userId: billingUserId });
+      analyzePlan = PLANS.PRO;
+      req._billingUserId = billingUserId;
+      req._billingReservation = null;
+      req._billingPlan = PLANS.PRO;
+    } else {
+      const billingReservation = await tryBeginRun(billingUserId);
+      if (!billingReservation.ok) {
+        releaseSlotOnce();
+        res.status(403).json({
+          success: false,
+          code: 'LIMIT_REACHED',
+          error: 'LIMIT_REACHED',
+          message: 'You have reached your analysis limit. Upgrade or buy an extra run to continue.',
+          plan: billingReservation.plan,
+          used: billingReservation.used,
+          limit: billingReservation.limit,
+          remaining: billingReservation.remaining,
+          bonusRuns: billingReservation.bonusRuns,
+        });
+        return;
+      }
+      req._billingUserId = billingUserId;
+      req._billingReservation = billingReservation;
+      analyzePlan = billingReservation.plan;
+      req._billingPlan = analyzePlan;
+    }
+  } else {
+    req._billingPlan = null;
+    analyzePlan = PLANS.PRO;
+  }
+
+  if (!openAiConfigured) {
+    releaseSlotOnce();
+    res.status(503).json({
+      error: isProd ? 'Analysis service is not configured.' : 'OPENAI_API_KEY is not set.',
+    });
+    return;
+  }
+
+  if (!takeGlobalAnalyzeBurstSlot()) {
+    releaseSlotOnce();
+    res.status(503).json({
+      error: 'Service is temporarily busy due to high demand. Please try again in a minute.',
+    });
+    return;
+  }
+  if (!tryAcquireGlobalAnalyzeInFlightSlot()) {
+    refundGlobalAnalyzeBurstSlot();
+    releaseSlotOnce();
+    res.status(503).json({
+      error: 'Server is at capacity for concurrent analyses. Try again in a moment.',
+    });
+    return;
+  }
+  inFlightAcquired = true;
+
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  if (typeof res.flushHeaders === 'function') res.flushHeaders();
+
+  res.once('close', releaseSlotOnce);
+  res.once('finish', releaseSlotOnce);
+
+  const send = (obj) => sseWrite(res, obj);
+  const appOrigin = (process.env.FRONTEND_URL || process.env.PUBLIC_APP_URL || '').replace(/\/$/, '') || null;
+
+  send({
+    type: 'meta',
+    billing: {
+      plan: isBillingEnabled() ? analyzePlan : null,
+      billingEnabled: isBillingEnabled(),
+      isFreePlan: isBillingEnabled() && analyzePlan === PLANS.FREE,
+      appOrigin,
+      promoRun: Boolean(isBillingEnabled() && promoBypass),
+    },
+    planTier: isBillingEnabled() ? analyzePlan : null,
+    priorityQueue: isBillingEnabled() && (analyzePlan === PLANS.PRO || analyzePlan === PLANS.POWER),
+    assets: { count: 0, token: null, filename: 'site-assets.zip', skipped: 0 },
+  });
+
+  void recordProductEvent(analyzeUserId, isBillingEnabled() ? analyzePlan : null, 'run_started', {
+    ip: clientIp(req),
+    promo: Boolean(promoBypass),
+    revise: true,
+  });
+
+  const prior = req._revisePriorBrief;
+  const fixNote = req._reviseFixNote;
+
+  try {
+    const userMsg = buildReviseUserMessage(prior, fixNote);
+    const body = {
+      model: OPENAI_MODEL,
+      max_tokens: MAX_OUTPUT_TOKENS,
+      stream: true,
+      ...(OPENAI_STREAM_INCLUDE_USAGE ? { stream_options: { include_usage: true } } : {}),
+      messages: [
+        { role: 'system', content: SYSTEM_PROMPT_REVISE },
+        { role: 'user', content: userMsg },
+      ],
+    };
+
+    const payloadJson = JSON.stringify(body);
+    const payloadBytes = Buffer.byteLength(payloadJson, 'utf8');
+    if (payloadBytes > MAX_OPENAI_REQUEST_JSON_BYTES) {
+      send({ type: 'stage', index: REPORT_WRITER_STAGE_INDEX, phase: 'error' });
+      send({
+        type: 'error',
+        message: isProd
+          ? 'This brief is too large to revise in one request. Trim the report or split the edit.'
+          : `OpenAI request payload too large (${payloadBytes} bytes, max ${MAX_OPENAI_REQUEST_JSON_BYTES}).`,
+      });
+      await abortBillingIfNeeded(req);
+      res.end();
+      return;
+    }
+
+    send({
+      type: 'stage',
+      index: REPORT_WRITER_STAGE_INDEX,
+      phase: 'running',
+      label: 'Report writer (AI revise)',
+    });
+
+    const streamBudgetMs = OPENAI_STREAM_MS;
+    const ac = new AbortController();
+    const streamTimer = setTimeout(() => ac.abort(), streamBudgetMs);
+
+    let response;
+    try {
+      response = await openAiChatCompletionsRequest({
+        apiKey,
+        body,
+        signal: ac.signal,
+        maxAttempts: 2,
+      });
+    } catch (e) {
+      clearTimeout(streamTimer);
+      if (e.name === 'AbortError') {
+        send({ type: 'stage', index: REPORT_WRITER_STAGE_INDEX, phase: 'error' });
+        send({
+          type: 'error',
+          message: isProd ? 'The revision timed out. Try again with a shorter focus note.' : 'OpenAI request timed out.',
+        });
+        logEvent('error', 'revise_openai_timeout', { ip: clientIp(req) });
+        await abortBillingIfNeeded(req);
+        res.end();
+        return;
+      }
+      throw e;
+    }
+    clearTimeout(streamTimer);
+
+    if (!response.ok) {
+      const errText = await response.text();
+      logEvent('error', 'revise_openai_http', {
+        ip: clientIp(req),
+        status: response.status,
+        ...(isProd ? {} : { bodySnippet: errText.slice(0, 400) }),
+      });
+      send({ type: 'stage', index: REPORT_WRITER_STAGE_INDEX, phase: 'error' });
+      send({
+        type: 'error',
+        message: isProd ? mapOpenAiFailureStatus(response.status) : errText.slice(0, 2000),
+      });
+      await abortBillingIfNeeded(req);
+      res.end();
+      return;
+    }
+
+    if (!response.body) {
+      send({ type: 'stage', index: REPORT_WRITER_STAGE_INDEX, phase: 'error' });
+      send({ type: 'error', message: ssePublicError() });
+      await abortBillingIfNeeded(req);
+      res.end();
+      return;
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let sseBuffer = '';
+    let streamUsage = null;
+    let streamedReportText = '';
+    let streamStopReason = null;
+
+    const flushEventBlock = (block) => {
+      const lines = block.split('\n');
+      for (const line of lines) {
+        const t = line.trim();
+        if (!t.startsWith('data:')) continue;
+        const payload = t.slice(5).trim();
+        if (payload === '[DONE]') continue;
+        if (!payload) continue;
+        let ev;
+        try {
+          ev = JSON.parse(payload);
+        } catch {
+          continue;
+        }
+        if (ev.usage && typeof ev.usage === 'object') {
+          streamUsage = ev.usage;
+        }
+        if (ev.error) {
+          send({
+            type: 'error',
+            message: isProd ? ssePublicError() : ev.error?.message || JSON.stringify(ev.error),
+          });
+          continue;
+        }
+        const choice = ev.choices && ev.choices[0];
+        if (!choice) continue;
+        const piece = choice.delta?.content;
+        if (typeof piece === 'string' && piece.length) {
+          streamedReportText += piece;
+          send({ type: 'text', content: piece });
+        }
+        if (choice.finish_reason) {
+          streamStopReason = choice.finish_reason;
+        }
+      }
+    };
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      sseBuffer += decoder.decode(value, { stream: true });
+      let sep;
+      while ((sep = sseBuffer.indexOf('\n\n')) !== -1) {
+        const block = sseBuffer.slice(0, sep);
+        sseBuffer = sseBuffer.slice(sep + 2);
+        flushEventBlock(block);
+      }
+    }
+    if (sseBuffer.trim()) flushEventBlock(sseBuffer);
+
+    if (streamStopReason === 'max_tokens' || streamStopReason === 'length') {
+      send({
+        type: 'warning',
+        code: 'truncated',
+        message:
+          '\n\n---\n\n> **Output limit reached.** The revised brief was truncated. Try again with a shorter prior report or narrower focus.\n',
+      });
+    }
+
+    send({
+      type: 'stage',
+      index: REPORT_WRITER_STAGE_INDEX,
+      phase: 'done',
+      label: 'Report writer (AI revise)',
+    });
+    send({ type: 'done' });
+
+    const ms = Date.now() - (req._analyzeStartedAt || Date.now());
+    logEvent('info', 'revise_success', { ip: clientIp(req), ms });
+    if (!req._promoValid) {
+      noteSuccessfulAnalyzeForCaptcha(clientIp(req));
+    }
+    if (analyzeUserId) {
+      const pt = streamUsage?.prompt_tokens;
+      const ct = streamUsage?.completion_tokens;
+      const estUsd = estimateOpenAiUsd(OPENAI_MODEL, pt, ct);
+      void recordProductEvent(analyzeUserId, isBillingEnabled() ? analyzePlan : null, 'run_completed', {
+        ms,
+        model: OPENAI_MODEL,
+        promptTokens: pt,
+        completionTokens: ct,
+        totalTokens: streamUsage?.total_tokens,
+        estUsd: Number(estUsd.toFixed(6)),
+        promo: Boolean(promoBypass),
+        revise: true,
+      });
+    }
+
+    res.end();
+  } catch (err) {
+    await abortBillingIfNeeded(req);
+    logEvent('error', 'revise_failure', {
+      ip: clientIp(req),
+      detail: String(err?.stack || err?.message || err),
+    });
+    if (!isProd) console.error(err);
+    send({ type: 'stage', index: REPORT_WRITER_STAGE_INDEX, phase: 'error' });
     send({
       type: 'error',
       message: isProd ? ssePublicError() : err.message || ssePublicError(),
@@ -2034,6 +2723,84 @@ app.get('/api/site-images/:token', requireIngressKey, (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   res.send(rec.buffer);
 });
+
+app.post(
+  '/api/asset-pipeline/enhance',
+  requireIngressKey,
+  assetPipelineLimiter,
+  async (req, res) => {
+    if (!ENABLE_ASSET_PIPELINE_API) {
+      res.status(503).json({ error: 'Asset pipeline API is disabled.' });
+      return;
+    }
+    const token = String(req.body?.token || '').trim();
+    if (!/^[a-f0-9]{48}$/i.test(token)) {
+      res.status(400).json({ error: 'Invalid token.' });
+      return;
+    }
+    const rec = siteAssetDownloads.get(token);
+    if (!rec || rec.expires < Date.now()) {
+      res.status(404).json({ error: 'Download link expired or invalid. Run analysis again.' });
+      return;
+    }
+    const buf = rec.buffer;
+    if (!buf?.length) {
+      res.status(400).json({ error: 'Empty asset bundle.' });
+      return;
+    }
+    if (buf.length > ASSET_PIPELINE_MAX_ZIP_BYTES) {
+      res.status(413).json({ error: 'Asset bundle too large for enhancement.' });
+      return;
+    }
+    try {
+      const skipHd = String(process.env.IMAGE_PIPELINE_SKIP_HD || '').toLowerCase() === 'true';
+      const useAiPick = String(process.env.IMAGE_PIPELINE_AI_NAMING || '').toLowerCase() === 'true';
+      const apiKey = (process.env.OPENAI_API_KEY || '').trim();
+      const { buffer: outBuf, stats } = await processSiteAssetZipBuffer(buf, {
+        skipHd,
+        useAiPick: useAiPick && Boolean(apiKey),
+        apiKey,
+        maxRasterImages: ASSET_PIPELINE_MAX_RASTER,
+      });
+      const newToken = randomBytes(24).toString('hex');
+      rememberSiteAssetDownload(newToken, {
+        buffer: outBuf,
+        expires: Date.now() + SITE_ASSET_TTL_MS,
+      });
+      logEvent('info', 'asset_pipeline_enhance_ok', {
+        ip: clientIp(req),
+        userId: normalizeUserId(req.get('x-cloneai-user-id')) || undefined,
+        ...stats,
+      });
+      res.json({
+        token: newToken,
+        filename: 'site-assets-ready.zip',
+        stats,
+      });
+    } catch (err) {
+      logEvent('warn', 'asset_pipeline_enhance_fail', {
+        ip: clientIp(req),
+        detail: String(err?.message || err).slice(0, 400),
+      });
+      res.status(500).json({
+        error: isProd ? 'Enhancement failed.' : String(err?.message || err),
+      });
+    }
+  }
+);
+
+app.post(
+  '/api/analyze-revise',
+  analyzeLimiter,
+  analyzeDailyLimiter,
+  requireIngressKey,
+  requireProductionBrowserOrigin,
+  validateReviseRequest,
+  reviseRequestLogger,
+  (req, res, next) => {
+    runRevisePipeline(req, res).catch(next);
+  }
+);
 
 app.post(
   '/api/analyze',
@@ -2140,7 +2907,24 @@ function tryBindListen(appInstance, port) {
 
 let httpServer;
 (async () => {
-  for (let p = basePort; p < basePort + LISTEN_PORT_TRIES; p++) {
+  if (isProd && hasExplicitPort) {
+    const p = basePort;
+    if (!Number.isFinite(p) || p < 1 || p > 65535) {
+      console.error(`Invalid PORT: ${JSON.stringify(envPortRaw)}`);
+      process.exit(1);
+    }
+    try {
+      httpServer = await tryBindListen(app, p);
+      listenPort = p;
+      onListen();
+    } catch (e) {
+      console.error(`Failed to listen on PORT=${p} (required in production):`, e);
+      process.exit(1);
+    }
+    return;
+  }
+  const start = Number.isFinite(basePort) && basePort > 0 ? basePort : 3001;
+  for (let p = start; p < start + LISTEN_PORT_TRIES; p++) {
     try {
       httpServer = await tryBindListen(app, p);
       listenPort = p;
@@ -2154,7 +2938,7 @@ let httpServer;
       throw e;
     }
   }
-  console.error(`No free port in range ${basePort}–${basePort + LISTEN_PORT_TRIES - 1}`);
+  console.error(`No free port in range ${start}–${start + LISTEN_PORT_TRIES - 1}`);
   process.exit(1);
 })().catch((e) => {
   console.error(e);

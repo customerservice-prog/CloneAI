@@ -1,10 +1,19 @@
-# Render Blueprint — docs/RENDER_EASY.md · full launch: docs/LAUNCH_PHASES.md
-# Set secrets in the Render dashboard (never commit real keys).
+# Render Blueprint — GitHub repo → Render deploys both services. Docs: docs/RENDER_EASY.md,
+# docs/NAMECHEAP_RENDER.md (Namecheap DNS). Set secrets in the dashboard (never commit keys).
 # https://render.com/docs/blueprint-spec
 #
-# First deploy: set OPENAI_API_KEY. CORS + FRONTEND_URL default for siteclonerpro.com.
-# Billing (Phase 4): BILLING_ENABLED=true + Stripe (see backend/.env.example).
-# TRUST_PROXY=1: correct client IP / HTTPS behind Cloudflare+Render (use 2 if double proxy).
+# Services: cloneai-api (Docker), cloneai-web (static Vite app). Recommended stack with
+# Namecheap: DNS only at registrar; no Vercel required.
+#
+# First deploy: set OPENAI_API_KEY in the dashboard (sync: false).
+# CORS_ORIGINS must list every browser origin (apex + www). FRONTEND_URL = canonical site (Stripe redirects).
+# Billing: BILLING_ENABLED=true requires Stripe secrets + price IDs in the dashboard; without them checkout returns 503.
+# Persistent disk at /app/data: default billing.json + analysis archive paths (under WORKDIR /app) survive redeploys.
+# TRUST_PROXY=1: correct client IP / HTTPS behind Render’s proxy (use 2 if CDN + Render).
+# VITE_* vars belong on cloneai-web (static build only), not on cloneai-api.
+#
+# cloneai-web: set VITE_API_URL to cloneai-api’s public https URL (dashboard) if it differs
+# from the value below.
 #
 # Stripe webhook: https://<this-host>/api/billing/webhook
 # Events: checkout.session.completed, customer.subscription.updated, customer.subscription.deleted, invoice.payment_failed
@@ -17,19 +26,44 @@ services:
     dockerContext: ./backend
     plan: starter
     healthCheckPath: /api/health
+    disk:
+      name: cloneai-data
+      mountPath: /app/data
+      sizeGB: 5
     envVars:
       - key: NODE_ENV
         value: production
       - key: TRUST_PROXY
         value: "1"
-      - key: PORT
-        value: "3001"
-      # Easier first launch — turn on Stripe vars in dashboard when ready.
+      # Do not set PORT — Render injects it; the API must listen on that port only.
+      # When BILLING_ENABLED=true, set in the dashboard (secrets): STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET,
+      # STRIPE_PRICE_STARTER, STRIPE_PRICE_PRO, STRIPE_PRICE_EXTRA_RUN; optional STRIPE_PRICE_POWER, STRIPE_PRICE_DEEP_EXTRACT.
+      # Stripe webhook URL: https://<api-host>/api/billing/webhook
+      # Optional promo: CLONEAI_PROMO_CODE
       - key: BILLING_ENABLED
-        value: "false"
+        value: "true"
       - key: CORS_ORIGINS
-        value: "https://www.siteclonerpro.com,https://siteclonerpro.com"
+        value: "https://siteclonerpro.com,https://www.siteclonerpro.com"
       - key: FRONTEND_URL
-        value: "https://www.siteclonerpro.com"
+        value: "https://siteclonerpro.com"
       - key: OPENAI_API_KEY
         sync: false
+
+  # Static Vite SPA (production frontend on Render).
+  - type: web
+    name: cloneai-web
+    runtime: static
+    buildCommand: cd frontend && npm ci && npm run build
+    staticPublishPath: frontend/dist
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      # Must match cloneai-api’s public https URL (Render dashboard). Repo .env.production is fallback.
+      - key: VITE_API_URL
+        value: "https://cloneai-mf0z.onrender.com"
+      - key: VITE_PUBLIC_APP_URL
+        value: "https://siteclonerpro.com"

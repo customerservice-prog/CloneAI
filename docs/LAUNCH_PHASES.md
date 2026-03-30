@@ -44,7 +44,7 @@ npm run launch-check:prod
 |----------|---------|
 | `OPENAI_API_KEY` | Required for analyze |
 | `NODE_ENV` | `production` |
-| `PORT` | `3001` (or match Render’s assigned port) |
+| `PORT` | Omit on Render (platform sets it). Local/Docker: `3001` or match container. |
 | `CORS_ORIGINS` | Exact frontend origins, comma-separated, **no** `*` |
 | `FRONTEND_URL` | Canonical app URL (Stripe return URLs + apex browser redirect) |
 

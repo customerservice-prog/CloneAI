@@ -5,8 +5,8 @@
   "redirects": [
     {
       "source": "/:path*",
-      "has": [{ "type": "host", "value": "siteclonerpro.com" }],
-      "destination": "https://www.siteclonerpro.com/:path*",
+      "has": [{ "type": "host", "value": "www.siteclonerpro.com" }],
+      "destination": "https://siteclonerpro.com/:path*",
       "permanent": true
     }
   ],

@@ -34,6 +34,7 @@ const API_BILLING_CLAIM = API_BASE ? `${API_BASE}/api/billing/claim-account` : '
 const API_AUTH_LOGIN = API_BASE ? `${API_BASE}/api/auth/login` : '';
 const API_ANALYTICS_TRACK = API_BASE ? `${API_BASE}/api/analytics/track` : '';
 const API_LEADS_DFY = API_BASE ? `${API_BASE}/api/leads/dfy` : '';
+const API_ASSET_PIPELINE_ENHANCE = API_BASE ? `${API_BASE}/api/asset-pipeline/enhance` : '';
 const PUBLIC_APP_FALLBACK = (import.meta.env.VITE_PUBLIC_APP_URL || '').trim().replace(/\/$/, '');
 const INGRESS_KEY = import.meta.env.VITE_CLONEAI_KEY?.trim();
 const TURNSTILE_SITE_KEY = import.meta.env.VITE_TURNSTILE_SITE_KEY?.trim();
@@ -43,6 +44,8 @@ const LS_PREF_TRIM_IMG_BG = 'cloneai_pref_trim_img_bg';
 const LS_PREF_ASSET_HARVEST = 'cloneai_pref_asset_harvest';
 const LS_PREF_CLIENT_DELIVERY = 'cloneai_pref_client_delivery';
 const LS_PREF_SERVICE_PKG = 'cloneai_pref_service_pkg';
+const LS_PROMO_CODE = 'cloneai_promo_code';
+const LS_PREF_SCAN_MODE = 'cloneai_pref_scan_mode';
 const WATERMARK_FOOTER = '\n\n---\n\n*Generated with CloneAI — upgrade to remove watermark.*';
 
 /** @type {string | null} */
@@ -58,6 +61,8 @@ const billingCache = {
   used: 0,
   limit: 1,
   remaining: 1,
+  /** Server confirms `X-CloneAI-Promo-Code` matches (GET /api/billing/status). */
+  promoUnlocked: false,
 };
 
 let billingStatusRequestId = 0;
@@ -114,6 +119,8 @@ function setCloneAiUserId(id) {
 function analyzeFetchHeaders() {
   const headers = { 'X-CloneAI-User-Id': getCloneAiUserId() };
   if (INGRESS_KEY) headers['X-CloneAI-Key'] = INGRESS_KEY;
+  const pc = getPromoCodeValue();
+  if (pc) headers['X-CloneAI-Promo-Code'] = pc;
   return headers;
 }
 
@@ -126,6 +133,11 @@ function billingJsonHeaders() {
 
 function planIsProOrPower(plan) {
   return plan === 'pro' || plan === 'power';
+}
+
+/** Stripe Pro/Power or verified promo code (billing status). */
+function planOrPromoProOrPower() {
+  return planIsProOrPower(billingCache.plan) || Boolean(billingCache.promoUnlocked);
 }
 
 /** Normalize plan strings from the API (defensive casing). */
@@ -258,6 +270,35 @@ function closePricingModal() {
   clearBillingModalOpen();
 }
 
+function getPromoCodeValue() {
+  return ($('#promo-code-input')?.value || '').trim();
+}
+
+function persistPromoCodeToStorage(value) {
+  const v = String(value || '').trim().slice(0, 128);
+  try {
+    if (v) localStorage.setItem(LS_PROMO_CODE, v);
+    else localStorage.removeItem(LS_PROMO_CODE);
+  } catch {
+    /* ignore */
+  }
+}
+
+function loadPersistedPromoCode() {
+  try {
+    const v = (localStorage.getItem(LS_PROMO_CODE) || '').trim().slice(0, 128);
+    const main = $('#promo-code-input');
+    if (main && v && !String(main.value || '').trim()) main.value = v;
+  } catch {
+    /* ignore */
+  }
+}
+
+function syncPaywallPromoFieldFromMain() {
+  const pay = $('#paywall-promo-input');
+  if (pay) pay.value = getPromoCodeValue();
+}
+
 function openPaywallModal(limitBody) {
   const reason =
     isLimitReachedPayload(limitBody) ? 'limit' : limitBody?.feature || limitBody?.code || 'upgrade';
@@ -273,20 +314,80 @@ function openPaywallModal(limitBody) {
     const plan = (limitBody.plan || 'current').toString();
     detail.textContent = `You’ve used ${limitBody.used} of ${limitBody.limit} analyses on your ${plan} plan. Upgrade or buy one extra run ($3) to continue.`;
   } else {
-    if (titleEl) titleEl.textContent = 'Upgrade to continue';
+    if (titleEl) titleEl.textContent = 'Upgrade or authorized code';
     const msg =
       (limitBody && limitBody.message) ||
-      'Choose a plan below for deeper crawls and more runs — or buy a single extra run.';
+      'Choose a plan (secure checkout via Stripe), enter an authorized promo code below, or use the code field under analysis options — then run again.';
     detail.textContent = msg;
-    showToast('This scan needs a paid plan — pick an option below.', { variant: 'warning', duration: 3800 });
+    showToast('Pay with Stripe or enter an authorized code to unlock this scan.', { variant: 'warning', duration: 3800 });
   }
+  syncPaywallPromoFieldFromMain();
   modal.removeAttribute('hidden');
   document.body.classList.add('paywall-open');
+  requestAnimationFrame(() => {
+    if (!isLimitReachedPayload(limitBody)) $('#paywall-promo-input')?.focus();
+  });
 }
 
 function closePaywallModal() {
   $('#modal-paywall')?.setAttribute('hidden', '');
   clearBillingModalOpen();
+}
+
+function loadScanModeFromStorage() {
+  try {
+    const v = (localStorage.getItem(LS_PREF_SCAN_MODE) || '').trim().toLowerCase();
+    if (v === 'images' || v === 'elite' || v === 'screenshots') scanMode = v;
+    else scanMode = 'elite';
+  } catch {
+    scanMode = 'elite';
+  }
+}
+
+function persistScanMode() {
+  try {
+    const persist = scanMode === 'images' || scanMode === 'screenshots' ? scanMode : 'elite';
+    localStorage.setItem(LS_PREF_SCAN_MODE, persist);
+  } catch {
+    /* ignore */
+  }
+}
+
+function updateScanModePills() {
+  $$('.scan-mode-pill').forEach((p) => {
+    const m = p.getAttribute('data-scan-mode');
+    p.classList.toggle('active', m === scanMode);
+  });
+}
+
+function updateScreenshotSweepHint() {
+  $('#screenshot-sweep-hint')?.classList.toggle('hidden', scanMode !== 'screenshots');
+}
+
+function setScanMode(mode) {
+  let next = 'elite';
+  if (mode === 'images') next = 'images';
+  else if (mode === 'screenshots') next = 'screenshots';
+  scanMode = next;
+  persistScanMode();
+  updateScanModePills();
+  updateScreenshotSweepHint();
+  const ah = $('#asset-harvest-toggle');
+  if (next === 'images' && ah && !ah.checked) {
+    ah.checked = true;
+    persistOutputPrefs();
+  }
+  if (next === 'screenshots' && ah && ah.checked) {
+    ah.checked = false;
+    persistOutputPrefs();
+  }
+  trackClientEvent('scan_mode_changed', { scanMode: next });
+}
+
+function updateScanPromoHint() {
+  const el = $('#scan-promo-hint');
+  if (!el) return;
+  el.classList.toggle('hidden', !billingCache.promoUnlocked);
 }
 
 async function refreshBillingStatus() {
@@ -298,12 +399,16 @@ async function refreshBillingStatus() {
   const syncLoginBtn = (visible) => {
     if (loginBtn) loginBtn.classList.toggle('hidden', !visible);
   };
-  if (!usageEl || !upBtn || !usageWrap) return;
+  if (!usageEl || !upBtn || !usageWrap) {
+    updateScanPromoHint();
+    return;
+  }
   const reqId = ++billingStatusRequestId;
   try {
     if (!API_BILLING_STATUS) {
       billingCache.enabled = false;
       billingCache.plan = 'guest';
+      billingCache.promoUnlocked = false;
       usageWrap.classList.remove('hidden');
       usageEl.textContent = 'Runs: not synced';
       showConfigToastOnce(
@@ -325,6 +430,7 @@ async function refreshBillingStatus() {
     if (!res.ok || typeof data.enabled !== 'boolean') {
       billingCache.enabled = false;
       billingCache.plan = 'guest';
+      billingCache.promoUnlocked = false;
       usageWrap.classList.remove('hidden');
       usageEl.textContent = 'Runs: not synced';
       showConfigToastOnce(
@@ -342,6 +448,7 @@ async function refreshBillingStatus() {
     if (!data.enabled) {
       billingCache.enabled = false;
       billingCache.plan = 'guest';
+      billingCache.promoUnlocked = false;
       usageWrap.classList.remove('hidden');
       usageEl.textContent = 'Runs: unlimited (billing off on server)';
       urgentEl?.classList.add('hidden');
@@ -357,6 +464,7 @@ async function refreshBillingStatus() {
     billingCache.used = Number(data.used) || 0;
     billingCache.limit = Number(data.limit) || 1;
     billingCache.remaining = Number(data.remaining) ?? Math.max(0, billingCache.limit - billingCache.used);
+    billingCache.promoUnlocked = Boolean(data.promoUnlocked);
 
     usageWrap.classList.remove('hidden');
     upBtn.classList.remove('hidden');
@@ -375,6 +483,7 @@ async function refreshBillingStatus() {
     const lim = Number(data.limit) || 1;
     let suffix = data.plan === 'free' ? 'lifetime' : 'this month';
     if (data.bonusRuns > 0) suffix += ` · +${data.bonusRuns} bonus`;
+    if (data.promoUnlocked) suffix += ' · authorized code';
     usageEl.innerHTML = `<strong>${used} / ${lim}</strong> runs used · ${escapeHtml(planLabel)} <span style="opacity:.85">(${suffix})</span>`;
 
     const ratio = lim > 0 ? used / lim : 0;
@@ -391,6 +500,7 @@ async function refreshBillingStatus() {
     if (reqId !== billingStatusRequestId) return;
     billingCache.enabled = false;
     billingCache.plan = 'guest';
+    billingCache.promoUnlocked = false;
     usageWrap.classList.remove('hidden');
     usageEl.textContent = 'Runs: not synced';
     showConfigToastOnce(
@@ -403,15 +513,14 @@ async function refreshBillingStatus() {
     syncLoginBtn(false);
     updatePlanGatedControls();
     updateExportGatedControls();
+  } finally {
+    updateScanPromoHint();
   }
 }
 
 function enforceDepthForPlan() {
-  if (!billingCache.enabled) return;
-  if (billingCache.plan === 'free' && depth !== 'homepage') {
-    depth = 'homepage';
-    $$('.depth-pill').forEach((x) => x.classList.toggle('active', x.dataset.depth === depth));
-  }
+  if (!billingCache.enabled || billingCache.promoUnlocked) return;
+  // Free users may keep shallow/deep selected in the UI; Generate opens paywall or uses promo — do not snap to homepage here.
   if (billingCache.plan === 'starter' && depth === 'deep') {
     depth = 'shallow';
     $$('.depth-pill').forEach((x) => x.classList.toggle('active', x.dataset.depth === depth));
@@ -419,7 +528,7 @@ function enforceDepthForPlan() {
 }
 
 function depthPillLocked(pillDepth) {
-  if (!billingCache.enabled) return false;
+  if (!billingCache.enabled || billingCache.promoUnlocked) return false;
   if (billingCache.plan === 'free' && pillDepth !== 'homepage') return true;
   if (billingCache.plan === 'starter' && pillDepth === 'deep') return true;
   return false;
@@ -428,15 +537,15 @@ function depthPillLocked(pillDepth) {
 function notifyDepthPillLocked(pillDepth) {
   trackClientEvent('depth_gate_clicked', { depth: pillDepth, plan: billingCache.plan });
   let message =
-    'That scan depth is not on your plan. Upgrade below to continue — promo code only if you were given one.';
+    'That scan depth is not on your plan. Subscribe below (Stripe checkout) or enter an authorized promo code in this window — then tap Generate.';
   let feature = 'scan_depth';
   if (billingCache.plan === 'free' && pillDepth !== 'homepage') {
     message =
-      'Multi-page crawls need Starter or higher. Upgrade below — leave the code field empty unless you have an authorized promo.';
+      'Multi-page crawls need Starter or higher — or an authorized promo code. Use Stripe below or enter your code, save it, then run analysis.';
     feature = 'multi_page_scan';
   } else if (billingCache.plan === 'starter' && pillDepth === 'deep') {
     message =
-      'Full-site depth (~300 pages) needs Pro or Power. Upgrade below — promo code only if you were given one.';
+      'Full-site depth (~300+ pages) needs Pro or Power — or an authorized promo. Checkout below or enter a code, save, then Generate.';
     feature = 'deep_crawl';
   }
   openPaywallModal({ code: 'FEATURE_LOCKED', message, feature });
@@ -456,6 +565,10 @@ function updatePlanGatedControls() {
     if (!billingCache.enabled || billingCache.plan === 'guest') {
       hintDepth.textContent = '';
       hintDepth.classList.add('hidden');
+    } else if (billingCache.promoUnlocked) {
+      hintDepth.textContent =
+        'Authorized code: Pro-class scans and exports are unlocked — your plan below still shows Stripe tier.';
+      hintDepth.classList.remove('hidden');
     } else if (billingCache.plan === 'free') {
       hintDepth.textContent =
         'Free: one homepage scan. Upgrade for multi-page crawls and more runs.';
@@ -474,11 +587,13 @@ function updatePlanGatedControls() {
   const bothBadge = $('#tab-both-badge');
   if (bothTab) {
     const lockBoth =
-      billingCache.enabled && (billingCache.plan === 'free' || billingCache.plan === 'starter');
+      billingCache.enabled &&
+      !billingCache.promoUnlocked &&
+      (billingCache.plan === 'free' || billingCache.plan === 'starter');
     bothTab.classList.toggle('tab-locked', lockBoth);
     bothTab.setAttribute('aria-disabled', lockBoth ? 'true' : 'false');
     bothTab.removeAttribute('disabled');
-    if (lockBoth && activeTab === 'both') setTab('url');
+    if (lockBoth && activeTab === 'both' && !getPromoCodeValue()) setTab('url');
     if (bothBadge) bothBadge.hidden = !lockBoth;
   }
 }
@@ -487,7 +602,9 @@ function updateStickyUpgradeVisibility() {
   const su = $('#sticky-upgrade-btn');
   if (!su) return;
   const show =
-    billingCache.enabled && !planIsProOrPower(billingCache.plan) && billingCache.plan !== 'guest';
+    billingCache.enabled &&
+    billingCache.plan !== 'guest' &&
+    !planOrPromoProOrPower();
   su.hidden = !show;
 }
 
@@ -508,7 +625,12 @@ function updateExportGatedControls() {
   }
 
   const p = billingCache.plan;
-  if (p === 'free') {
+  const proExports = planOrPromoProOrPower();
+  if (proExports) {
+    setLocked($('#download-txt-btn'), false, '');
+    setLocked($('#download-pdf-btn'), false, '');
+    setLocked($('#copy-cursor-prompt-btn'), false, '');
+  } else if (p === 'free') {
     setLocked($('#download-txt-btn'), true, 'Starter includes .txt download.');
     setLocked($('#download-pdf-btn'), true, 'PDF export is included with Pro or Power.');
     setLocked($('#copy-cursor-prompt-btn'), true, 'Cursor handoff is included with Pro or Power.');
@@ -531,6 +653,7 @@ function updateProgressUpsell() {
   const show =
     inProgress &&
     billingCache.enabled &&
+    !billingCache.promoUnlocked &&
     (billingCache.plan === 'free' || billingCache.plan === 'starter');
   el.hidden = !show;
 }
@@ -542,7 +665,7 @@ function updatePostResultUpsell() {
   const show =
     visible &&
     billingCache.enabled &&
-    !planIsProOrPower(billingCache.plan) &&
+    !planOrPromoProOrPower() &&
     fullBriefText.trim().length > 0;
   el.hidden = !show;
 }
@@ -564,6 +687,9 @@ function loadOutputPrefs() {
     if (elAh) elAh.checked = ah;
     if (elCd) elCd.checked = cd;
     if (elPkg && ['', 'basic', 'standard', 'premium'].includes(pkg)) elPkg.value = pkg;
+    loadScanModeFromStorage();
+    updateScanModePills();
+    updateScreenshotSweepHint();
   } catch {
     /* ignore */
   }
@@ -587,6 +713,29 @@ function persistOutputPrefs() {
   }
 }
 
+function isLocalDevHostname(hostname) {
+  const h = String(hostname || '').toLowerCase();
+  return (
+    h === 'localhost' ||
+    h === '127.0.0.1' ||
+    h === '[::1]' ||
+    h.endsWith('.local') ||
+    /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h)
+  );
+}
+
+/** Shareable app URL for footer / share — never show raw localhost unless explicitly configured. */
+function getShareableAppUrl() {
+  if (PUBLIC_APP_FALLBACK) return `${PUBLIC_APP_FALLBACK.replace(/\/$/, '')}/`;
+  try {
+    const { hostname, origin, pathname } = window.location;
+    if (isLocalDevHostname(hostname)) return '';
+    return `${origin}${pathname || '/'}`;
+  } catch {
+    return '';
+  }
+}
+
 function applyStripWatermarkPreferenceToBrief() {
   if (!$('#pref-strip-watermarks')?.checked || !fullBriefText.trim()) return;
   if (fullBriefText.endsWith(WATERMARK_FOOTER)) {
@@ -606,20 +755,25 @@ function updateReportChrome() {
   const wm = $('#report-watermark');
   const box = $('#summary-box');
   const stripWm = $('#pref-strip-watermarks')?.checked;
-  const freeFmt = billingCache.enabled && billingCache.plan === 'free' && !stripWm;
+  const freeFmt =
+    billingCache.enabled && billingCache.plan === 'free' && !billingCache.promoUnlocked && !stripWm;
   if (wm) wm.hidden = !freeFmt;
   if (box) {
     box.classList.toggle('summary-box-free', freeFmt);
-    box.classList.toggle('summary-box-pro', billingCache.enabled && planIsProOrPower(billingCache.plan));
+    box.classList.toggle('summary-box-pro', billingCache.enabled && planOrPromoProOrPower());
   }
   const linkInput = $('#report-app-link');
-  if (linkInput) {
-    try {
-      linkInput.value =
-        PUBLIC_APP_FALLBACK ||
-        `${window.location.origin}${window.location.pathname || '/'}`;
-    } catch {
-      linkInput.value = PUBLIC_APP_FALLBACK || '';
+  const linkActions = $('#report-brand-actions');
+  const linkDevHint = $('#report-link-dev-hint');
+  const shareUrl = getShareableAppUrl();
+  if (linkInput) linkInput.value = shareUrl;
+  if (linkActions && linkDevHint) {
+    if (shareUrl) {
+      linkActions.hidden = false;
+      linkDevHint.hidden = true;
+    } else {
+      linkActions.hidden = true;
+      linkDevHint.hidden = false;
     }
   }
 }
@@ -878,53 +1032,110 @@ const OPTION_DEFS = [
 const AGENTS = [
   {
     icon: '🔍',
-    name: 'Multi-page crawl & assets',
-    desc: 'Same-host BFS crawl, Playwright snapshots, image harvest, ZIP',
+    name: 'Multi-page crawl & asset crew',
+    desc: 'BFS crawl, full-page PNGs, image harvest, ZIP — then optional Asset lab (HD + URL-grounded names)',
     doneLine: '✓ Site crawled & assets captured',
   },
   {
+    icon: '🧭',
+    name: 'DOM & landmark mapper',
+    desc: 'Header, main, sections, footer, landmarks',
+    doneLine: '✓ DOM landmarks mapped',
+  },
+  {
     icon: '⬜',
-    name: 'Layout Analyst',
-    desc: 'Analyzing grid, flex, spacing patterns',
-    doneLine: '✓ Layout mapped',
+    name: 'Layout grid & spacing analyst',
+    desc: 'Grid/flex, gutters, rhythm, breakpoints',
+    doneLine: '✓ Layout lattice decoded',
   },
   {
     icon: '𝐓',
-    name: 'Typography Extractor',
-    desc: 'Extracting font stack, sizes, weights',
-    doneLine: '✓ Typography extracted',
+    name: 'Typography & scale systems',
+    desc: 'Families, sizes, weights, line-height',
+    doneLine: '✓ Type scale mapped',
+  },
+  {
+    icon: '📎',
+    name: 'Font faces & loading',
+    desc: 'Webfonts, fallbacks, FOUT/FOIT hints',
+    doneLine: '✓ Fonts & weights indexed',
   },
   {
     icon: '🎨',
-    name: 'Color Extractor',
-    desc: 'Building exact color palette',
-    doneLine: '✓ Colors captured',
+    name: 'Color tokens & gradients',
+    desc: 'Hex/RGB, semantic roles, gradients',
+    doneLine: '✓ Palette & gradients locked',
+  },
+  {
+    icon: '🌓',
+    name: 'Theme mode scout',
+    desc: 'Light/dark, prefers-color-scheme, tokens',
+    doneLine: '✓ Theme variants spotted',
   },
   {
     icon: '⬡',
-    name: 'Component Mapper',
-    desc: 'Cataloguing UI components',
-    doneLine: '✓ Components catalogued',
+    name: 'Component & pattern library',
+    desc: 'Buttons, cards, nav, forms, modals',
+    doneLine: '✓ UI patterns catalogued',
+  },
+  {
+    icon: '✨',
+    name: 'States & micro-interactions',
+    desc: 'Hover, focus, active, disabled, motion',
+    doneLine: '✓ States & hovers noted',
   },
   {
     icon: '📄',
-    name: 'Content Indexer',
-    desc: 'Categories, item cards, headings, copy, CTAs',
-    doneLine: '✓ Content indexed',
+    name: 'Content, CTAs & meta copy',
+    desc: 'Headings, body, buttons, SEO snippets',
+    doneLine: '✓ Copy & CTAs extracted',
   },
   {
-    icon: '⚖',
-    name: 'Diff Analyzer',
-    desc: 'Comparing original vs clone',
-    doneLine: '✓ Diff analyzed',
+    icon: '🛒',
+    name: 'Catalog / cards / pricing',
+    desc: 'Product grids, tiers, inventory surfaces',
+    doneLine: '✓ Inventory surface scanned',
+  },
+  {
+    icon: '🏆',
+    name: 'Hidden media hunter',
+    desc: 'Lazy attrs, CSS backgrounds, srcset, JSON URLs',
+    doneLine: '🏆 Hidden assets flagged (CSS, lazy, srcset)',
+  },
+  {
+    icon: '📸',
+    name: 'Full-viewport theme pass',
+    desc: 'Align PNG snapshots to page regions',
+    doneLine: '🏆 Full-view theme capture aligned',
+  },
+  {
+    icon: '🔗',
+    name: 'Cross-block consistency',
+    desc: 'Repeated patterns across sections',
+    doneLine: '✓ Cross-block consistency checked',
+  },
+  {
+    icon: '♿',
+    name: 'A11y & SEO surface pass',
+    desc: 'Landmarks, labels, titles, social meta',
+    doneLine: '✓ A11y/SEO signals noted',
+  },
+  {
+    icon: '🎖',
+    name: 'Chief architect (governor)',
+    desc: 'Every specialist reports here; weak lanes go back for another pass before the final brief',
+    doneLine: '✓ Cross-agent review complete — approved for report writer',
   },
   {
     icon: '✍',
-    name: 'Report writer',
-    desc: 'Generating full markdown specification (OpenAI)',
-    doneLine: '✓ Report ready',
+    name: 'Report writer (AI)',
+    desc: 'Synthesizing full markdown specification',
+    doneLine: '✓ Master specification drafted',
   },
 ];
+
+const REPORT_WRITER_AGENT_INDEX = AGENTS.length - 1;
+const ANALYSIS_STAGE_TOTAL = AGENTS.length;
 
 const COVERAGE_MARKERS = [
   /EXECUTIVE OVERVIEW/i,
@@ -944,10 +1155,15 @@ const COVERAGE_MARKERS = [
 ];
 
 let activeTab = 'url';
+/** @type {'elite' | 'images'} */
+let scanMode = 'elite';
 let depth = 'homepage';
 let filesImages = [];
 let filesBoth = [];
 let fullBriefText = '';
+/** @type {{ token?: string, count?: number, imageCount?: number, snapshotCount?: number } | null} */
+let lastAssetsSnapshot = null;
+let assetZipDownloadName = 'site-assets.zip';
 let displayIndex = 0;
 let streamActive = false;
 let typewriterRaf = 0;
@@ -1105,6 +1321,8 @@ function shouldShowScraperHint(scraper) {
 function syncZipButtons(assets) {
   const btn = $('#download-images-btn');
   const sticky = $('#sticky-download-zip-btn');
+  const lab = $('#enhance-assets-btn');
+  const labSticky = $('#sticky-enhance-assets-btn');
   const label = (summary) => `Download site assets (ZIP · ${summary})`;
   if (!assets?.token || !assets.count) {
     if (btn) {
@@ -1116,6 +1334,12 @@ function syncZipButtons(assets) {
       sticky.hidden = true;
       sticky.dataset.token = '';
       sticky.textContent = 'ZIP';
+    }
+    for (const el of [lab, labSticky]) {
+      if (!el) continue;
+      el.hidden = true;
+      el.dataset.token = '';
+      el.disabled = false;
     }
     return;
   }
@@ -1134,9 +1358,21 @@ function syncZipButtons(assets) {
     sticky.textContent = `ZIP · ${summary}`;
     sticky.title = label(summary);
   }
+  const canLab = Boolean(API_ASSET_PIPELINE_ENHANCE);
+  for (const el of [lab, labSticky]) {
+    if (!el) continue;
+    el.hidden = !canLab;
+    el.dataset.token = canLab ? assets.token : '';
+    el.disabled = false;
+    if (labSticky && canLab) {
+      labSticky.title = 'HD Lanczos pass + URL-grounded filenames (server-side; see docs)';
+    }
+  }
 }
 
 function applyAssetsMeta(assets) {
+  lastAssetsSnapshot = assets?.token ? { ...assets } : null;
+  assetZipDownloadName = 'site-assets.zip';
   syncZipButtons(assets);
 }
 
@@ -1152,6 +1388,11 @@ function applyMetaScraper(scraper) {
   if (scraper?.modelHtmlTruncated) {
     parts.push(
       'HTML was truncated for the AI context window; image harvesting still uses the full crawled HTML per page (not the shortened model view).'
+    );
+  }
+  if (scraper?.runFocus === 'images') {
+    parts.push(
+      'Run focus: **Image extract** — Deep Asset Harvest is on for URL crawls; the model prioritizes Section 9 and image manifests.'
     );
   }
   if (scraper?.crawlPageCount > 1) {
@@ -1376,12 +1617,12 @@ function setStageLabel(index, phase, label) {
   if (!stageEl) return;
   if (phase === 'running') {
     const name = label || AGENTS[index]?.name || `Step ${index + 1}`;
-    if (index === 7) {
+    if (index === REPORT_WRITER_AGENT_INDEX) {
       stageEl.textContent = `Current: ${name} · streaming response…`;
     } else {
       stageEl.textContent = `Current: ${name}`;
     }
-  } else if (phase === 'done' && index === 7) {
+  } else if (phase === 'done' && index === REPORT_WRITER_AGENT_INDEX) {
     stageEl.textContent = 'Report writer complete';
   } else if (phase === 'done') {
     stageEl.textContent = `Completed: ${label || AGENTS[index]?.name || `Step ${index + 1}`}`;
@@ -1396,21 +1637,34 @@ function applyStageEvent(data) {
   if (phase === 'running') {
     setAgentStatus(index, 'running');
     setStageLabel(index, phase, label);
-    setProgress((index / 8) * 68);
+    setProgress((index / ANALYSIS_STAGE_TOTAL) * 68);
   } else if (phase === 'done') {
     setAgentStatus(index, 'done');
     setStageLabel(index, phase, label);
-    setProgress(((index + 1) / 8) * 68);
+    setProgress(((index + 1) / ANALYSIS_STAGE_TOTAL) * 68);
   } else if (phase === 'error') {
     setAgentStatus(index, 'error');
     setStageLabel(index, phase, label);
   }
 }
 
+function updateAnalysisRewardLine() {
+  const el = $('#progress-reward');
+  if (!el) return;
+  const n = fullBriefText.length;
+  let msg = '';
+  if (n > 400) msg = '⭐ Theme structure emerging…';
+  if (n > 2500) msg = '⭐⭐ Sections & inventory deepening…';
+  if (n > 8000) msg = '⭐⭐⭐ Hidden media & layout rewards unlocked';
+  if (n > 16000) msg = '🏆 Near-complete specification stream';
+  el.textContent = msg;
+}
+
 function bumpStreamProgress() {
   const base = 68;
   const extra = Math.min(30, Math.floor(fullBriefText.length / 420));
   setProgress(Math.min(99, base + extra));
+  updateAnalysisRewardLine();
 }
 
 function getUrlValue() {
@@ -1512,15 +1766,25 @@ function setupDropzone(zoneId, fileInputId, thumbGridId, getList, setList) {
   });
 }
 
-function setTab(tab) {
-  if (
-    tab === 'both' &&
+function bothTabPlanLocked() {
+  return (
     billingCache.enabled &&
+    !billingCache.promoUnlocked &&
     (billingCache.plan === 'free' || billingCache.plan === 'starter')
-  ) {
-    showToast('URL + images together needs Pro or Power.', { variant: 'warning', duration: 3200 });
-    openPricingModal('tab_both_locked');
-    return;
+  );
+}
+
+function setTab(tab) {
+  if (tab === 'both' && bothTabPlanLocked()) {
+    if (!getPromoCodeValue()) {
+      openPaywallModal({
+        code: 'FEATURE_LOCKED',
+        message:
+          'URL + screenshots in one run needs Pro or Power — or an authorized promo code. Pay with Stripe below or enter a code, save, then switch tab again.',
+        feature: 'combo',
+      });
+      return;
+    }
   }
   activeTab = tab;
   $$('.tab').forEach((t) => {
@@ -1589,18 +1853,74 @@ async function downloadSiteImagesZip() {
     const blob = await res.blob();
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = 'site-assets.zip';
+    a.download = assetZipDownloadName || 'site-assets.zip';
     a.rel = 'noopener';
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(a.href);
-    showToast('Saved site-assets.zip');
+    showToast(`Saved ${assetZipDownloadName || 'site-assets.zip'}`);
   } catch (e) {
     showToast(e.message || 'Download failed', { variant: 'error', duration: 4000 });
   } finally {
     if (main) main.disabled = false;
     if (sticky) sticky.disabled = false;
+  }
+}
+
+async function enhanceSiteAssetsZip() {
+  const lab = $('#enhance-assets-btn');
+  const labSticky = $('#sticky-enhance-assets-btn');
+  const token =
+    lab?.dataset?.token ||
+    labSticky?.dataset?.token ||
+    lastAssetsSnapshot?.token ||
+    '';
+  if (!token || !API_ASSET_PIPELINE_ENHANCE) {
+    showToast('Asset lab is not available', { variant: 'warning' });
+    return;
+  }
+  const headers = { 'Content-Type': 'application/json', ...analyzeFetchHeaders() };
+  for (const el of [lab, labSticky]) {
+    if (el) el.disabled = true;
+  }
+  try {
+    const res = await fetch(API_ASSET_PIPELINE_ENHANCE, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ token }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.error || `Enhance failed (${res.status})`);
+    }
+    const nextTok = (data.token || '').trim();
+    if (!/^[a-f0-9]{48}$/i.test(nextTok)) {
+      throw new Error('Invalid response from asset pipeline');
+    }
+    const base = lastAssetsSnapshot || {
+      token,
+      count: 1,
+      imageCount: 0,
+      snapshotCount: 0,
+    };
+    lastAssetsSnapshot = { ...base, token: nextTok };
+    assetZipDownloadName = (data.filename || 'site-assets-ready.zip').replace(/[^\w.-]+/g, '_') || 'site-assets-ready.zip';
+    syncZipButtons(lastAssetsSnapshot);
+    const st = data.stats;
+    const bits = [];
+    if (st?.rasterProcessed != null) bits.push(`${st.rasterProcessed} images processed`);
+    if (st?.hd) bits.push('HD on');
+    if (st?.aiNaming) bits.push('AI name pick');
+    showToast(bits.length ? `Asset lab done — ${bits.join(' · ')}` : 'Asset lab done — download the new ZIP', {
+      duration: 3800,
+    });
+  } catch (e) {
+    showToast(e.message || 'Asset lab failed', { variant: 'error', duration: 4500 });
+  } finally {
+    for (const el of [lab, labSticky]) {
+      if (el) el.disabled = false;
+    }
   }
 }
 
@@ -1661,15 +1981,14 @@ async function shareReport() {
     return;
   }
   trackClientEvent('share_report_clicked');
-  const url =
-    PUBLIC_APP_FALLBACK || `${window.location.origin}${window.location.pathname || '/'}`;
+  const url = getShareableAppUrl();
   const title = 'Website blueprint — CloneAI';
   try {
     if (navigator.share) {
       await navigator.share({
         title,
         text: 'Generated with CloneAI — developer-ready site blueprint.',
-        url,
+        ...(url ? { url } : {}),
       });
       return;
     }
@@ -1677,12 +1996,19 @@ async function shareReport() {
     /* user cancelled or share failed */
   }
   const chunk = text.length > 12000 ? `${text.slice(0, 12000)}\n\n…(truncated)` : text;
-  const ok = await writeClipboard(`${title}\n${url}\n\n---\n\n${chunk}`);
-  showToast(ok ? 'Copied link + report text for sharing' : 'Copy failed — try Copy instead');
+  const head = url ? `${title}\n${url}\n\n---\n\n` : `${title}\n(Production link: set VITE_PUBLIC_APP_URL)\n\n---\n\n`;
+  const ok = await writeClipboard(`${head}${chunk}`);
+  showToast(
+    ok
+      ? url
+        ? 'Copied link + report text for sharing'
+        : 'Copied report text — set VITE_PUBLIC_APP_URL for a production link'
+      : 'Copy failed — try Copy instead'
+  );
 }
 
 async function copyCursorPrompt() {
-  if (billingCache.enabled && billingCache.plan !== 'guest' && !planIsProOrPower(billingCache.plan)) {
+  if (billingCache.enabled && billingCache.plan !== 'guest' && !planOrPromoProOrPower()) {
     showToast('Cursor handoff is included with Pro or Power.', { variant: 'warning', duration: 3200 });
     openPricingModal('export_cursor');
     return;
@@ -1701,7 +2027,8 @@ function downloadBriefTxt() {
   if (
     billingCache.enabled &&
     billingCache.plan !== 'guest' &&
-    billingCache.plan === 'free'
+    billingCache.plan === 'free' &&
+    !billingCache.promoUnlocked
   ) {
     showToast('Upgrade to Starter to download .txt.', { variant: 'warning', duration: 3200 });
     openPricingModal('export_txt');
@@ -1726,7 +2053,7 @@ function downloadBriefTxt() {
 }
 
 function printBriefPdf() {
-  if (billingCache.enabled && billingCache.plan !== 'guest' && !planIsProOrPower(billingCache.plan)) {
+  if (billingCache.enabled && billingCache.plan !== 'guest' && !planOrPromoProOrPower()) {
     showToast('PDF export is included with Pro or Power.', { variant: 'warning', duration: 3200 });
     openPricingModal('export_pdf');
     return;
@@ -1832,8 +2159,12 @@ async function parseSseStream(response, { onText, signal } = {}) {
         }
         if (data.type === 'stage') {
           applyStageEvent(data);
-          if (data.phase === 'done' && typeof data.index === 'number' && data.index < 7) {
-            const slow = billingCache.enabled && planIsProOrPower(billingCache.plan) ? 1 : 1.45;
+          if (
+            data.phase === 'done' &&
+            typeof data.index === 'number' &&
+            data.index < REPORT_WRITER_AGENT_INDEX
+          ) {
+            const slow = billingCache.enabled && planOrPromoProOrPower() ? 1 : 1.45;
             const ms = Math.floor((320 + Math.random() * 220) * slow);
             await new Promise((r) => setTimeout(r, ms));
           }
@@ -1847,7 +2178,13 @@ async function parseSseStream(response, { onText, signal } = {}) {
               appOrigin: data.billing.appOrigin ? String(data.billing.appOrigin).trim() : null,
             };
           }
-          if (data.scraper) applyMetaScraper(data.scraper);
+          if (data.scraper) {
+            const sc =
+              data.runFocus && typeof data.scraper === 'object'
+                ? { ...data.scraper, runFocus: data.runFocus }
+                : data.scraper;
+            applyMetaScraper(sc);
+          }
           if (data.assets) applyAssetsMeta(data.assets);
           const pp = $('#priority-processing-pill');
           if (pp) pp.classList.toggle('hidden', !data.priorityQueue);
@@ -1989,14 +2326,14 @@ async function runReviseBrief() {
         fixNote,
         hp: '',
         cf_turnstile_response: turnstileToken || '',
-        promoCode: ($('#promo-code-input')?.value || '').trim(),
+        promoCode: getPromoCodeValue(),
       }),
       signal,
     });
 
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
-      if (res.status === 403 && body.error === 'LIMIT_REACHED') {
+      if (res.status === 403 && isLimitReachedPayload(body)) {
         streamActive = false;
         stopTypewriter();
         $('#progress-section').hidden = true;
@@ -2061,7 +2398,7 @@ async function runReviseBrief() {
 
     streamActive = false;
     const stripWm = $('#pref-strip-watermarks')?.checked;
-    if (billingCache.enabled && billingCache.plan === 'free' && !stripWm) {
+    if (billingCache.enabled && billingCache.plan === 'free' && !billingCache.promoUnlocked && !stripWm) {
       fullBriefText += WATERMARK_FOOTER;
     }
     setProgress(100);
@@ -2118,7 +2455,7 @@ async function runAnalyze() {
     return;
   }
 
-  trackClientEvent('run_started', { depth, tab: activeTab });
+  trackClientEvent('run_started', { depth, tab: activeTab, scanMode });
 
   const url = getUrlValue();
   const files = getFilesForRequest();
@@ -2135,8 +2472,42 @@ async function runAnalyze() {
     return;
   }
 
-  if (billingCache.enabled && depthPillLocked(depth)) {
+  if (scanMode === 'screenshots') {
+    if (!url) {
+      showToast(
+        'Screenshot sweep needs a URL. Use the URL tab and paste a site address (pick scan depth for how many pages).',
+        { variant: 'warning', duration: 3800 }
+      );
+      return;
+    }
+    if (activeTab !== 'url') {
+      showToast('Screenshot sweep runs from the URL tab only. Switch tabs or choose Elite / Image extract.', {
+        variant: 'warning',
+        duration: 3600,
+      });
+      return;
+    }
+    if (files.length > 0) {
+      showToast('Screenshot sweep cannot include uploads. Clear images or switch to Elite / Image extract.', {
+        variant: 'warning',
+        duration: 3600,
+      });
+      return;
+    }
+  }
+
+  if (billingCache.enabled && depthPillLocked(depth) && !getPromoCodeValue()) {
     notifyDepthPillLocked(depth);
+    return;
+  }
+
+  if (billingCache.enabled && activeTab === 'both' && bothTabPlanLocked() && !getPromoCodeValue()) {
+    openPaywallModal({
+      code: 'FEATURE_LOCKED',
+      message:
+        'URL + screenshots together needs Pro or Power — or an authorized promo. Subscribe via Stripe or enter your code in the paywall, save, then Generate.',
+      feature: 'combo',
+    });
     return;
   }
 
@@ -2169,12 +2540,16 @@ async function runAnalyze() {
     hStat.textContent = '';
   }
   syncZipButtons({});
+  lastAssetsSnapshot = null;
+  assetZipDownloadName = 'site-assets.zip';
   fullBriefText = '';
   displayIndex = 0;
   streamActive = true;
   $('#summary-content').innerHTML = '';
   $('#type-cursor').classList.remove('hidden');
   $('#progress-stage').textContent = 'Connecting…';
+  const pr = $('#progress-reward');
+  if (pr) pr.textContent = '';
   buildAgentList();
   setProgress(2);
   setAnalyzeLoading(true);
@@ -2183,6 +2558,7 @@ async function runAnalyze() {
   const form = new FormData();
   form.append('url', url);
   form.append('depth', depth);
+  form.append('scanMode', scanMode);
   form.append('options', JSON.stringify(opts));
   form.append('comparePair', $('#compare-pair')?.checked ? '1' : '0');
   form.append('removeImageBackground', $('#pref-remove-image-bg')?.checked ? '1' : '0');
@@ -2193,7 +2569,7 @@ async function runAnalyze() {
     form.append('servicePackage', svcPkg);
   }
   form.append('hp', ($('#form-hp')?.value || '').trim());
-  const promoVal = ($('#promo-code-input')?.value || '').trim();
+  const promoVal = getPromoCodeValue();
   if (promoVal) form.append('promoCode', promoVal);
   files.forEach((f) => form.append('images', f));
 
@@ -2276,7 +2652,7 @@ async function runAnalyze() {
 
     streamActive = false;
     const stripWm = $('#pref-strip-watermarks')?.checked;
-    if (billingCache.enabled && billingCache.plan === 'free' && !stripWm) {
+    if (billingCache.enabled && billingCache.plan === 'free' && !billingCache.promoUnlocked && !stripWm) {
       fullBriefText += WATERMARK_FOOTER;
     }
     setProgress(100);
@@ -2321,7 +2697,7 @@ async function runAnalyze() {
         break;
       }
     }
-    if (!marked) setAgentStatus(7, 'error');
+    if (!marked) setAgentStatus(REPORT_WRITER_AGENT_INDEX, 'error');
     $('#progress-stage').textContent = 'Failed';
     setProgress(100);
     let errMsg = e.name === 'AbortError' ? 'Request cancelled.' : e.message || String(e);
@@ -2371,6 +2747,9 @@ function init() {
     p.addEventListener('click', () => {
       const d = p.dataset.depth;
       if (depthPillLocked(d)) {
+        depth = d;
+        $$('.depth-pill').forEach((x) => x.classList.toggle('active', x.dataset.depth === depth));
+        updateFlowWizard();
         notifyDepthPillLocked(d);
         return;
       }
@@ -2400,6 +2779,12 @@ function init() {
   );
 
   loadOutputPrefs();
+  $$('.scan-mode-pill').forEach((p) => {
+    p.addEventListener('click', () => {
+      const m = p.getAttribute('data-scan-mode');
+      if (m === 'images' || m === 'elite' || m === 'screenshots') setScanMode(m);
+    });
+  });
   $('#pref-strip-watermarks')?.addEventListener('change', () => {
     persistOutputPrefs();
     applyStripWatermarkPreferenceToBrief();
@@ -2426,6 +2811,8 @@ function init() {
   $('#header-plans-btn')?.addEventListener('click', () => openPricingModal('header_plans'));
   $('#download-images-btn')?.addEventListener('click', () => downloadSiteImagesZip());
   $('#sticky-download-zip-btn')?.addEventListener('click', () => downloadSiteImagesZip());
+  $('#enhance-assets-btn')?.addEventListener('click', () => enhanceSiteAssetsZip());
+  $('#sticky-enhance-assets-btn')?.addEventListener('click', () => enhanceSiteAssetsZip());
   $('#download-txt-btn')?.addEventListener('click', () => downloadBriefTxt());
   $('#download-pdf-btn')?.addEventListener('click', () => printBriefPdf());
   $('#copy-cursor-prompt-btn')?.addEventListener('click', () => copyCursorPrompt());
@@ -2448,9 +2835,12 @@ function init() {
     openLoginModal();
   });
   $('#report-copy-link-btn')?.addEventListener('click', async () => {
-    const v = ($('#report-app-link')?.value || window.location.origin || '').trim();
+    const v = ($('#report-app-link')?.value || '').trim() || getShareableAppUrl();
     if (!v) {
-      showToast('No link to copy');
+      showToast('Set VITE_PUBLIC_APP_URL in your build for a production link (localhost is hidden).', {
+        variant: 'warning',
+        duration: 4200,
+      });
       return;
     }
     const ok = await writeClipboard(v);
@@ -2466,6 +2856,9 @@ function init() {
     syncThumbnails('#thumb-grid-images', filesImages);
     syncThumbnails('#thumb-grid-both', filesBoth);
     $('#results-section').hidden = true;
+    syncZipButtons({});
+    lastAssetsSnapshot = null;
+    assetZipDownloadName = 'site-assets.zip';
     fullBriefText = '';
     updateFlowWizard();
     updatePostResultUpsell();
@@ -2515,11 +2908,36 @@ function init() {
     else if (!$('#modal-pricing')?.hasAttribute('hidden')) closePricingModal();
   });
 
+  loadPersistedPromoCode();
+  $('#promo-code-input')?.addEventListener('change', () => {
+    persistPromoCodeToStorage(getPromoCodeValue());
+    void refreshBillingStatus();
+  });
+  $('#promo-code-input')?.addEventListener('blur', () => {
+    persistPromoCodeToStorage(getPromoCodeValue());
+    void refreshBillingStatus();
+  });
+  $('#paywall-promo-save-btn')?.addEventListener('click', () => {
+    const v = ($('#paywall-promo-input')?.value || '').trim().slice(0, 128);
+    const main = $('#promo-code-input');
+    if (main) main.value = v;
+    persistPromoCodeToStorage(v);
+    closePaywallModal();
+    const det = $('#promo-details');
+    if (det && v) det.open = true;
+    showToast(
+      v ? 'Code saved — tap Generate. For URL + images, select that tab again.' : 'Code cleared from this browser.',
+      { variant: 'default', duration: 3400 }
+    );
+    void refreshBillingStatus();
+  });
+
   handleCheckoutReturnQuery();
   buildTryAnotherChips();
   updatePlanGatedControls();
   refreshBillingStatus();
   updateExportGatedControls();
+  updateReportChrome();
   trackClientEvent('landing_page_view');
 
   $('#dfy-open-btn')?.addEventListener('click', () => {

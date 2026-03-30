@@ -1,38 +1,32 @@
-# Point apex `siteclonerpro.com` → `www` (Cloudflare)
+# Cloudflare: redirect **www** → **apex** (`siteclonerpro.com`)
 
 Part of **Phase 3** in [LAUNCH_PHASES.md](./LAUNCH_PHASES.md).
 
-Do this in **Cloudflare** for the `siteclonerpro.com` zone so visitors who type the bare domain always hit the app on **www**.
+This repo uses **apex** as the canonical app URL (`FRONTEND_URL` = `https://siteclonerpro.com`). Use Cloudflare only if your DNS is on Cloudflare (Namecheap-only users: **[NAMECHEAP_RENDER.md](./NAMECHEAP_RENDER.md)**).
 
-## Option A — Single Redirect (recommended)
+## Single redirect (recommended)
 
 1. Cloudflare Dashboard → **siteclonerpro.com** → **Rules** → **Redirect Rules**.
 2. **Create rule** → **Single redirect**.
-3. **Rule name:** `Apex to www`
+3. **Rule name:** `www to apex`
 4. **If incoming requests match…** → **Custom filter expression**:
 
    ```text
-   (http.host eq "siteclonerpro.com")
+   (http.host eq "www.siteclonerpro.com")
    ```
 
-5. **Then…** → **URL redirect** — **Dynamic**:
-   - **Expression:** `concat("https://www.siteclonerpro.com", http.request.uri.path)`
-   - Or choose **Static** → **301** → `https://www.siteclonerpro.com$1` depending on the UI (use **301** permanent).
+5. **Then…** → **URL redirect** — preserve path and query (use your UI’s “dynamic” / wildcard option), target:
 
-   Simpler static pattern if the UI offers it:
+   - **`https://siteclonerpro.com`** + same path and query (e.g. expression like `concat("https://siteclonerpro.com", http.request.uri.path)` plus query if the wizard supports it).
 
-   - **Target URL:** `https://www.siteclonerpro.com${uri}` or the wizard’s “wildcard” equivalent so **path and query** are preserved.
+6. **301** permanent, **Save**, **Deploy**.
 
-6. **Save** and **Deploy**.
+## DNS
 
-## Option B — DNS only (no redirect rule)
-
-1. **DNS** → ensure **www** is a **CNAME** to your frontend (e.g. `cname.vercel-dns.com` if Vercel shows that).
-2. **Apex** (`siteclonerpro.com`): use your registrar/Cloudflare **CNAME flattening** / **ALIAS** to the **same** frontend target Vercel gives you for the root domain (Vercel: Project → **Settings** → **Domains** → add `siteclonerpro.com`).
-
-Then both apex and www serve the Vite app; no traffic to Render for HTML.
+- **Apex** `siteclonerpro.com`: point to your **frontend** (Vercel / Render static), not the Render API.
+- **`www`**: either **CNAME** to the same frontend target **or** rely on the redirect rule above after traffic hits Cloudflare.
 
 ## Render API
 
-- Keep **`FRONTEND_URL=https://www.siteclonerpro.com`** on Render (Stripe return URLs + browser redirect from `/` when apex wrongly points at the API).
-- Prefer the API on **`api.siteclonerpro.com`** (CNAME → `cloneai-xxxx.onrender.com`) so apex never hits the API.
+- Keep **`FRONTEND_URL=https://siteclonerpro.com`** on Render (Stripe return URLs + HTML redirect from `/` when someone hits the API root).
+- Prefer the API on **`api.siteclonerpro.com`** (CNAME → your `*.onrender.com` host) so apex never resolves to the API.

@@ -175,8 +175,8 @@ GitHub Actions runs `npm run verify` on push/PR to `main` / `master` (see [`.git
 ## Security & limits (launch checklist)
 
 - **CORS:** Explicit allowlist only; `*` entries in `CORS_ORIGINS` are stripped with a warning.
-- **Browser origin (production):** `POST /api/analyze` requires an `Origin` header that matches `CORS_ORIGINS` (reduces scripted abuse). Override with `RELAX_ANALYZE_ORIGIN_CHECK=true` only if needed.
-- **Rate limits:** Per-minute **and** per-24h caps on `/api/analyze` (cost protection).
+- **Browser origin (production):** `POST /api/analyze` and `POST /api/analyze-revise` require an `Origin` header that matches `CORS_ORIGINS` (reduces scripted abuse). Override with `RELAX_ANALYZE_ORIGIN_CHECK=true` only if needed.
+- **Rate limits:** Per-minute **and** per-24h caps on `/api/analyze` and `/api/analyze-revise` (cost protection).
 - **SSRF:** DNS resolution with blocking of private/link-local/CGNAT ranges and metadata-style hostnames (`backend/ssrf.js`). URLs with embedded credentials are rejected.
 - **Redirects:** Only same host key (after stripping leading `www.`) as the initial URL; `http`/`https` only.
 - **Uploads:** PNG/JPEG/WebP only, magic-byte verification, **20MB** per file, up to **10** files in multipart; **analyze** accepts at most **`MAX_ANALYSIS_IMAGES` (default 8)** per run. Files renamed to `upload-N.ext` server-side.

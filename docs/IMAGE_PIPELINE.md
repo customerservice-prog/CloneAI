@@ -28,10 +28,14 @@ Outputs:
 | `IMAGE_PIPELINE_NAMING_MODEL` | Default `gpt-4o-mini` |
 | `SCREENSHOT_DEVICE_SCALE` | During live crawl, Playwright `deviceScaleFactor` (default `1`, try `2` for sharper PNGs — more RAM/CPU) |
 
+## HTTP API (in-app)
+
+After analyze, the UI can call **`POST /api/asset-pipeline/enhance`** with JSON `{ "token": "<48-char hex from SSE assets.token>" }` (same auth headers as other API calls). The response includes a **new** `token` for `GET /api/site-images/:token` (processed ZIP). Disable with `ENABLE_ASSET_PIPELINE_API=false`.
+
 ## Live deploy
 
-- **Render:** redeploy API after `git pull` so `adm-zip` installs; pipeline is **CLI-only** (no new public HTTP surface).
-- **GitHub:** commit and push this repo; Vercel frontend unchanged unless you add UI to download + re-upload ZIPs (not required).
+- **Render:** redeploy API after `git pull` so `adm-zip` installs and `processAssetZip.js` is present.
+- **Frontend:** redeploy when the “Asset lab” button ships (Vercel).
 
 ## Honest limits
 

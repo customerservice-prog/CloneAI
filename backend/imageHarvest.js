@@ -258,7 +258,7 @@ export function collectImageUrls(html, pageUrl) {
 
   // Absolute image URLs embedded in JSON/config blobs (common on storefronts)
   const looseRe =
-    /https?:\/\/[^"'\\\s<>(){}\[\]`]{8,2000}\.(?:jpg|jpeg|png|webp|gif|avif)\b(?:\?[^"'\\\s<>]{0,800})?/gi;
+    /https?:\/\/[^"'\\\s<>(){}\[\]`]{8,2000}\.(?:jpg|jpeg|png|webp|gif|avif|svg)\b(?:\?[^"'\\\s<>]{0,800})?/gi;
   let looseHits = 0;
   const looseCap = 8000;
   let lm;

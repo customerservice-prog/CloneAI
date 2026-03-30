@@ -72,6 +72,28 @@ async function main() {
       headers: { 'X-CloneAI-User-Id': SMOKE_USER },
     });
     ok('POST /api/analyze honeypot → 400');
+
+    const rRevShort = await fetch(`${BASE}/api/analyze-revise`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CloneAI-User-Id': SMOKE_USER },
+      body: JSON.stringify({ priorBrief: 'x'.repeat(79), fixNote: '', hp: '' }),
+    });
+    if (rRevShort.status !== 400) {
+      const t = await rRevShort.text();
+      throw new Error(`revise short expected 400, got ${rRevShort.status}: ${t.slice(0, 120)}`);
+    }
+    ok('POST /api/analyze-revise too short → 400');
+
+    const rRevHp = await fetch(`${BASE}/api/analyze-revise`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-CloneAI-User-Id': SMOKE_USER },
+      body: JSON.stringify({ priorBrief: 'y'.repeat(100), fixNote: '', hp: 'x' }),
+    });
+    if (rRevHp.status !== 400) {
+      const t = await rRevHp.text();
+      throw new Error(`revise honeypot expected 400, got ${rRevHp.status}: ${t.slice(0, 120)}`);
+    }
+    ok('POST /api/analyze-revise honeypot → 400');
   } catch (e) {
     bad('smoke suite', e);
   }

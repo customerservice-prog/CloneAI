@@ -1,128 +1,102 @@
-# Render deploy — simple checklist (CloneAI API)
+# Render deploy — GitHub + Render + Namecheap
 
-Do these **in order**. Skip any step that does not apply.
+**Recommended production stack:** push code to **GitHub**, deploy with **Render** (API + static site from [`render.yaml`](../render.yaml)), point DNS at **Namecheap** using the records Render shows. No Vercel required.
+
+Full DNS steps: **[NAMECHEAP_RENDER.md](./NAMECHEAP_RENDER.md)**.
 
 ---
 
 ## Before you open Render
 
 1. **OpenAI:** Create an API key at [platform.openai.com/api-keys](https://platform.openai.com/api-keys).  
-   - Never paste it in Discord, email, or chat. Only paste it inside **Render → Environment**.
+   - Never paste it in chat. Only in **Render → Environment** for **`cloneai-api`**.
 
-2. **Know your site URL** (for CORS):
-   - Live site: **`https://www.siteclonerpro.com`** (apex `https://siteclonerpro.com` is included in `CORS_ORIGINS` in `render.yaml`).
+2. **Canonical site URL** (CORS / Stripe):
+   - **`https://siteclonerpro.com`** (apex). **`https://www.siteclonerpro.com`** is included in `CORS_ORIGINS` in `render.yaml`.
 
 ---
 
-## On Render: create the API (Web Service)
+## Fast path — Blueprint (both services)
+
+1. Render → **New** → **Blueprint** → connect **GitHub** → select this repo.
+2. Approve **`render.yaml`**: creates **`cloneai-api`** (Docker) + **`cloneai-web`** (static).
+3. Set **`OPENAI_API_KEY`** when prompted.
+4. After deploy, set **`cloneai-web`** → **Environment** → **`VITE_API_URL`** to your **`cloneai-api`** URL if it is not already correct.
+5. Add **custom domains** and Namecheap records per **[NAMECHEAP_RENDER.md](./NAMECHEAP_RENDER.md)**.
+
+---
+
+## Manual path — API only (then add static site)
+
+If you prefer not to use the Blueprint for the API:
 
 ### A. Connect GitHub
 
-- **New** → **Web Service** → select repo **CloneAI** → branch **main**.
+- **New** → **Web Service** → select repo → branch **main**.
 
 ### B. Use Docker (important)
 
 - **Runtime:** **Docker** (not “Node”).
 - **Dockerfile path:** `backend/Dockerfile`
-- **Docker context:** `backend`  
-  (If the form only shows one path, set **Dockerfile path** to `backend/Dockerfile` and leave **Root Directory** empty unless Render says otherwise.)
+- **Docker context:** `backend`
 
-### C. Name and region
+### C. Name, region, size
 
-- **Name:** anything (e.g. `cloneai-api`).
-- **Region:** pick closest to you.
+- **Name:** e.g. `cloneai-api`.
+- **Region:** closest to you.
+- **Starter** is OK; upgrade RAM if Chromium crashes on large sites.
 
-### D. Instance size
-
-- **Starter** is OK to try.  
-- If the app **crashes** on big sites, upgrade to **Standard (2 GB RAM)**.
-
-### E. Environment variables (only these at first)
-
-Click **Add Environment Variable** for each row:
+### D. Environment variables (first deploy)
 
 | Key | Value |
 |-----|--------|
-| `OPENAI_API_KEY` | *(paste your OpenAI key)* |
+| `OPENAI_API_KEY` | *(your key)* |
 | `NODE_ENV` | `production` |
-| `PORT` | `3001` |
-| `CORS_ORIGINS` | `https://www.siteclonerpro.com,https://siteclonerpro.com` |
-| `FRONTEND_URL` | `https://www.siteclonerpro.com` |
+| `PORT` | *(omit — Render sets this automatically)* |
+| `CORS_ORIGINS` | `https://siteclonerpro.com,https://www.siteclonerpro.com` |
+| `FRONTEND_URL` | `https://siteclonerpro.com` |
 
-**Repo default:** `render.yaml` already sets `CORS_ORIGINS` and `FRONTEND_URL` for this domain when you use the Blueprint. Override in the dashboard if your canonical URL changes.
+`render.yaml` presets **`CORS_ORIGINS`** / **`FRONTEND_URL`** when you use the Blueprint.
 
-**Do not add** random keys from other tutorials: no `DATABASE_URL`, `UPSTASH_*`, `TURBO_*`, `NEXT_PUBLIC_*`, `RESEND_*` unless you really use them. They are **not** required for CloneAI.
+### E. Deploy
 
-### F. Billing (Stripe) — when you want paid plans
+- Wait for **Live**. Test: `https://YOUR-SERVICE.onrender.com/api/health`.
 
-- Leave **`BILLING_ENABLED=false`** until Stripe webhook + prices exist; otherwise checkout and crawl **paywall** logic will misconfigure.
-- When ready, follow **Phase 4** in **[LAUNCH_PHASES.md](./LAUNCH_PHASES.md)** (webhook URL, `STRIPE_*`, `FRONTEND_URL` must be **`https://`**).
-- With billing on, **deep / multi-page** scans return **403 + paywall** for plans that do not include them (no silent downgrade).
+### F. Static frontend on Render
 
-### G. Deploy
-
-- Click **Create Web Service** / **Deploy**.
-- Wait for **Live**. Copy the URL, e.g. `https://cloneai-api-xxxx.onrender.com`.
+Either let the **Blueprint** create **`cloneai-web`**, or **New** → **Static Site** → same repo, **build** `cd frontend && npm ci && npm run build`, **publish directory** `frontend/dist`, add a **rewrite** `/*` → `/index.html`, and set **`VITE_API_URL`** + **`VITE_PUBLIC_APP_URL`** like in `render.yaml`.
 
 ---
 
 ## If Render shows “Check for errors above”
 
-- Any **red** row: click the **Key** field, delete the name, **type it again** with **no space** at the end.
-- Remove env rows you do not need.
+- Fix any **red** env rows (no trailing spaces in **Key** names).
+- Remove variables you do not need.
 
 ---
 
-## Connect your website (frontend) to the API
+## DNS: apex must hit the static site, not the API
 
-Wherever the **frontend** is built (Render Static Site, Vercel, etc.), set:
+- Follow **[NAMECHEAP_RENDER.md](./NAMECHEAP_RENDER.md)** (remove Namecheap **URL Redirect** rows).
+- **Apex** → **`cloneai-web`** (per Render’s custom-domain instructions).
+- **API** → default `*.onrender.com` or **`api.`** subdomain on **`cloneai-api`**.
 
-```text
-VITE_API_URL=https://cloneai-mf0z.onrender.com
-```
-
-The frontend repo includes **`frontend/.env.production`** with this URL and **`VITE_PUBLIC_APP_URL=https://www.siteclonerpro.com`** so Vercel/production builds work without extra dashboard env (you can still override in the host UI).
-
-**No** trailing slash. Rebuild the frontend after changing this.
-
----
-
-## DNS: do not point the **apex** at the API
-
-Step-by-step Cloudflare redirect: **[CLOUDFLARE_APEX_REDIRECT.md](./CLOUDFLARE_APEX_REDIRECT.md)**.
-
-If **`https://siteclonerpro.com`** (no `www`) opens a blank page, wrong content, or a browser error, the **apex record** is probably aimed at **Render** (the API). The **website** lives on **Vercel** (or similar).
-
-**Correct setup**
-
-- **`www.siteclonerpro.com`** → your **frontend** host (Vercel).
-- **`siteclonerpro.com` (apex)** → also the **frontend** host (Vercel apex / ALIAS), **or** a **redirect** to `https://www.siteclonerpro.com` in Cloudflare (**Rules** → redirect).
-- **`api.siteclonerpro.com`** (optional) → **Render** if you want a pretty API hostname.
-
-The API already **redirects** browser visits on `/` to **`FRONTEND_URL`** when `FRONTEND_URL` is set on Render, but fixing DNS (or Cloudflare redirect) is still best.
-
-## Custom domain on Render (optional)
-
-- Render dashboard → your Web Service → **Settings** → **Custom Domains** → follow Render’s DNS instructions.
-- Prefer **`api.`** subdomain for the API so **apex** stays on the static app.
-- Update **`CORS_ORIGINS`** and **`FRONTEND_URL`** to match the URLs users see in the browser.
+If **`https://siteclonerpro.com`** shows JSON from the API, apex DNS still points at the wrong host.
 
 ---
 
 ## Quick test
 
-Open in a browser:
-
 ```text
-https://YOUR-SERVICE.onrender.com/api/health
+https://YOUR-API.onrender.com/api/health
 ```
 
-You should get a JSON OK response.
+→ JSON `ok`.
 
 ---
 
 ## Still stuck?
 
-- Read **`render.yaml`** in the repo (comments list more env vars).
-- Full phased checklist: **[LAUNCH_PHASES.md](./LAUNCH_PHASES.md)**.
-- Run locally: `cd backend && cp .env.example .env` → fill `OPENAI_API_KEY` → `npm start`.
+- **`render.yaml`** comments list more env vars.
+- Full checklist: **[LAUNCH_PHASES.md](./LAUNCH_PHASES.md)**.
+- Local: `cd backend && cp .env.example .env` → `OPENAI_API_KEY` → `npm start`.

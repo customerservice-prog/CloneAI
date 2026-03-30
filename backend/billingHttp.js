@@ -12,6 +12,7 @@ import {
   recordProductEvent,
 } from './billingService.js';
 import { claimSubscriptionAccount, loginWithEmailPassword } from './billingAccounts.js';
+import { promoMatchesRequest } from './promoCode.js';
 
 const isProdBilling = process.env.NODE_ENV === 'production';
 
@@ -276,6 +277,8 @@ export async function getBillingStatus(req, res) {
     bonusRuns: snap.bonusRuns,
     usageResetAt: nextResetAt,
     stripeConfigured: Boolean(process.env.STRIPE_SECRET_KEY?.trim()),
+    /** When `X-CloneAI-Promo-Code` matches `CLONEAI_PROMO_CODE`, UI may treat exports like Pro. */
+    promoUnlocked: promoMatchesRequest(req),
   });
 }
 

@@ -3,9 +3,9 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <!-- Fallback API origin if build env missing (VITE_API_URL in .env.production). -->
-    <meta name="cloneai-api-origin" content="https://cloneai-mf0z.onrender.com" />
-    <title>CloneAI — AI-powered website analysis</title>
+    <!-- Filled at build from VITE_API_URL (see vite.config.js); empty in dev uses localhost:3001 in JS. -->
+    <meta name="cloneai-api-origin" content="" />
+    <title>CloneAI — AI cloning team &amp; build-ready site specs</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -59,7 +59,14 @@
         </h1>
         <p class="hero-blueprint-lead">Generate a complete developer-ready blueprint from any website in seconds.</p>
         <p class="hero-trust-line">Used by <strong>developers</strong>, <strong>freelancers</strong>, and <strong>agencies</strong> to rebuild sites faster.</p>
-        <p class="hero-tagline">Full-site crawl, harvested images &amp; snapshots, plus a build-ready specification — in one run.</p>
+        <p class="hero-tagline">
+          A coordinated <strong>AI cloning team</strong> — multi-page crawl, harvested media, full-page captures, and a developer-ready spec. Optional <strong>Asset lab</strong> helpers refine the ZIP after your run.
+        </p>
+        <ul class="hero-helpers" aria-label="Specialist helpers">
+          <li><span class="hero-helper-name">Capture desk</span> — full-page PNGs and harvested images in one bundle</li>
+          <li><span class="hero-helper-name">Pixel lab</span> — HD Lanczos pass on the server (honest upscale, not generative fill)</li>
+          <li><span class="hero-helper-name">Naming desk</span> — filenames grounded in real URLs; optional AI only picks among those candidates</li>
+        </ul>
         <p class="hero-value-line">
           Save hours of manual analysis — get execution clarity and a build-ready blueprint for freelancers, agencies, and teams.
         </p>
@@ -125,6 +132,45 @@
       </nav>
 
       <section class="input-card">
+        <p class="depth-label scan-focus-label">
+          Run focus
+          <span class="depth-label-hint">(same UI locally and on the live site — tells the AI team how to weight your brief)</span>
+        </p>
+        <div class="scan-mode-row">
+          <div class="scan-mode-pills" role="group" aria-label="Run focus">
+            <button
+              type="button"
+              class="scan-mode-pill active"
+              data-scan-mode="elite"
+              title="Full balanced depth across all 13 sections — default comprehensive clone spec"
+            >
+              Elite scan
+            </button>
+            <button
+              type="button"
+              class="scan-mode-pill"
+              data-scan-mode="images"
+              title="Prioritize image harvest, manifests, and Section 9 — best for extracting assets"
+            >
+              Image extract
+            </button>
+            <button
+              type="button"
+              class="scan-mode-pill"
+              data-scan-mode="screenshots"
+              title="Crawl same-host pages (per scan depth) and capture a full-page PNG of every URL — ZIP is the main deliverable"
+            >
+              Screenshot sweep
+            </button>
+          </div>
+          <p class="screenshot-sweep-hint muted hidden" id="screenshot-sweep-hint" aria-live="polite">
+            <strong>Screenshot sweep</strong> — uses <strong>scan depth</strong> below: we visit each discovered same-host page and save a <strong>full-page PNG</strong> (plus a shorter AI brief). Choose <strong>Full crawl</strong> to cover the most URLs. URL tab only; no image uploads.
+          </p>
+          <p class="scan-promo-hint muted hidden" id="scan-promo-hint" aria-live="polite">
+            Authorized code on file — the model is also instructed to emphasize harvest, ZIPs, and image URLs.
+          </p>
+        </div>
+
         <div class="tabs" role="tablist">
           <button type="button" class="tab active" data-tab="url" role="tab" aria-selected="true">URL Input</button>
           <button type="button" class="tab" data-tab="images" role="tab" aria-selected="false">Image Upload</button>
@@ -291,10 +337,10 @@
             </span>
           </label>
         </div>
-        <details class="promo-details">
-          <summary class="promo-summary">Authorized code (optional)</summary>
+        <details class="promo-details" id="promo-details">
+          <summary class="promo-summary">Authorized promo code (optional — unlocks Pro-class runs)</summary>
           <label class="promo-label" for="promo-code-input">
-            Leave empty unless you were given a code — server-validated only
+            Leave empty unless you were given a code — must match the server secret; saved in this browser until you clear it
             <input
               type="password"
               id="promo-code-input"
@@ -334,6 +380,7 @@
             <h2 class="progress-title">AI agents at work</h2>
             <span class="priority-pill hidden" id="priority-processing-pill">Priority processing</span>
             <p class="progress-stage" id="progress-stage" aria-live="polite"></p>
+            <p class="progress-reward" id="progress-reward" aria-live="polite"></p>
           </div>
           <span class="progress-pct" id="progress-pct">0%</span>
         </div>
@@ -380,6 +427,7 @@
               <button type="button" class="btn-sticky" id="download-pdf-btn">Save PDF</button>
               <button type="button" class="btn-sticky btn-sticky-accent" id="copy-cursor-prompt-btn">Cursor / VS Code prompt</button>
               <button type="button" class="btn-sticky btn-download-zip" id="sticky-download-zip-btn" hidden>ZIP</button>
+              <button type="button" class="btn-sticky btn-asset-lab" id="sticky-enhance-assets-btn" hidden>Lab</button>
             </div>
           </div>
         </div>
@@ -418,6 +466,9 @@
             <button type="button" class="btn-outline btn-download-zip" id="download-images-btn" hidden>
               Download site assets (ZIP)
             </button>
+            <button type="button" class="btn-outline btn-asset-lab" id="enhance-assets-btn" hidden>
+              Asset lab (HD + names)
+            </button>
             <button type="button" class="btn-filled" id="copy-brief-btn">Copy to Clipboard</button>
           </div>
         </div>
@@ -447,10 +498,14 @@
             <p class="report-brand-line">
               Generated with <strong>CloneAI</strong> — AI-powered website analysis tool
             </p>
-            <div class="report-brand-actions">
+            <div class="report-brand-actions" id="report-brand-actions">
               <input type="text" readonly class="report-brand-link-field" id="report-app-link" value="" aria-label="App link" />
               <button type="button" class="btn-outline btn-sm" id="report-copy-link-btn">Copy link</button>
             </div>
+            <p class="report-link-dev-hint hidden" id="report-link-dev-hint">
+              Production share link is hidden on localhost. Set <strong>VITE_PUBLIC_APP_URL</strong> in your Vite env (e.g.
+              <code class="report-link-dev-code">https://www.siteclonerpro.com</code>) and rebuild — or open the deployed site to copy a public link.
+            </p>
           </div>
         </div>
         <section class="try-another" id="try-another-section" hidden aria-label="Run again">
@@ -473,6 +528,10 @@
         <button type="button" class="modal-close" id="modal-pricing-close" aria-label="Close">×</button>
         <h2 id="modal-pricing-title" class="modal-title">Plans &amp; pricing</h2>
         <p class="modal-sub">Save time, build faster — pick a plan that matches how many sites you audit each month.</p>
+        <p class="modal-stripe-note">
+          Checkout runs on <strong>Stripe</strong> (cards &amp; subscriptions). Multi-page crawls and URL+image combo need a paid plan unless you use an
+          <strong>authorized promo code</strong> (under analysis options or the unlock dialog).
+        </p>
         <div class="pricing-grid pricing-grid-4">
           <article class="plan-card">
             <h3 class="plan-name">Free</h3>
@@ -622,6 +681,21 @@
         <p class="modal-sub" id="paywall-detail">
           Upgrade in one click to keep running full analyses — or grab a single extra run.
         </p>
+        <p class="paywall-stripe-note">Payments are processed securely by <strong>Stripe</strong>.</p>
+        <div class="paywall-promo-block">
+          <p class="paywall-promo-title">Authorized promo code</p>
+          <p class="paywall-promo-hint">If you have a code, save it here (same as the field under analysis options) — then close and tap <strong>Generate</strong>.</p>
+          <label class="paywall-promo-label" for="paywall-promo-input">Code</label>
+          <input
+            type="password"
+            id="paywall-promo-input"
+            class="paywall-promo-input"
+            maxlength="128"
+            autocomplete="off"
+            spellcheck="false"
+          />
+          <button type="button" class="btn-plan btn-plan-outline" id="paywall-promo-save-btn">Save code &amp; close</button>
+        </div>
         <div class="paywall-actions">
           <button
             type="button"
