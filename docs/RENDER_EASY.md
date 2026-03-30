@@ -53,10 +53,11 @@ Click **Add Environment Variable** for each row:
 
 **Do not add** random keys from other tutorials: no `DATABASE_URL`, `UPSTASH_*`, `TURBO_*`, `NEXT_PUBLIC_*`, `RESEND_*` unless you really use them. They are **not** required for CloneAI.
 
-### F. Billing (Stripe) — optional, later
+### F. Billing (Stripe) — when you want paid plans
 
-- Leave **`BILLING_ENABLED`** unset or set to **`false`** until Stripe is configured.
-- When ready, set `BILLING_ENABLED=true` and add Stripe keys (see `backend/.env.example` and main `README.md`).
+- Leave **`BILLING_ENABLED=false`** until Stripe webhook + prices exist; otherwise checkout and crawl **paywall** logic will misconfigure.
+- When ready, follow **Phase 4** in **[LAUNCH_PHASES.md](./LAUNCH_PHASES.md)** (webhook URL, `STRIPE_*`, `FRONTEND_URL` must be **`https://`**).
+- With billing on, **deep / multi-page** scans return **403 + paywall** for plans that do not include them (no silent downgrade).
 
 ### G. Deploy
 
@@ -123,4 +124,5 @@ You should get a JSON OK response.
 ## Still stuck?
 
 - Read **`render.yaml`** in the repo (comments list more env vars).
+- Full phased checklist: **[LAUNCH_PHASES.md](./LAUNCH_PHASES.md)**.
 - Run locally: `cd backend && cp .env.example .env` → fill `OPENAI_API_KEY` → `npm start`.

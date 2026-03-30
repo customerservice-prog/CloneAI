@@ -1,5 +1,7 @@
 # CloneAI billing — testing guide
 
+Use after **Phase 4** in [LAUNCH_PHASES.md](./LAUNCH_PHASES.md).
+
 Enforcement is **server-side only**. The frontend sends `X-CloneAI-User-Id` (UUID in `localStorage`); limits are stored in `backend/data/billing.json` (gitignored) when `BILLING_ENABLED=true`.
 
 ## 1. Stripe Dashboard setup

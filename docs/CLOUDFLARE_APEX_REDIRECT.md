@@ -1,5 +1,7 @@
 # Point apex `siteclonerpro.com` → `www` (Cloudflare)
 
+Part of **Phase 3** in [LAUNCH_PHASES.md](./LAUNCH_PHASES.md).
+
 Do this in **Cloudflare** for the `siteclonerpro.com` zone so visitors who type the bare domain always hit the app on **www**.
 
 ## Option A — Single Redirect (recommended)

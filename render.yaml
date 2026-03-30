@@ -1,12 +1,14 @@
-# Render Blueprint — step-by-step: docs/RENDER_EASY.md
+# Render Blueprint — docs/RENDER_EASY.md · full launch: docs/LAUNCH_PHASES.md
 # Set secrets in the Render dashboard (never commit real keys).
 # https://render.com/docs/blueprint-spec
 #
-# First deploy: set OPENAI_API_KEY in dashboard. CORS + FRONTEND_URL default to www.siteclonerpro.com.
-# Billing later: BILLING_ENABLED=true + Stripe vars (see backend/.env.example).
+# First deploy: set OPENAI_API_KEY. CORS + FRONTEND_URL default for siteclonerpro.com.
+# Billing (Phase 4): BILLING_ENABLED=true + Stripe (see backend/.env.example).
+# TRUST_PROXY=1: correct client IP / HTTPS behind Cloudflare+Render (use 2 if double proxy).
 #
-# Stripe webhook (when billing on): https://<this-host>/api/billing/webhook
+# Stripe webhook: https://<this-host>/api/billing/webhook
 # Events: checkout.session.completed, customer.subscription.updated, customer.subscription.deleted, invoice.payment_failed
+# npm run stripe-webhook:create -- https://<host>/api/billing/webhook
 services:
   - type: web
     name: cloneai-api
@@ -18,6 +20,8 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
+      - key: TRUST_PROXY
+        value: "1"
       - key: PORT
         value: "3001"
       # Easier first launch — turn on Stripe vars in dashboard when ready.

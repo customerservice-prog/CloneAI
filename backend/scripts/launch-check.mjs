@@ -34,15 +34,36 @@ if (wantProd) {
     Boolean((process.env.CORS_ORIGINS || '').trim()) &&
       !(process.env.CORS_ORIGINS || '').includes('*')
   );
+  const cors = (process.env.CORS_ORIGINS || '').trim();
+  if (cors && !cors.includes('*')) {
+    const origins = cors.split(',').map((s) => s.trim()).filter(Boolean);
+    const badHttp = origins.some(
+      (o) => o.startsWith('http://') && !/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(o)
+    );
+    need('CORS_ORIGINS use https:// in production (not http:// except localhost)', !badHttp);
+  }
 }
 
-if (String(process.env.BILLING_ENABLED || '').toLowerCase() === 'true') {
+const billingOn = String(process.env.BILLING_ENABLED || '').toLowerCase() === 'true';
+
+if (billingOn) {
   need('STRIPE_SECRET_KEY', Boolean((process.env.STRIPE_SECRET_KEY || '').trim()));
   need('STRIPE_WEBHOOK_SECRET', Boolean((process.env.STRIPE_WEBHOOK_SECRET || '').trim()));
   need('STRIPE_PRICE_STARTER', Boolean((process.env.STRIPE_PRICE_STARTER || '').trim()));
   need('STRIPE_PRICE_PRO', Boolean((process.env.STRIPE_PRICE_PRO || '').trim()));
   need('STRIPE_PRICE_EXTRA_RUN', Boolean((process.env.STRIPE_PRICE_EXTRA_RUN || '').trim()));
-  need('FRONTEND_URL (Stripe success/cancel redirects)', Boolean((process.env.FRONTEND_URL || '').trim()));
+  const fe = (process.env.FRONTEND_URL || '').trim();
+  need('FRONTEND_URL (Stripe success/cancel redirects)', Boolean(fe));
+  need('FRONTEND_URL must start with https:// when billing is on', fe.startsWith('https://'));
+  need(
+    'FRONTEND_URL must not be localhost when billing is on',
+    !/^https?:\/\/(localhost|127\.0\.0\.1)/i.test(fe)
+  );
+  const sk = (process.env.STRIPE_SECRET_KEY || '').trim();
+  need(
+    'STRIPE_SECRET_KEY should look like sk_live_... or sk_test_...',
+    sk.startsWith('sk_live_') || sk.startsWith('sk_test_')
+  );
 }
 
 const ingress = (process.env.CLONEAI_INGRESS_KEY || '').trim();
