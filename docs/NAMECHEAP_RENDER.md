@@ -75,6 +75,26 @@ Success/cancel URLs must use **`https://siteclonerpro.com`** (same as **`FRONTEN
 
 ---
 
+## Apex shows JSON (`cloneai-api`) instead of the SPA
+
+That means **DNS for `siteclonerpro.com` is pointing at the API service**, not **`cloneai-web`**.
+
+**Correct fix (production):**
+
+1. Render → **`cloneai-web`** → **Custom Domains** → add **`siteclonerpro.com`** (and **`www`** if you use it).
+2. Namecheap → **Advanced DNS** → set the **CNAME / A records Render shows** for the apex so they target **`cloneai-web`**, not **`cloneai-api`**.
+3. Remove any record that points the apex at the same target as your API.
+
+**Immediate workaround (until DNS is right):**
+
+1. Render → **`cloneai-web`** → copy the service’s **`.onrender.com`** URL (e.g. `https://cloneai-web-xxxx.onrender.com`).
+2. Render → **`cloneai-api`** → **Environment** → add **`STATIC_APP_URL`** = that URL (no trailing slash).
+3. Redeploy **`cloneai-api`**. Visiting **`https://siteclonerpro.com`** will **302** to the static host so the app loads.
+
+`render.yaml` includes **`STATIC_APP_URL`** with `sync: false` so new Blueprint installs are prompted; existing services can add it manually.
+
+---
+
 ## Quick checks
 
 - `https://<your-api>.onrender.com/api/health` → JSON OK.

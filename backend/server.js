@@ -807,12 +807,72 @@ function browserSafeFrontendRedirectTarget(req, frontRaw) {
   return `${targetOrigin}/`;
 }
 
+/** Canonical https origin for the static SPA (e.g. cloneai-web on Render). No trailing slash. */
+function normalizePublicAppBase(raw) {
+  const s = String(raw || '').trim().replace(/\/$/, '');
+  if (!s) return '';
+  try {
+    const u = new URL(s.includes('://') ? s : `https://${s}`);
+    if (u.protocol !== 'https:' && u.protocol !== 'http:') return '';
+    return u.origin;
+  } catch {
+    return '';
+  }
+}
+
+function frontendHostnameFromEnv(frontRaw) {
+  const trimmed = String(frontRaw || '').trim().replace(/\/$/, '');
+  if (!trimmed) return '';
+  try {
+    const u = new URL(trimmed.includes('://') ? trimmed : `https://${trimmed}`);
+    return normalizeHostLabel(u.hostname);
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Browsers often hit this API when apex DNS points here instead of the static site.
+ * FRONTEND_URL matches the request host, so browserSafeFrontendRedirectTarget cannot redirect (loop).
+ * STATIC_APP_URL / WEB_APP_PUBLIC_URL is the real SPA origin (e.g. https://cloneai-web-xxxx.onrender.com).
+ */
+function redirectTargetWhenFrontendHostHitsApi(req, frontRaw) {
+  const staticBase = normalizePublicAppBase(
+    process.env.STATIC_APP_URL || process.env.WEB_APP_PUBLIC_URL || ''
+  );
+  if (!staticBase) return null;
+  const frontHost = frontendHostnameFromEnv(frontRaw);
+  const reqHost = normalizeHostLabel(req.hostname || req.get('host'));
+  if (!frontHost || !reqHost || frontHost !== reqHost) return null;
+  const incoming = requestPublicOrigin(req);
+  if (incoming && staticBase === incoming) return null;
+  return `${staticBase}/`;
+}
+
+/** True when the client is likely a document navigation (not a JSON API client). */
+function acceptLooksLikeBrowserNavigation(accept) {
+  const a = String(accept || '').toLowerCase();
+  if (!a) return true;
+  if (a.includes('text/html')) return true;
+  if (a.includes('*/*')) return true;
+  if (a.startsWith('application/json')) return false;
+  return true;
+}
+
 app.get('/', (req, res) => {
   const front = (process.env.FRONTEND_URL || process.env.PUBLIC_APP_URL || '').trim();
   const accept = String(req.get('accept') || '');
+  const wantsBrowserDoc = acceptLooksLikeBrowserNavigation(accept);
+
+  const staticFallback = redirectTargetWhenFrontendHostHitsApi(req, front);
+  if (staticFallback && wantsBrowserDoc) {
+    res.redirect(302, staticFallback);
+    return;
+  }
+
   const target = browserSafeFrontendRedirectTarget(req, front);
   // Apex domain often points at this API by mistake; send real browsers to the static app.
-  if (target && accept.includes('text/html')) {
+  if (target && wantsBrowserDoc) {
     res.redirect(301, target);
     return;
   }
@@ -822,8 +882,12 @@ app.get('/', (req, res) => {
     docs: 'Use POST /api/analyze, POST /api/analyze-revise (JSON), and GET /api/health — the web app is hosted separately.',
     health: '/api/health',
     hint:
-      !target && front && accept.includes('text/html')
-        ? 'FRONTEND_URL hostname matches this request Host — fix DNS (point apex at your static host) or change FRONTEND_URL to the hostname that should receive browsers.'
+      !staticFallback &&
+      !target &&
+      front &&
+      wantsBrowserDoc &&
+      !normalizePublicAppBase(process.env.STATIC_APP_URL || process.env.WEB_APP_PUBLIC_URL || '')
+        ? 'FRONTEND_URL hostname matches this request Host — point DNS apex at your static site (cloneai-web), or set STATIC_APP_URL on this service to your SPA’s public URL (e.g. https://cloneai-web.onrender.com) until DNS is fixed.'
         : undefined,
   });
 });

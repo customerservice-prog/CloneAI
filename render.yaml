@@ -11,6 +11,8 @@
 # Persistent disk at /app/data: default billing.json + analysis archive paths (under WORKDIR /app) survive redeploys.
 # TRUST_PROXY=1: correct client IP / HTTPS behind Render’s proxy (use 2 if CDN + Render).
 # VITE_* vars belong on cloneai-web (static build only), not on cloneai-api.
+# If apex DNS points at cloneai-api by mistake, set STATIC_APP_URL on the API to cloneai-web’s
+# public https URL (Dashboard → cloneai-web → URL) so GET / redirects browsers to the SPA until DNS is fixed.
 #
 # cloneai-web: set VITE_API_URL to cloneai-api’s public https URL (dashboard) if it differs
 # from the value below.
@@ -46,6 +48,9 @@ services:
         value: "https://siteclonerpro.com,https://www.siteclonerpro.com"
       - key: FRONTEND_URL
         value: "https://siteclonerpro.com"
+      # Copy from Render → cloneai-web → your static site URL (https://…onrender.com). Unblocks apex→API DNS mistakes.
+      - key: STATIC_APP_URL
+        sync: false
       - key: OPENAI_API_KEY
         sync: false
 
