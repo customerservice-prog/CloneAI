@@ -128,6 +128,12 @@ function planIsProOrPower(plan) {
   return plan === 'pro' || plan === 'power';
 }
 
+/** Normalize plan strings from the API (defensive casing). */
+function normalizeBillingPlan(raw) {
+  const s = String(raw || '').trim().toLowerCase();
+  return s || 'free';
+}
+
 function isLimitReachedPayload(body) {
   return body && (body.code === 'LIMIT_REACHED' || body.error === 'LIMIT_REACHED');
 }
@@ -253,19 +259,27 @@ function closePricingModal() {
 }
 
 function openPaywallModal(limitBody) {
-  trackClientEvent('upgrade_modal_opened', { reason: limitBody?.code || 'limit' });
+  const reason =
+    isLimitReachedPayload(limitBody) ? 'limit' : limitBody?.feature || limitBody?.code || 'upgrade';
+  trackClientEvent('upgrade_modal_opened', { reason });
   const modal = $('#modal-paywall');
   const detail = $('#paywall-detail');
+  const titleEl = $('#modal-paywall-title');
   if (!modal || !detail) return;
-  showToast('Run limit reached — pick a plan or an extra run to continue.', { variant: 'warning', duration: 3600 });
+  $('#modal-pricing')?.setAttribute('hidden', '');
   if (isLimitReachedPayload(limitBody)) {
+    if (titleEl) titleEl.textContent = 'You’ve reached your limit';
+    showToast('Run limit reached — pick a plan or an extra run to continue.', { variant: 'warning', duration: 3600 });
     const plan = (limitBody.plan || 'current').toString();
     detail.textContent = `You’ve used ${limitBody.used} of ${limitBody.limit} analyses on your ${plan} plan. Upgrade or buy one extra run ($3) to continue.`;
   } else {
-    detail.textContent =
-      'Upgrade in one click to keep running full analyses — or grab a single extra run.';
+    if (titleEl) titleEl.textContent = 'Upgrade to continue';
+    const msg =
+      (limitBody && limitBody.message) ||
+      'Choose a plan below for deeper crawls and more runs — or buy a single extra run.';
+    detail.textContent = msg;
+    showToast('This scan needs a paid plan — pick an option below.', { variant: 'warning', duration: 3800 });
   }
-  $('#modal-pricing')?.setAttribute('hidden', '');
   modal.removeAttribute('hidden');
   document.body.classList.add('paywall-open');
 }
@@ -339,7 +353,7 @@ async function refreshBillingStatus() {
       return;
     }
     billingCache.enabled = true;
-    billingCache.plan = data.plan || 'free';
+    billingCache.plan = normalizeBillingPlan(data.plan);
     billingCache.used = Number(data.used) || 0;
     billingCache.limit = Number(data.limit) || 1;
     billingCache.remaining = Number(data.remaining) ?? Math.max(0, billingCache.limit - billingCache.used);
@@ -411,13 +425,31 @@ function depthPillLocked(pillDepth) {
   return false;
 }
 
+function notifyDepthPillLocked(pillDepth) {
+  trackClientEvent('depth_gate_clicked', { depth: pillDepth, plan: billingCache.plan });
+  let message =
+    'That scan depth is not on your plan. Upgrade below to continue — promo code only if you were given one.';
+  let feature = 'scan_depth';
+  if (billingCache.plan === 'free' && pillDepth !== 'homepage') {
+    message =
+      'Multi-page crawls need Starter or higher. Upgrade below — leave the code field empty unless you have an authorized promo.';
+    feature = 'multi_page_scan';
+  } else if (billingCache.plan === 'starter' && pillDepth === 'deep') {
+    message =
+      'Full-site depth (~300 pages) needs Pro or Power. Upgrade below — promo code only if you were given one.';
+    feature = 'deep_crawl';
+  }
+  openPaywallModal({ code: 'FEATURE_LOCKED', message, feature });
+}
+
 function updatePlanGatedControls() {
   const hintDepth = $('#plan-gate-depth-hint');
   $$('.depth-pill').forEach((pill) => {
     const d = pill.dataset.depth;
     const locked = depthPillLocked(d);
     pill.classList.toggle('pill-locked', locked);
-    pill.disabled = locked;
+    pill.setAttribute('aria-disabled', locked ? 'true' : 'false');
+    pill.removeAttribute('disabled');
   });
 
   if (hintDepth) {
@@ -444,7 +476,8 @@ function updatePlanGatedControls() {
     const lockBoth =
       billingCache.enabled && (billingCache.plan === 'free' || billingCache.plan === 'starter');
     bothTab.classList.toggle('tab-locked', lockBoth);
-    bothTab.disabled = lockBoth;
+    bothTab.setAttribute('aria-disabled', lockBoth ? 'true' : 'false');
+    bothTab.removeAttribute('disabled');
     if (lockBoth && activeTab === 'both') setTab('url');
     if (bothBadge) bothBadge.hidden = !lockBoth;
   }
@@ -1975,8 +2008,7 @@ async function runReviseBrief() {
         streamActive = false;
         stopTypewriter();
         $('#progress-section').hidden = true;
-        showToast(body.message || 'This action needs a paid plan.', { variant: 'warning', duration: 3400 });
-        openPricingModal('feature_locked');
+        openPaywallModal(body);
         fullBriefText = backup;
         return;
       }
@@ -2103,6 +2135,11 @@ async function runAnalyze() {
     return;
   }
 
+  if (billingCache.enabled && depthPillLocked(depth)) {
+    notifyDepthPillLocked(depth);
+    return;
+  }
+
   if (TURNSTILE_SITE_KEY && needsTurnstileUi()) {
     await ensureTurnstileMounted();
     if (!turnstileToken) {
@@ -2178,8 +2215,7 @@ async function runAnalyze() {
         streamActive = false;
         stopTypewriter();
         $('#progress-section').hidden = true;
-        showToast(body.message || 'This input needs a paid plan.', { variant: 'warning', duration: 3400 });
-        openPricingModal('feature_locked');
+        openPaywallModal(body);
         return;
       }
       if (res.status === 400 && body.error === 'MISSING_USER_ID') {
@@ -2222,8 +2258,7 @@ async function runAnalyze() {
         streamActive = false;
         stopTypewriter();
         $('#progress-section').hidden = true;
-        showToast(body.message || 'This input needs a paid plan.', { variant: 'warning', duration: 3400 });
-        openPricingModal('feature_locked');
+        openPaywallModal(body);
         return;
       }
       throw new Error(humanizeError(res.status, body.error, body));
@@ -2334,8 +2369,12 @@ function init() {
 
   $$('.depth-pill').forEach((p) => {
     p.addEventListener('click', () => {
-      if (p.disabled) return;
-      depth = p.dataset.depth;
+      const d = p.dataset.depth;
+      if (depthPillLocked(d)) {
+        notifyDepthPillLocked(d);
+        return;
+      }
+      depth = d;
       $$('.depth-pill').forEach((x) => x.classList.toggle('active', x.dataset.depth === depth));
       updateFlowWizard();
     });
@@ -2478,6 +2517,7 @@ function init() {
 
   handleCheckoutReturnQuery();
   buildTryAnotherChips();
+  updatePlanGatedControls();
   refreshBillingStatus();
   updateExportGatedControls();
   trackClientEvent('landing_page_view');

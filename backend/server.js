@@ -1331,15 +1331,35 @@ async function runAnalyzePipeline(req, res) {
       analyzePlan = usageSnap.plan || PLANS.FREE;
 
       req._planGateNotes = [];
-      if (analyzePlan === PLANS.FREE && req.body.depth !== 'homepage') {
-        req._planGateNotes.push('Free plan uses a single-page scan. Upgrade for multi-page crawls.');
-        req.body.depth = 'homepage';
+      let requestedDepth = String(req.body.depth || 'homepage').trim();
+      if (!['homepage', 'shallow', 'deep'].includes(requestedDepth)) {
+        requestedDepth = 'homepage';
       }
-      if (analyzePlan === PLANS.STARTER && req.body.depth === 'deep') {
-        req._planGateNotes.push(
-          'Deep multi-page crawl (up to ~300 pages on Pro, higher on Power) is not on Starter. Using balanced depth (~25 pages).'
-        );
-        req.body.depth = 'shallow';
+      req.body.depth = requestedDepth;
+
+      if (analyzePlan === PLANS.FREE && requestedDepth !== 'homepage') {
+        releaseSlotOnce();
+        res.status(403).json({
+          success: false,
+          code: 'FEATURE_LOCKED',
+          error: 'FEATURE_LOCKED',
+          feature: 'multi_page_scan',
+          message:
+            'Multi-page crawls need Starter or higher. Upgrade below to scan more than the homepage. (Promo code field is only if you were given one.)',
+        });
+        return;
+      }
+      if (analyzePlan === PLANS.STARTER && requestedDepth === 'deep') {
+        releaseSlotOnce();
+        res.status(403).json({
+          success: false,
+          code: 'FEATURE_LOCKED',
+          error: 'FEATURE_LOCKED',
+          feature: 'deep_crawl',
+          message:
+            'Full-site depth (up to ~300 pages) needs Pro or Power. Upgrade below. (Promo code only if you were given one.)',
+        });
+        return;
       }
 
       const featureGate = evaluateAnalyzeFeatureGate(analyzePlan, {
