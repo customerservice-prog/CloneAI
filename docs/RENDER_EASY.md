@@ -10,8 +10,7 @@ Do these **in order**. Skip any step that does not apply.
    - Never paste it in Discord, email, or chat. Only paste it inside **Render → Environment**.
 
 2. **Know your site URL** (for CORS):
-   - Example: `https://siteclonerpro.com`  
-   - If you use **www**, you will add **both** URLs in one line (see below).
+   - Live site: **`https://www.siteclonerpro.com`** (apex `https://siteclonerpro.com` is included in `CORS_ORIGINS` in `render.yaml`).
 
 ---
 
@@ -47,10 +46,10 @@ Click **Add Environment Variable** for each row:
 | `OPENAI_API_KEY` | *(paste your OpenAI key)* |
 | `NODE_ENV` | `production` |
 | `PORT` | `3001` |
-| `CORS_ORIGINS` | `https://siteclonerpro.com,https://www.siteclonerpro.com` |
-| `FRONTEND_URL` | `https://siteclonerpro.com` |
+| `CORS_ORIGINS` | `https://www.siteclonerpro.com,https://siteclonerpro.com` |
+| `FRONTEND_URL` | `https://www.siteclonerpro.com` |
 
-**Replace** `siteclonerpro.com` with your real domain if different.
+**Repo default:** `render.yaml` already sets `CORS_ORIGINS` and `FRONTEND_URL` for this domain when you use the Blueprint. Override in the dashboard if your canonical URL changes.
 
 **Do not add** random keys from other tutorials: no `DATABASE_URL`, `UPSTASH_*`, `TURBO_*`, `NEXT_PUBLIC_*`, `RESEND_*` unless you really use them. They are **not** required for CloneAI.
 
@@ -78,8 +77,10 @@ Click **Add Environment Variable** for each row:
 Wherever the **frontend** is built (Render Static Site, Vercel, etc.), set:
 
 ```text
-VITE_API_URL=https://YOUR-RENDER-URL-HERE.onrender.com
+VITE_API_URL=https://cloneai-mf0z.onrender.com
 ```
+
+The frontend repo includes **`frontend/.env.production`** with this URL and **`VITE_PUBLIC_APP_URL=https://www.siteclonerpro.com`** so Vercel/production builds work without extra dashboard env (you can still override in the host UI).
 
 **No** trailing slash. Rebuild the frontend after changing this.
 

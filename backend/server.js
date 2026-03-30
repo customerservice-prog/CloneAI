@@ -87,9 +87,15 @@ app.use(
   }
 })();
 
+function isLoopbackRequest(req) {
+  const ip = req.ip || req.socket?.remoteAddress || '';
+  return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+}
+
 function enforceHttpsUnlessLocal(req, res, next) {
   if (!isProd) return next();
   if (process.env.RELAX_HTTPS_ENFORCEMENT === 'true') return next();
+  if (isLoopbackRequest(req)) return next();
   const xf = (req.get('x-forwarded-proto') || '').split(',')[0]?.trim();
   const secure = req.secure === true || xf === 'https';
   if (secure) return next();

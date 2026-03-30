@@ -2,7 +2,7 @@
 # Set secrets in the Render dashboard (never commit real keys).
 # https://render.com/docs/blueprint-spec
 #
-# First deploy (no Stripe): set OPENAI_API_KEY, CORS_ORIGINS, FRONTEND_URL in dashboard.
+# First deploy: set OPENAI_API_KEY in dashboard. CORS + FRONTEND_URL default to www.siteclonerpro.com.
 # Billing later: BILLING_ENABLED=true + Stripe vars (see backend/.env.example).
 #
 # Stripe webhook (when billing on): https://<this-host>/api/billing/webhook
@@ -23,10 +23,9 @@ services:
       # Easier first launch — turn on Stripe vars in dashboard when ready.
       - key: BILLING_ENABLED
         value: "false"
-      # Set these in Render UI (Blueprint “sync: false” = value only on dashboard):
-      - key: OPENAI_API_KEY
-        sync: false
       - key: CORS_ORIGINS
-        sync: false
+        value: "https://www.siteclonerpro.com,https://siteclonerpro.com"
       - key: FRONTEND_URL
+        value: "https://www.siteclonerpro.com"
+      - key: OPENAI_API_KEY
         sync: false

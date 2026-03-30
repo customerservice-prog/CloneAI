@@ -3,8 +3,8 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <!-- Optional: production API origin if not set at build (VITE_API_URL). Replace content in deploy. -->
-    <meta name="cloneai-api-origin" content="" />
+    <!-- Fallback API origin if build env missing (VITE_API_URL in .env.production). -->
+    <meta name="cloneai-api-origin" content="https://cloneai-mf0z.onrender.com" />
     <title>CloneAI — AI-powered website analysis</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
