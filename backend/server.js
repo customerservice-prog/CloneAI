@@ -685,7 +685,7 @@ app.get('/', (req, res) => {
   const accept = String(req.get('accept') || '');
   // Apex domain often points at this API by mistake; send real browsers to the static app.
   if (front && accept.includes('text/html')) {
-    res.redirect(302, `${front}/`);
+    res.redirect(301, `${front}/`);
     return;
   }
   res.type('application/json').send({

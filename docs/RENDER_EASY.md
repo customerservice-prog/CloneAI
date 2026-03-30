@@ -88,6 +88,8 @@ The frontend repo includes **`frontend/.env.production`** with this URL and **`V
 
 ## DNS: do not point the **apex** at the API
 
+Step-by-step Cloudflare redirect: **[CLOUDFLARE_APEX_REDIRECT.md](./CLOUDFLARE_APEX_REDIRECT.md)**.
+
 If **`https://siteclonerpro.com`** (no `www`) opens a blank page, wrong content, or a browser error, the **apex record** is probably aimed at **Render** (the API). The **website** lives on **Vercel** (or similar).
 
 **Correct setup**
