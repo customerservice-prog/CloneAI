@@ -2,6 +2,11 @@
 
 Production-oriented full-stack AI website clone analyzer: Vite + vanilla frontend, Node/Express backend, OpenAI streaming over SSE.
 
+### Deploying to Render and feeling lost?
+
+Use the plain checklist: **[docs/RENDER_EASY.md](docs/RENDER_EASY.md)**  
+Summary: **Docker** + `backend/Dockerfile`, set **`OPENAI_API_KEY`**, **`CORS_ORIGINS`**, **`FRONTEND_URL`**. Do **not** use Node + `yarn build` for the API.
+
 ## Prerequisites
 
 - Node.js 20+ recommended (Sharp prebuilds)
@@ -148,7 +153,8 @@ docker run --env-file backend/.env -p 3001:3001 cloneai-api
 ```
 
 **Render**  
-Optional [`render.yaml`](render.yaml) Blueprint: Docker service, health check `/api/health`. Set secrets in the Render dashboard.
+- **Start here:** [docs/RENDER_EASY.md](docs/RENDER_EASY.md)  
+- Optional Blueprint: [`render.yaml`](render.yaml) (Docker, `/api/health`). Add `OPENAI_API_KEY`, `CORS_ORIGINS`, `FRONTEND_URL` in the dashboard.
 
 **Node-only (Railway, Fly, etc.)**  
 Root directory `backend`, start command `npm start`, install `npx playwright install chromium` on first deploy or use the Dockerfile.
