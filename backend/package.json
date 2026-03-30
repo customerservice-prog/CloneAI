@@ -10,6 +10,7 @@
     "start": "node server.js",
     "dev": "node server.js",
     "smoke": "node scripts/smoke.mjs",
+    "adversarial": "node scripts/adversarial-smoke.mjs",
     "launch-check": "node scripts/launch-check.mjs",
     "launch-check:prod": "node scripts/launch-check.mjs --production",
     "stripe-webhook:create": "node scripts/create-stripe-webhook.mjs",

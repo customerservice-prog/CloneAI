@@ -2,6 +2,8 @@
  * Launch smoke checks (no OpenAI key required).
  * Run: npm run smoke  (from backend/)
  * Optional: BASE_URL=http://127.0.0.1:3001 npm run smoke
+ *
+ * Requires NODE_ENV=development OR production with CORS_ORIGINS set (otherwise /api/analyze → 403).
  */
 const BASE = (process.env.BASE_URL || 'http://127.0.0.1:3001').replace(/\/$/, '');
 const SMOKE_USER = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';

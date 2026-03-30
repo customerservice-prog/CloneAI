@@ -6,6 +6,7 @@
     "dev": "node scripts/dev.mjs",
     "test": "npm test --prefix backend",
     "smoke": "npm run smoke --prefix backend",
+    "adversarial": "npm run adversarial --prefix backend",
     "build": "npm run build --prefix frontend",
     "verify": "npm test --prefix backend && npm run build --prefix frontend",
     "preflight": "npm run verify && npm run launch-check",
