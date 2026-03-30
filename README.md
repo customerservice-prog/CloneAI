@@ -2,10 +2,10 @@
 
 Production-oriented full-stack AI website clone analyzer: Vite + vanilla frontend, Node/Express backend, OpenAI streaming over SSE.
 
-### Deploying to Render and feeling lost?
+### Deploying with GitHub + Render + Namecheap?
 
-Use the plain checklist: **[docs/RENDER_EASY.md](docs/RENDER_EASY.md)**  
-Summary: **Docker** + `backend/Dockerfile`, set **`OPENAI_API_KEY`**, **`CORS_ORIGINS`**, **`FRONTEND_URL`**. Do **not** use Node + `yarn build` for the API.
+**Start here:** **[docs/NAMECHEAP_RENDER.md](docs/NAMECHEAP_RENDER.md)** (one stack, no Vercel required).  
+Shorter API-focused checklist: **[docs/RENDER_EASY.md](docs/RENDER_EASY.md)** — **Docker** + `backend/Dockerfile`, **`OPENAI_API_KEY`**, **`CORS_ORIGINS`**, **`FRONTEND_URL`**. Do **not** use plain Node + `yarn build` for the API.
 
 ## Prerequisites
 
@@ -31,7 +31,7 @@ Recommended for production:
 ```env
 NODE_ENV=production
 PORT=3001
-CORS_ORIGINS=https://your-app.vercel.app
+CORS_ORIGINS=https://siteclonerpro.com,https://www.siteclonerpro.com
 ```
 
 | Variable | Purpose |
@@ -69,7 +69,7 @@ CORS_ORIGINS=https://your-app.vercel.app
 | `STRIPE_WEBHOOK_SECRET` | Signing secret for `POST /api/billing/webhook` (register URL in Stripe Dashboard). |
 | `STRIPE_PRICE_STARTER` / `STRIPE_PRICE_PRO` | Recurring price IDs ($5/mo and $12/mo). |
 | `STRIPE_PRICE_EXTRA_RUN` | One-time price ID ($3) for bonus runs. |
-| `FRONTEND_URL` | Origin for Stripe Checkout `success_url` / `cancel_url` (e.g. `https://your-app.vercel.app`). |
+| `FRONTEND_URL` | Origin for Stripe Checkout `success_url` / `cancel_url` (e.g. `https://siteclonerpro.com`). |
 | `BILLING_DATA_PATH` | Optional path to `billing.json` store (default: `backend/data/billing.json`). |
 | `CLONEAI_PROMO_CODE` | Optional server secret: valid `promoCode` form field or `X-CloneAI-Promo-Code` header grants a **Pro-class** run for billing checks only (still rate-limited). **Body:** exact string match (no trim). **Header:** trimmed. |
 | `HTML_MODEL_MAX_CHARS_PER_PAGE` | After HTML cleaning, max characters per crawled page sent toward the model budget (default **80k**, max **150k**). |
@@ -83,7 +83,9 @@ CORS_ORIGINS=https://your-app.vercel.app
 
 Full Stripe test matrix: [docs/BILLING_TESTING.md](docs/BILLING_TESTING.md).
 
-## Frontend (local / Vercel)
+**Post-download image pipeline** (screenshot ZIP → HD pass + URL-grounded renames): [docs/IMAGE_PIPELINE.md](docs/IMAGE_PIPELINE.md) · `npm run image-pipeline --prefix backend` (see doc for args).
+
+## Frontend (local / Render static / optional Vercel)
 
 | Variable | Purpose |
 |----------|---------|
@@ -155,16 +157,17 @@ docker build -t cloneai-api ./backend
 docker run --env-file backend/.env -p 3001:3001 cloneai-api
 ```
 
-**Render**  
-- **Start here:** [docs/RENDER_EASY.md](docs/RENDER_EASY.md)  
-- **Full launch sequence:** [docs/LAUNCH_PHASES.md](docs/LAUNCH_PHASES.md)  
-- Optional Blueprint: [`render.yaml`](render.yaml) (Docker API + optional static `cloneai-web`). Set `OPENAI_API_KEY` in the dashboard; `CORS_ORIGINS` / `FRONTEND_URL` are preset for apex `siteclonerpro.com`. Namecheap DNS: [docs/NAMECHEAP_RENDER.md](docs/NAMECHEAP_RENDER.md).
+**Render + GitHub + Namecheap (recommended)**  
+- **One-page stack:** [docs/NAMECHEAP_RENDER.md](docs/NAMECHEAP_RENDER.md)  
+- **API details:** [docs/RENDER_EASY.md](docs/RENDER_EASY.md)  
+- **Phased go-live:** [docs/LAUNCH_PHASES.md](docs/LAUNCH_PHASES.md)  
+- Blueprint [`render.yaml`](render.yaml): **`cloneai-api`** (Docker) + **`cloneai-web`** (static). Set **`OPENAI_API_KEY`** in the dashboard; `CORS_ORIGINS` / `FRONTEND_URL` preset for `https://siteclonerpro.com`.
 
 **Node-only (Railway, Fly, etc.)**  
 Root directory `backend`, start command `npm start`, install `npx playwright install chromium` on first deploy or use the Dockerfile.
 
-**Vercel (frontend)**  
-Project root `frontend`. [`vercel.json`](frontend/vercel.json) sets Vite build/output. Set **`VITE_API_URL`** to the public API origin (no trailing slash).
+**Vercel (optional alternative frontend)**  
+Only if you do not use **`cloneai-web`** on Render: project root `frontend`, [`vercel.json`](frontend/vercel.json), **`VITE_API_URL`** → public API (no trailing slash).
 
 **CI**  
 GitHub Actions runs `npm run verify` on push/PR to `main` / `master` (see [`.github/workflows/ci.yml`](.github/workflows/ci.yml)).

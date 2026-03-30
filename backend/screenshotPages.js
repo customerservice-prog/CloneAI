@@ -19,6 +19,10 @@ export async function screenshotUrls(urls, {
   viewportWidth = 1280,
   viewportHeight = 720,
 } = {}) {
+  const deviceScaleFactor = Math.min(
+    3,
+    Math.max(1, Number(process.env.SCREENSHOT_DEVICE_SCALE) || 1)
+  );
   if (process.env.ENABLE_PAGE_SCREENSHOTS === 'false') {
     return urls.map((u) => ({ url: u, buffer: null, error: 'disabled' }));
   }
@@ -47,7 +51,7 @@ export async function screenshotUrls(urls, {
       const target = urls[i];
       const context = await browser.newContext({
         viewport: { width: viewportWidth, height: viewportHeight },
-        deviceScaleFactor: 1,
+        deviceScaleFactor,
       });
       const page = await context.newPage();
       try {

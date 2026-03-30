@@ -54,21 +54,24 @@ npm run launch-check:prod
 
 ---
 
-## Phase 2 — Frontend (Vercel or static host)
+## Phase 2 — Frontend on Render (`cloneai-web`)
 
-1. Project root: **`frontend/`** (see `frontend/vercel.json`).
-2. Production build reads **`frontend/.env.production`** (API URL + public app URL). Override in the host UI if needed.
-3. Attach domains: **`siteclonerpro.com`** (apex) and **`www`** if you use it (canonical in repo is apex).
-4. Redeploy after any env change.
+1. Prefer the **Blueprint** in **`render.yaml`** (creates **`cloneai-web`** with build `cd frontend && npm ci && npm run build`, publish **`frontend/dist`**).
+2. Set **`cloneai-web`** env **`VITE_API_URL`** to **`cloneai-api`’s** public `https://…onrender.com` (or **`https://api.yourdomain.com`** if you add a custom API domain).
+3. Production defaults also come from **`frontend/.env.production`** at build time.
+4. **Custom domains:** attach **`siteclonerpro.com`** (and **`www`** if you want) on **`cloneai-web`** in Render, then add the DNS records Render shows at **Namecheap**. See **[NAMECHEAP_RENDER.md](./NAMECHEAP_RENDER.md)**.
+5. Redeploy **`cloneai-web`** after any env change.
+
+*(Optional: deploy **`frontend/`** on Vercel instead — use `frontend/vercel.json` only in that case; do not point the same hostname at both Vercel and Render.)*
 
 ---
 
 ## Phase 3 — DNS & apex (avoid “wrong site” / error codes)
 
-1. **`www`** → frontend (Vercel CNAME / DNS as instructed by Vercel).
-2. **Apex** → same app **or** redirect **apex → www** in Cloudflare.  
-   Steps: **[CLOUDFLARE_APEX_REDIRECT.md](./CLOUDFLARE_APEX_REDIRECT.md)**.
-3. Do **not** point apex at the Render API long term; use **`api.`** for the API if you want a branded API host.
+1. **Namecheap + Render:** **[NAMECHEAP_RENDER.md](./NAMECHEAP_RENDER.md)** — remove **URL Redirect** rows; add only the **CNAME** / records Render gives you for **`cloneai-web`**.
+2. **Apex** must resolve to the **static site** (`cloneai-web`), not **`cloneai-api`**.
+3. **API** stays on **`*.onrender.com`** or **`api.`** → **`cloneai-api`** custom domain.
+4. If you use **Cloudflare** in front of DNS, use **www → apex** per **[CLOUDFLARE_APEX_REDIRECT.md](./CLOUDFLARE_APEX_REDIRECT.md)** (one redirect story only).
 
 The API still **301-redirects** HTML requests on `/` to **`FRONTEND_URL`** when set, as a safety net.
 
@@ -108,6 +111,12 @@ Full matrix: **[BILLING_TESTING.md](./BILLING_TESTING.md)**.
 | Turnstile | `TURNSTILE_SECRET_KEY` + `VITE_TURNSTILE_SITE_KEY` |
 | Owner override | `CLONEAI_PROMO_CODE` (server only); users leave “Authorized code” closed unless given a code |
 | Trust proxy | `TRUST_PROXY=1` or `2` if behind Cloudflare + Render (see `server.js`) |
+
+---
+
+## Optional — Image pipeline (after a successful analyze ZIP)
+
+See **[IMAGE_PIPELINE.md](./IMAGE_PIPELINE.md)** — CLI upscales harvested/screenshot assets and renames from URL-derived stems (optional OpenAI **index pick** only; no free-form names). Run on your machine or a worker; not required for first launch.
 
 ---
 

@@ -15,9 +15,11 @@
     "launch-check:dev": "node scripts/launch-check-dev.mjs",
     "launch-check:prod": "node scripts/launch-check.mjs --production",
     "stripe-webhook:create": "node scripts/create-stripe-webhook.mjs",
-    "test": "node --test-concurrency=1 test/billing.test.mjs && node --test-concurrency=1 test/billing-scale-pro.test.mjs && node --test-concurrency=1 test/security.test.mjs && node --test-concurrency=1 test/costControls.test.mjs && node --test-concurrency=1 test/promoCode.test.mjs"
+    "image-pipeline": "node scripts/image-pipeline-from-zip.mjs",
+    "test": "node --test-concurrency=1 test/billing.test.mjs && node --test-concurrency=1 test/billing-scale-pro.test.mjs && node --test-concurrency=1 test/security.test.mjs && node --test-concurrency=1 test/costControls.test.mjs && node --test-concurrency=1 test/promoCode.test.mjs && node --test-concurrency=1 test/imageIntelPipeline.test.mjs"
   },
   "dependencies": {
+    "adm-zip": "^0.5.16",
     "archiver": "^7.0.1",
     "axios": "^1.7.9",
     "bcryptjs": "^2.4.3",
