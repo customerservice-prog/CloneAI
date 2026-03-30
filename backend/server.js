@@ -53,6 +53,7 @@ import {
 import { appendLeadRecord } from './leadsStore.js';
 import { promoMatchesRequest, configuredPromoCode } from './promoCode.js';
 import { probeSinkMiddleware } from './probeSink.js';
+import { resolveRootGet } from './rootRedirect.js';
 import {
   analysisReuseEnabled,
   analysisFastReplayEnabled,
@@ -757,123 +758,12 @@ async function abortBillingIfNeeded(req) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const jitter = (a, b) => sleep(a + Math.floor(Math.random() * (b - a + 1)));
 
-function normalizeHostLabel(h) {
-  return String(h || '')
-    .split(':')[0]
-    .toLowerCase()
-    .replace(/\.$/, '');
-}
-
-/** Origin the client used (req.protocol / req.hostname honor trust proxy + X-Forwarded-*). */
-function requestPublicOrigin(req) {
-  const rawProto = String(req.protocol || '').replace(/:$/, '');
-  const proto = rawProto === 'https' || rawProto === 'http' ? rawProto : 'https';
-  const host = normalizeHostLabel(req.hostname || req.get('host'));
-  if (!host) return null;
-  return `${proto}://${host}`;
-}
-
-/**
- * If apex DNS points at this API and FRONTEND_URL uses that same host, a 301 to FRONTEND_URL
- * loops forever (ERR_TOO_MANY_REDIRECTS). Compare using req.hostname (not only raw Host) so
- * Cloudflare/Render + trust proxy match the public hostname. Also treat matching public origin
- * as "already there" so we never 301 to the same URL.
- * @param {import('express').Request} req
- * @param {string} frontRaw
- * @returns {string | null}
- */
-function browserSafeFrontendRedirectTarget(req, frontRaw) {
-  const trimmed = String(frontRaw || '').trim().replace(/\/$/, '');
-  if (!trimmed) return null;
-  let u;
-  try {
-    u = new URL(trimmed.includes('://') ? trimmed : `https://${trimmed}`);
-  } catch {
-    return null;
-  }
-  const targetOrigin = u.origin;
-  const incomingOrigin = requestPublicOrigin(req);
-  if (incomingOrigin && incomingOrigin === targetOrigin) return null;
-
-  const targetHost = normalizeHostLabel(u.hostname);
-  const fromHostname = normalizeHostLabel(req.hostname);
-  const fromHostHeader = normalizeHostLabel(req.get('host'));
-  if (
-    targetHost &&
-    ((fromHostname && fromHostname === targetHost) || (fromHostHeader && fromHostHeader === targetHost))
-  ) {
-    return null;
-  }
-  return `${targetOrigin}/`;
-}
-
-/** Canonical https origin for the static SPA (e.g. cloneai-web on Render). No trailing slash. */
-function normalizePublicAppBase(raw) {
-  const s = String(raw || '').trim().replace(/\/$/, '');
-  if (!s) return '';
-  try {
-    const u = new URL(s.includes('://') ? s : `https://${s}`);
-    if (u.protocol !== 'https:' && u.protocol !== 'http:') return '';
-    return u.origin;
-  } catch {
-    return '';
-  }
-}
-
-function frontendHostnameFromEnv(frontRaw) {
-  const trimmed = String(frontRaw || '').trim().replace(/\/$/, '');
-  if (!trimmed) return '';
-  try {
-    const u = new URL(trimmed.includes('://') ? trimmed : `https://${trimmed}`);
-    return normalizeHostLabel(u.hostname);
-  } catch {
-    return '';
-  }
-}
-
-/**
- * Browsers often hit this API when apex DNS points here instead of the static site.
- * FRONTEND_URL matches the request host, so browserSafeFrontendRedirectTarget cannot redirect (loop).
- * STATIC_APP_URL / WEB_APP_PUBLIC_URL is the real SPA origin (e.g. https://cloneai-web-xxxx.onrender.com).
- */
-function redirectTargetWhenFrontendHostHitsApi(req, frontRaw) {
-  const staticBase = normalizePublicAppBase(
-    process.env.STATIC_APP_URL || process.env.WEB_APP_PUBLIC_URL || ''
-  );
-  if (!staticBase) return null;
-  const frontHost = frontendHostnameFromEnv(frontRaw);
-  const reqHost = normalizeHostLabel(req.hostname || req.get('host'));
-  if (!frontHost || !reqHost || frontHost !== reqHost) return null;
-  const incoming = requestPublicOrigin(req);
-  if (incoming && staticBase === incoming) return null;
-  return `${staticBase}/`;
-}
-
-/** True when the client is likely a document navigation (not a JSON API client). */
-function acceptLooksLikeBrowserNavigation(accept) {
-  const a = String(accept || '').toLowerCase();
-  if (!a) return true;
-  if (a.includes('text/html')) return true;
-  if (a.includes('*/*')) return true;
-  if (a.startsWith('application/json')) return false;
-  return true;
-}
-
 app.get('/', (req, res) => {
   const front = (process.env.FRONTEND_URL || process.env.PUBLIC_APP_URL || '').trim();
-  const accept = String(req.get('accept') || '');
-  const wantsBrowserDoc = acceptLooksLikeBrowserNavigation(accept);
-
-  const staticFallback = redirectTargetWhenFrontendHostHitsApi(req, front);
-  if (staticFallback && wantsBrowserDoc) {
-    res.redirect(302, staticFallback);
-    return;
-  }
-
-  const target = browserSafeFrontendRedirectTarget(req, front);
-  // Apex domain often points at this API by mistake; send real browsers to the static app.
-  if (target && wantsBrowserDoc) {
-    res.redirect(301, target);
+  const staticApp = (process.env.STATIC_APP_URL || process.env.WEB_APP_PUBLIC_URL || '').trim();
+  const r = resolveRootGet(req, { frontendUrl: front, staticAppUrl: staticApp });
+  if (r.kind === 'redirect') {
+    res.redirect(r.status, r.location);
     return;
   }
   res.type('application/json').send({
@@ -881,14 +771,7 @@ app.get('/', (req, res) => {
     service: 'cloneai-api',
     docs: 'Use POST /api/analyze, POST /api/analyze-revise (JSON), and GET /api/health — the web app is hosted separately.',
     health: '/api/health',
-    hint:
-      !staticFallback &&
-      !target &&
-      front &&
-      wantsBrowserDoc &&
-      !normalizePublicAppBase(process.env.STATIC_APP_URL || process.env.WEB_APP_PUBLIC_URL || '')
-        ? 'FRONTEND_URL hostname matches this request Host — point DNS apex at your static site (cloneai-web), or set STATIC_APP_URL on this service to your SPA’s public URL (e.g. https://cloneai-web.onrender.com) until DNS is fixed.'
-        : undefined,
+    hint: r.hint,
   });
 });
 

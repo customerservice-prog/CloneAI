@@ -16,7 +16,7 @@
     "launch-check:prod": "node scripts/launch-check.mjs --production",
     "stripe-webhook:create": "node scripts/create-stripe-webhook.mjs",
     "image-pipeline": "node scripts/image-pipeline-from-zip.mjs",
-    "test": "node --test-concurrency=1 test/billing.test.mjs && node --test-concurrency=1 test/billing-scale-pro.test.mjs && node --test-concurrency=1 test/security.test.mjs && node --test-concurrency=1 test/costControls.test.mjs && node --test-concurrency=1 test/promoCode.test.mjs && node --test-concurrency=1 test/imageHarvest.test.mjs && node --test-concurrency=1 test/imageIntelPipeline.test.mjs && node --test-concurrency=1 test/processAssetZip.test.mjs"
+    "test": "node --test-concurrency=1 test/billing.test.mjs && node --test-concurrency=1 test/billing-scale-pro.test.mjs && node --test-concurrency=1 test/security.test.mjs && node --test-concurrency=1 test/costControls.test.mjs && node --test-concurrency=1 test/promoCode.test.mjs && node --test-concurrency=1 test/imageHarvest.test.mjs && node --test-concurrency=1 test/imageIntelPipeline.test.mjs && node --test-concurrency=1 test/processAssetZip.test.mjs && node --test-concurrency=1 test/rootRedirect.test.mjs"
   },
   "dependencies": {
     "adm-zip": "^0.5.16",
