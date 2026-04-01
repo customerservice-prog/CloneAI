@@ -12,7 +12,13 @@ ARG VITE_API_ORIGIN=https://siteclonerpro.com
 ARG VITE_PUBLIC_APP_ORIGIN=https://siteclonerpro.com
 ENV VITE_API_URL=$VITE_API_ORIGIN
 ENV VITE_PUBLIC_APP_URL=$VITE_PUBLIC_APP_ORIGIN
-RUN cd frontend && npm run build
+# Render passes service env vars as Docker build args (same key names).
+# Set CLONEAI_INGRESS_KEY on the service once; the SPA gets it as VITE_CLONEAI_KEY at build time.
+# Override with VITE_CLONEAI_KEY if you need a different build-time value (rare).
+ARG CLONEAI_INGRESS_KEY=
+ARG VITE_CLONEAI_KEY=
+RUN export VITE_CLONEAI_KEY="${VITE_CLONEAI_KEY:-$CLONEAI_INGRESS_KEY}" && \
+    cd frontend && npm run build
 
 FROM mcr.microsoft.com/playwright:v1.58.2-noble
 WORKDIR /app

@@ -16,7 +16,7 @@
 # Billing: BILLING_ENABLED=true requires Stripe secrets + price IDs in the dashboard; without them checkout returns 503.
 # Persistent disk at /app/data: default billing.json + analysis archive paths (under WORKDIR /app) survive redeploys.
 # TRUST_PROXY=1: correct client IP / HTTPS behind Render’s proxy (use 2 if CDN + Render).
-# VITE_* vars belong on cloneai-web (static build only), not on cloneai-api.
+# VITE_* URL vars: set on cloneai-web (static). Monolith Docker (cloneai-api): URLs come from Dockerfile ARGs; set CLONEAI_INGRESS_KEY (or VITE_CLONEAI_KEY) on the API service so Render passes it as a build arg and the embedded SPA includes X-CloneAI-Key.
 # If apex DNS points at cloneai-api by mistake, set STATIC_APP_URL on the API to cloneai-web’s
 # public https URL (Dashboard → cloneai-web → URL) so GET / redirects browsers to the SPA until DNS is fixed.
 #
@@ -49,6 +49,11 @@ services:
       # STRIPE_PRICE_STARTER, STRIPE_PRICE_PRO, STRIPE_PRICE_EXTRA_RUN; optional STRIPE_PRICE_POWER, STRIPE_PRICE_DEEP_EXTRACT.
       # Stripe webhook URL: https://<api-host>/api/billing/webhook
       # Optional promo: CLONEAI_PROMO_CODE
+      # If set, same value is baked into the SPA at build time (X-CloneAI-Key). Optional override: VITE_CLONEAI_KEY.
+      - key: CLONEAI_INGRESS_KEY
+        sync: false
+      - key: VITE_CLONEAI_KEY
+        sync: false
       - key: BILLING_ENABLED
         value: "true"
       - key: CORS_ORIGINS
@@ -84,3 +89,6 @@ services:
         value: "https://siteclonerpro.com"
       - key: VITE_PUBLIC_APP_URL
         value: "https://siteclonerpro.com"
+      # Match CLONEAI_INGRESS_KEY on cloneai-api when ingress is enabled (or leave both unset).
+      - key: VITE_CLONEAI_KEY
+        sync: false
