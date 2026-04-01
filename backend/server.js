@@ -79,6 +79,12 @@ const spaRoot = path.join(__dirname, 'public');
 const spaIndex = path.join(spaRoot, 'index.html');
 const serveSpa = isProd && fs.existsSync(spaIndex);
 
+if (isProd && !serveSpa) {
+  console.warn(
+    '[cloneai] No SPA bundle at public/index.html — GET / will not serve the app. Use the repo-root Dockerfile (see render.yaml), or set STATIC_APP_URL / APEX_STATIC_FALLBACK_URL so apex traffic redirects to your static host.'
+  );
+}
+
 const app = express();
 app.disable('x-powered-by');
 
@@ -767,39 +773,43 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const jitter = (a, b) => sleep(a + Math.floor(Math.random() * (b - a + 1)));
 
 if (!serveSpa) {
-function rootGetPrefersHtml(req) {
-  if (String(req.query?.format || '').toLowerCase() === 'json') return false;
-  const a = String(req.get('accept') || '').toLowerCase();
-  if (a.includes('application/json') && !a.includes('text/html')) return false;
-  if (a.includes('text/html')) return true;
-  return false;
-}
+  function rootGetPrefersHtml(req) {
+    if (String(req.query?.format || '').toLowerCase() === 'json') return false;
+    const a = String(req.get('accept') || '').toLowerCase();
+    const jsonOnly =
+      a.includes('application/json') &&
+      !a.includes('*/*') &&
+      !a.includes('text/html') &&
+      !a.includes('text/plain');
+    if (jsonOnly) return false;
+    return true;
+  }
 
-app.get('/', (req, res) => {
-  const front = (process.env.FRONTEND_URL || process.env.PUBLIC_APP_URL || '').trim();
-  const staticApp = (process.env.STATIC_APP_URL || process.env.WEB_APP_PUBLIC_URL || '').trim();
-  const apexFallback = (process.env.APEX_STATIC_FALLBACK_URL || '').trim();
-  const r = resolveRootGet(req, {
-    frontendUrl: front,
-    staticAppUrl: staticApp,
-    apexStaticFallbackUrl: apexFallback,
+  app.get('/', (req, res) => {
+    const front = (process.env.FRONTEND_URL || process.env.PUBLIC_APP_URL || '').trim();
+    const staticApp = (process.env.STATIC_APP_URL || process.env.WEB_APP_PUBLIC_URL || '').trim();
+    const apexFallback = (process.env.APEX_STATIC_FALLBACK_URL || '').trim();
+    const r = resolveRootGet(req, {
+      frontendUrl: front,
+      staticAppUrl: staticApp,
+      apexStaticFallbackUrl: apexFallback,
+    });
+    if (r.kind === 'redirect') {
+      res.redirect(r.status, r.location);
+      return;
+    }
+    if (rootGetPrefersHtml(req)) {
+      res.type('html').send(formatRootLandingHtml({ hint: r.hint, frontendUrl: front || null }));
+      return;
+    }
+    res.type('application/json').send({
+      ok: true,
+      service: 'cloneai-api',
+      docs: 'Use POST /api/analyze, POST /api/analyze-revise (JSON), and GET /api/health — the web app is hosted separately.',
+      health: '/api/health',
+      hint: r.hint,
+    });
   });
-  if (r.kind === 'redirect') {
-    res.redirect(r.status, r.location);
-    return;
-  }
-  if (rootGetPrefersHtml(req)) {
-    res.type('html').send(formatRootLandingHtml({ hint: r.hint, frontendUrl: front || null }));
-    return;
-  }
-  res.type('application/json').send({
-    ok: true,
-    service: 'cloneai-api',
-    docs: 'Use POST /api/analyze, POST /api/analyze-revise (JSON), and GET /api/health — the web app is hosted separately.',
-    health: '/api/health',
-    hint: r.hint,
-  });
-});
 }
 
 app.get('/api/health', (_req, res) => {
@@ -1257,6 +1267,26 @@ async function fetchHtmlDetailed(url, depth) {
 
 function sseWrite(res, obj) {
   res.write(`data: ${JSON.stringify(obj)}\n\n`);
+}
+
+/** Comment frames keep reverse proxies from closing long idle streams while OpenAI is thinking. */
+async function withSseKeepalive(res, fn) {
+  const ms = Math.min(
+    120_000,
+    Math.max(10_000, Number(process.env.SSE_KEEPALIVE_MS) || 20_000)
+  );
+  const id = setInterval(() => {
+    try {
+      res.write(': keepalive\n\n');
+    } catch {
+      /* client disconnected */
+    }
+  }, ms);
+  try {
+    return await fn();
+  } finally {
+    clearInterval(id);
+  }
 }
 
 const MAX_OUTPUT_TOKENS = Math.min(
@@ -2241,18 +2271,21 @@ async function runAnalyzePipeline(req, res) {
       }
     };
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      sseBuffer += decoder.decode(value, { stream: true });
-      let sep;
-      while ((sep = sseBuffer.indexOf('\n\n')) !== -1) {
-        const block = sseBuffer.slice(0, sep);
-        sseBuffer = sseBuffer.slice(sep + 2);
-        flushEventBlock(block);
+    await withSseKeepalive(res, async () => {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        sseBuffer += decoder.decode(value, { stream: true });
+        let sep;
+        while ((sep = sseBuffer.indexOf('\n\n')) !== -1) {
+          const block = sseBuffer.slice(0, sep);
+          sseBuffer = sseBuffer.slice(sep + 2);
+          flushEventBlock(block);
+        }
       }
-    }
-    if (sseBuffer.trim()) flushEventBlock(sseBuffer);
+      sseBuffer += decoder.decode();
+      if (sseBuffer.trim()) flushEventBlock(sseBuffer);
+    });
 
     if (streamStopReason === 'max_tokens' || streamStopReason === 'length') {
       send({
@@ -2613,18 +2646,21 @@ async function runRevisePipeline(req, res) {
       }
     };
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      sseBuffer += decoder.decode(value, { stream: true });
-      let sep;
-      while ((sep = sseBuffer.indexOf('\n\n')) !== -1) {
-        const block = sseBuffer.slice(0, sep);
-        sseBuffer = sseBuffer.slice(sep + 2);
-        flushEventBlock(block);
+    await withSseKeepalive(res, async () => {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        sseBuffer += decoder.decode(value, { stream: true });
+        let sep;
+        while ((sep = sseBuffer.indexOf('\n\n')) !== -1) {
+          const block = sseBuffer.slice(0, sep);
+          sseBuffer = sseBuffer.slice(sep + 2);
+          flushEventBlock(block);
+        }
       }
-    }
-    if (sseBuffer.trim()) flushEventBlock(sseBuffer);
+      sseBuffer += decoder.decode();
+      if (sseBuffer.trim()) flushEventBlock(sseBuffer);
+    });
 
     if (streamStopReason === 'max_tokens' || streamStopReason === 'length') {
       send({

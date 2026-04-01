@@ -4,6 +4,7 @@ import {
   resolveRootGet,
   normalizePublicAppBase,
   redirectTargetWhenFrontendHostHitsApi,
+  apexMismatchRedirectTarget,
   acceptLooksLikeBrowserNavigation,
   browserSafeFrontendRedirectTarget,
 } from '../rootRedirect.js';
@@ -60,6 +61,29 @@ test('STATIC_APP_URL: no redirect when request already on static host', () => {
     'https://cloneai-web-abc.onrender.com'
   );
   assert.equal(loc, null);
+});
+
+test('APEX_STATIC_FALLBACK_URL: apex host hits API → 302 to www (or other host)', () => {
+  const req = mockReq({
+    hostname: 'siteclonerpro.com',
+    accept: 'text/html',
+  });
+  const r = resolveRootGet(req, {
+    frontendUrl: 'https://siteclonerpro.com',
+    staticAppUrl: '',
+    apexStaticFallbackUrl: 'https://www.siteclonerpro.com',
+  });
+  assert.equal(r.kind, 'redirect');
+  assert.equal(r.status, 302);
+  assert.equal(r.location, 'https://www.siteclonerpro.com/');
+});
+
+test('apexMismatchRedirectTarget null when fallback host same as request', () => {
+  const req = mockReq({ hostname: 'siteclonerpro.com', accept: 'text/html' });
+  assert.equal(
+    apexMismatchRedirectTarget(req, 'https://siteclonerpro.com', 'https://siteclonerpro.com'),
+    null
+  );
 });
 
 test('misconfigured apex + no STATIC_APP_URL → json with hint', () => {

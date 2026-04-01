@@ -87,6 +87,28 @@ export function redirectTargetWhenFrontendHostHitsApi(req, frontRaw, staticAppRa
   return `${staticBase}/`;
 }
 
+/**
+ * When apex DNS points at the API but `www` (or another host) points at the static SPA, redirect there.
+ * Set APEX_STATIC_FALLBACK_URL e.g. to https://www.siteclonerpro.com on the API service.
+ */
+export function apexMismatchRedirectTarget(req, frontRaw, apexFallbackRaw) {
+  const apexBase = normalizePublicAppBase(apexFallbackRaw);
+  if (!apexBase) return null;
+  const frontHost = frontendHostnameFromEnv(frontRaw);
+  const reqHost = normalizeHostLabel(req.hostname || req.get('host'));
+  if (!frontHost || !reqHost || frontHost !== reqHost) return null;
+  let fallbackHost;
+  try {
+    fallbackHost = normalizeHostLabel(new URL(apexBase).hostname);
+  } catch {
+    return null;
+  }
+  if (!fallbackHost || fallbackHost === reqHost) return null;
+  const incoming = requestPublicOrigin(req);
+  if (incoming && apexBase === incoming) return null;
+  return `${apexBase}/`;
+}
+
 export function acceptLooksLikeBrowserNavigation(accept) {
   const a = String(accept || '').toLowerCase();
   if (!a) return true;
@@ -99,20 +121,69 @@ export function acceptLooksLikeBrowserNavigation(accept) {
 const JSON_HINT =
   'FRONTEND_URL hostname matches this request Host — point DNS apex at your static site (cloneai-web), or set STATIC_APP_URL on this service to your SPA’s public URL (e.g. https://cloneai-web.onrender.com) until DNS is fixed.';
 
+function escapeHtml(s) {
+  return String(s || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+/**
+ * Browser-friendly page when GET / hits the API (avoids raw JSON for humans at a misconfigured apex).
+ */
+export function formatRootLandingHtml({ hint, frontendUrl }) {
+  const hintHtml = hint ? `<p class="hint">${escapeHtml(hint)}</p>` : '';
+  const front = String(frontendUrl || '').trim().replace(/\/$/, '');
+  const tryLink =
+    front && !hint
+      ? `<p><a class="btn" href="${escapeHtml(front)}/">Open the CloneAI app</a></p>`
+      : hint
+        ? '<p><strong>Note:</strong> A link to your marketing URL would just reload this page until DNS or <code>STATIC_APP_URL</code> / <code>APEX_STATIC_FALLBACK_URL</code> is fixed.</p>'
+        : '';
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CloneAI API</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; color: #111; }
+    .hint { background: #f4f4f5; padding: 1rem; border-radius: 8px; font-size: 0.95rem; }
+    .btn { display: inline-block; margin-top: 0.5rem; padding: 0.6rem 1.2rem; background: #111; color: #fff; text-decoration: none; border-radius: 8px; font-weight: 600; }
+    code { font-size: 0.9em; }
+  </style>
+</head>
+<body>
+  <h1>CloneAI</h1>
+  <p>This URL is the <strong>API</strong>. The web app is a separate host on Render (<code>cloneai-web</code>) or your static provider.</p>
+  ${tryLink}
+  ${hintHtml}
+  <p>API health: <a href="/api/health"><code>/api/health</code></a> · JSON metadata: same URL with <code>Accept: application/json</code> (or add <code>?format=json</code>).</p>
+</body>
+</html>`;
+}
+
 /**
  * @param {import('express').Request} req
- * @param {{ frontendUrl?: string, staticAppUrl?: string }} opts
+ * @param {{ frontendUrl?: string, staticAppUrl?: string, apexStaticFallbackUrl?: string }} opts
  * @returns {{ kind: 'redirect'; status: number; location: string } | { kind: 'json'; hint?: string }}
  */
 export function resolveRootGet(req, opts = {}) {
   const front = String(opts.frontendUrl || '').trim();
   const staticRaw = String(opts.staticAppUrl || '').trim();
+  const apexFallbackRaw = String(opts.apexStaticFallbackUrl || '').trim();
   const accept = String(req.get('accept') || '');
   const wantsBrowserDoc = acceptLooksLikeBrowserNavigation(accept);
 
   const staticFallback = redirectTargetWhenFrontendHostHitsApi(req, front, staticRaw);
   if (staticFallback && wantsBrowserDoc) {
     return { kind: 'redirect', status: 302, location: staticFallback };
+  }
+
+  const apexRedir = apexMismatchRedirectTarget(req, front, apexFallbackRaw);
+  if (apexRedir && wantsBrowserDoc) {
+    return { kind: 'redirect', status: 302, location: apexRedir };
   }
 
   const target = browserSafeFrontendRedirectTarget(req, front);
