@@ -779,6 +779,159 @@ body.paywall-open {
   padding: 3rem 2rem 6rem;
 }
 
+.download-app-banner {
+  position: relative;
+  z-index: 1;
+  max-width: 1120px;
+  margin: 1rem auto 0;
+  padding: 0 1rem;
+}
+
+.download-app-banner-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.15rem;
+  border: 1px solid rgba(124, 109, 250, 0.28);
+  border-radius: 18px;
+  background: linear-gradient(135deg, rgba(124, 109, 250, 0.14), rgba(18, 18, 28, 0.92));
+  box-shadow: 0 12px 38px rgba(0, 0, 0, 0.24);
+}
+
+.download-app-banner-kicker {
+  margin: 0 0 0.25rem;
+  font-family: 'DM Mono', monospace;
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent3);
+}
+
+.download-app-banner-copy {
+  margin: 0;
+  font-size: 0.88rem;
+  line-height: 1.5;
+  color: var(--text2);
+}
+
+.download-app-banner-btn,
+.download-app-back {
+  border: 0;
+  cursor: pointer;
+}
+
+.download-app-banner-btn {
+  flex-shrink: 0;
+  padding: 0.8rem 1rem;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #8d7cff, #6f5cff);
+  color: #fff;
+  font-weight: 700;
+  font-size: 0.82rem;
+  box-shadow: 0 10px 30px rgba(124, 109, 250, 0.3);
+}
+
+.download-app-page {
+  position: relative;
+  z-index: 1;
+  max-width: 1120px;
+  margin: 1.1rem auto 0;
+  padding: 0 1rem 2rem;
+}
+
+.download-app-shell {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.download-app-back {
+  justify-self: start;
+  padding: 0;
+  background: transparent;
+  color: var(--accent3);
+  font-size: 0.84rem;
+  font-weight: 600;
+}
+
+.download-app-card {
+  padding: 1.5rem;
+  border-radius: 24px;
+  border: 1px solid rgba(124, 109, 250, 0.26);
+  background: linear-gradient(180deg, rgba(18, 18, 28, 0.96), rgba(29, 29, 42, 0.94));
+  box-shadow: 0 18px 56px rgba(0, 0, 0, 0.3);
+  text-align: center;
+}
+
+.download-app-eyebrow {
+  margin: 0 0 0.5rem;
+  font-family: 'DM Mono', monospace;
+  font-size: 0.76rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent3);
+}
+
+.download-app-title {
+  margin: 0 0 0.8rem;
+  font-family: 'Syne', sans-serif;
+  font-weight: 800;
+  font-size: clamp(1.9rem, 4vw, 3rem);
+  line-height: 1.08;
+}
+
+.download-app-copy {
+  max-width: 42rem;
+  margin: 0 auto 1.25rem;
+  font-size: 0.98rem;
+  color: var(--text2);
+  line-height: 1.55;
+}
+
+.download-app-qr-card {
+  width: min(100%, 320px);
+  margin: 0 auto 1rem;
+  padding: 1rem;
+  border-radius: 20px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.download-app-qr-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 0.32rem;
+  padding: 0.85rem;
+  border-radius: 18px;
+  background: #fff;
+}
+
+.download-app-qr-grid span {
+  aspect-ratio: 1;
+  border-radius: 4px;
+  background: #e8e8f1;
+}
+
+.download-app-qr-grid span.fill {
+  background: #10121f;
+}
+
+.download-app-qr-label {
+  margin: 0.85rem 0 0;
+  font-family: 'DM Mono', monospace;
+  font-size: 0.82rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent3);
+}
+
+.download-app-note {
+  margin: 0;
+  font-size: 0.86rem;
+  color: var(--text3);
+  line-height: 1.5;
+}
+
 .hero {
   text-align: center;
   margin-bottom: 2rem;
@@ -926,6 +1079,19 @@ body.paywall-open {
 @media (max-width: 720px) {
   .hero-steps {
     grid-template-columns: 1fr;
+  }
+
+  .download-app-banner-inner {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .download-app-banner-btn {
+    width: 100%;
+  }
+
+  .download-app-card {
+    padding: 1.15rem;
   }
 }
 

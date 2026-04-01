@@ -1319,6 +1319,9 @@ async function appendAndApplyJobEvent(jobId, event) {
 
 async function finalizeExtractionJob(jobId, finalState) {
   await updateExtractionJob(extractionJobsBaseDir, jobId, (job) => {
+    if (job.status !== 'running') {
+      return job;
+    }
     job.status = finalState.status;
     job.completedAt = new Date().toISOString();
     if (finalState.scraper) job.scraper = finalState.scraper;
@@ -1630,7 +1633,9 @@ function streamExtractionJobEvents(req, res, job) {
       sseWrite(res, event);
     }
     if (latest && isTerminalExtractionJobStatus(latest.status)) {
-      if (!slice.events.some((event) => event?.type === 'done') && latest.status === 'completed') {
+      if (latest.status === 'cancelled') {
+        sseWrite(res, { type: 'error', message: 'Run stopped.' });
+      } else if (!slice.events.some((event) => event?.type === 'done') && latest.status === 'completed') {
         sseWrite(res, { type: 'done' });
       }
       if (latest.status === 'failed' && latest.error?.message && !slice.events.some((event) => event?.type === 'error')) {
@@ -4356,6 +4361,36 @@ app.get('/api/extraction-jobs/:id/events', requireIngressKey, (req, res) => {
   const job = normalizeExtractionJobForResponse(loadExtractionJob(extractionJobsBaseDir, String(req.params.id || '').trim()));
   if (!authorizeExtractionJobAccess(req, res, job)) return;
   streamExtractionJobEvents(req, res, job);
+});
+
+app.post('/api/extraction-jobs/:id/cancel', requireIngressKey, async (req, res) => {
+  const jobId = String(req.params.id || '').trim();
+  const raw = loadExtractionJob(extractionJobsBaseDir, jobId);
+  if (!authorizeExtractionJobAccess(req, res, raw)) return;
+  if (isTerminalExtractionJobStatus(raw?.status)) {
+    res.json({ ok: true, alreadyTerminal: true, status: raw.status });
+    return;
+  }
+  const now = new Date().toISOString();
+  await updateExtractionJob(extractionJobsBaseDir, jobId, (job) => {
+    job.status = 'cancelled';
+    job.completedAt = now;
+    job.progress = {
+      ...(job.progress || {}),
+      phase: 'cancelled',
+      label: 'Stopped',
+    };
+    job.error = null;
+    if (job.runner) {
+      job.runner = { ...job.runner, heartbeatAt: now, completedAt: now };
+    }
+    return job;
+  });
+  await appendExtractionJobEvent(extractionJobsBaseDir, jobId, {
+    type: 'cancelled',
+    message: 'Cancelled by user.',
+  });
+  res.json({ ok: true, status: 'cancelled' });
 });
 
 app.get('/api/extraction-jobs/:id/artifacts/:name', requireIngressKey, (req, res) => {

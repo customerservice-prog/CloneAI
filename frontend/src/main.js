@@ -164,6 +164,44 @@ function extractionJobUrl(jobId, suffix = '') {
   return apiUrl(`/api/extraction-jobs/${encodeURIComponent(jobId)}${suffix}`);
 }
 
+function setProgressRunChromeVisible(show) {
+  const el = $('#progress-run-toolbar');
+  if (!el) return;
+  el.classList.toggle('hidden', !show);
+}
+
+function syncJobHistoryPolling(jobs) {
+  const list = Array.isArray(jobs) ? jobs : [];
+  const needsPoll = list.some((j) => j?.status === 'queued' || j?.status === 'running');
+  if (needsPoll && !jobHistoryPollTimer) {
+    jobHistoryPollTimer = setInterval(() => {
+      void refreshExtractionJobHistory();
+    }, 9000);
+  } else if (!needsPoll && jobHistoryPollTimer) {
+    clearInterval(jobHistoryPollTimer);
+    jobHistoryPollTimer = null;
+  }
+}
+
+async function stopActiveRun() {
+  userInitiatedStop = true;
+  const jid = currentRunJobId;
+  if (jid && API_EXTRACTION_JOBS && extractionJobsSupported) {
+    try {
+      await fetch(extractionJobUrl(jid, '/cancel'), {
+        method: 'POST',
+        headers: analyzeFetchHeaders(),
+      });
+    } catch {
+      /* ignore */
+    }
+    void refreshExtractionJobHistory();
+  }
+  currentRunJobId = '';
+  persistActiveExtractionJob('');
+  analyzeAbort?.abort();
+}
+
 function persistActiveExtractionJob(jobId = '') {
   activeExtractionJobId = String(jobId || '').trim();
   try {
@@ -1306,6 +1344,11 @@ let displayIndex = 0;
 let streamActive = false;
 let typewriterRaf = 0;
 let analyzeAbort = null;
+/** Extraction job id for the live SSE run (empty for legacy /analyze or revise). */
+let currentRunJobId = '';
+/** True when the user clicked Stop run (vs programmatic abort). */
+let userInitiatedStop = false;
+let jobHistoryPollTimer = null;
 let activeExtractionJobId = '';
 let lastCompletedJobArtifacts = [];
 let lastCompletedJobId = '';
@@ -1316,6 +1359,16 @@ const selectedOptions = new Set(
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
+
+function showDownloadAppPage(open) {
+  const banner = $('#download-app-banner');
+  const page = $('#download-app-page');
+  const main = $('#main-app-content');
+  if (banner) banner.classList.toggle('hidden', Boolean(open));
+  if (page) page.classList.toggle('hidden', !open);
+  if (main) main.classList.toggle('hidden', Boolean(open));
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
 
 function formatHarvestBytes(b) {
   const n = Number(b) || 0;
@@ -2776,6 +2829,8 @@ async function runReviseBrief() {
   buildAgentList();
   setProgress(4);
   setAnalyzeLoading(true);
+  currentRunJobId = '';
+  setProgressRunChromeVisible(true);
 
   trackClientEvent('revise_started', { tab: activeTab });
 
@@ -2891,12 +2946,19 @@ async function runReviseBrief() {
     updateReportChrome();
     $('#try-another-section')?.removeAttribute('hidden');
     showToast('Revised report ready — download .txt or PDF as usual.');
+    setProgressRunChromeVisible(false);
   } catch (e) {
     console.error(e);
     streamActive = false;
     stopTypewriter();
     fullBriefText = backup;
-    let errMsg = e.name === 'AbortError' ? 'Revision cancelled.' : e.message || String(e);
+    let errMsg =
+      e.name === 'AbortError' && userInitiatedStop
+        ? 'Revision stopped.'
+        : e.name === 'AbortError'
+          ? 'Revision cancelled.'
+          : e.message || String(e);
+    userInitiatedStop = false;
     if (/failed to fetch|networkerror|load failed/i.test(errMsg)) {
       errMsg =
         'Network error — check your connection and API URL (VITE_API_URL), then try Apply AI fixes again.';
@@ -2908,7 +2970,9 @@ async function runReviseBrief() {
     $('#summary-content').innerHTML = renderMarkdown(fullBriefText);
     $('#type-cursor').classList.add('hidden');
     trackClientEvent('revise_failed', { message: String(errMsg || '').slice(0, 120) });
+    setProgressRunChromeVisible(false);
   } finally {
+    setProgressRunChromeVisible(false);
     setAnalyzeLoading(false);
     updateFlowWizard();
     updateProgressUpsell();
@@ -2918,6 +2982,7 @@ async function runReviseBrief() {
 function prepareAnalyzeUiForStream() {
   $('#progress-section').hidden = false;
   $('#results-section').hidden = true;
+  $('#results-outcome-strip')?.classList.add('hidden');
   $('#try-another-section')?.setAttribute('hidden', '');
   updateProgressUpsell();
   resetRunSidePanels();
@@ -2935,6 +3000,7 @@ function prepareAnalyzeUiForStream() {
   buildAgentList();
   setProgress(2);
   setAnalyzeLoading(true);
+  setProgressRunChromeVisible(true);
 }
 
 async function finalizeAnalyzeSuccess() {
@@ -2968,6 +3034,14 @@ async function finalizeAnalyzeSuccess() {
 
   $('#progress-section').hidden = true;
   $('#results-section').hidden = false;
+  currentRunJobId = '';
+  setProgressRunChromeVisible(false);
+  const outcome = $('#results-outcome-strip');
+  if (outcome) {
+    outcome.textContent = 'Run finished successfully';
+    outcome.className = 'results-outcome-strip results-outcome-strip--ok';
+    outcome.hidden = false;
+  }
   try {
     await refreshBillingStatus();
     await refreshExtractionJobHistory();
@@ -2996,19 +3070,28 @@ function applyAnalyzeFailure(e) {
   console.error(e);
   streamActive = false;
   stopTypewriter();
+  currentRunJobId = '';
+  setProgressRunChromeVisible(false);
+  const wasUserStop = userInitiatedStop;
+  userInitiatedStop = false;
   let marked = false;
   for (let i = 0; i < AGENTS.length; i += 1) {
     const badge = $(`#agent-list li[data-index="${i}"] [data-status]`);
     if (badge?.classList.contains('running')) {
-      setAgentStatus(i, 'error');
+      setAgentStatus(i, wasUserStop ? 'waiting' : 'error');
       marked = true;
       break;
     }
   }
-  if (!marked) setAgentStatus(REPORT_WRITER_AGENT_INDEX, 'error');
-  $('#progress-stage').textContent = 'Failed';
+  if (!marked) setAgentStatus(REPORT_WRITER_AGENT_INDEX, wasUserStop ? 'waiting' : 'error');
+  $('#progress-stage').textContent = wasUserStop ? 'Stopped' : 'Failed';
   setProgress(100);
-  let errMsg = e.name === 'AbortError' ? 'Request cancelled.' : e.message || String(e);
+  let errMsg =
+    e.name === 'AbortError' && wasUserStop
+      ? 'You stopped this run. It is marked stopped in Recent jobs — use Re-run on that row to restore URL and options.'
+      : e.name === 'AbortError'
+        ? 'Request cancelled.'
+        : e.message || String(e);
   if (/failed to fetch|networkerror|load failed/i.test(errMsg)) {
     errMsg =
       'Network error — check your connection, disable VPN/ad-block for this site, and confirm the API URL (VITE_API_URL) is correct.';
@@ -3016,7 +3099,9 @@ function applyAnalyzeFailure(e) {
     errMsg =
       'The response stream ended early. Reconnect from the recent jobs panel or retry the extraction.';
   }
-  fullBriefText = `## Something went wrong\n\n${escapeHtml(errMsg)}\n\n**Try again** with the same inputs. If failures repeat, **upgrade** for deeper crawls and higher limits — complex sites are often more reliable on **Pro**.\n\nTap **Re-run** or **Upgrade** in the header.`;
+  fullBriefText = wasUserStop
+    ? `## Run stopped\n\n${escapeHtml(errMsg)}\n\nUse **Re-run** on the job row (or **Generate** after restoring settings) when you are ready to try again.`
+    : `## Something went wrong\n\n${escapeHtml(errMsg)}\n\n**Try again** with the same inputs. If failures repeat, **upgrade** for deeper crawls and higher limits — complex sites are often more reliable on **Pro**.\n\nTap **Re-run** or **Upgrade** in the header.`;
   $('#summary-content').innerHTML = renderMarkdown(fullBriefText);
   $('#type-cursor').classList.add('hidden');
   $('#metric-issues').textContent = '—';
@@ -3027,10 +3112,19 @@ function applyAnalyzeFailure(e) {
   $('#metric-coverage').className = 'metric-value issue-mid';
   $('#progress-section').hidden = true;
   $('#results-section').hidden = false;
+  const outcomeFail = $('#results-outcome-strip');
+  if (outcomeFail) {
+    outcomeFail.textContent = wasUserStop
+      ? 'Run stopped — you can re-run from Recent jobs'
+      : 'Run failed — check details below and retry';
+    outcomeFail.className = `results-outcome-strip ${wasUserStop ? 'results-outcome-strip--stop' : 'results-outcome-strip--err'}`;
+    outcomeFail.hidden = false;
+  }
   resetRunSidePanels();
   updatePostResultUpsell();
   updateReportChrome();
   $('#try-another-section')?.removeAttribute('hidden');
+  void refreshExtractionJobHistory();
   trackClientEvent('run_failed', {
     message: String(errMsg || '').slice(0, 120),
     detail: String(e?.message || e).slice(0, 160),
@@ -3120,8 +3214,89 @@ async function runAnalyzeLegacy(form, { signal, headers } = {}) {
 function jobStatusTone(status) {
   if (status === 'completed') return 'Completed';
   if (status === 'failed') return 'Failed';
+  if (status === 'cancelled') return 'Stopped';
   if (status === 'running') return 'Running';
   return 'Queued';
+}
+
+function jobStatusIndicatorMarkup(status) {
+  const s = String(status || '').toLowerCase();
+  if (s === 'completed') {
+    return '<span class="job-status-ic job-status-ic--ok" title="Completed" aria-label="Completed">✓</span>';
+  }
+  if (s === 'failed') {
+    return '<span class="job-status-ic job-status-ic--err" title="Failed" aria-label="Failed">✕</span>';
+  }
+  if (s === 'cancelled') {
+    return '<span class="job-status-ic job-status-ic--stop" title="Stopped" aria-label="Stopped">■</span>';
+  }
+  if (s === 'running') {
+    return '<span class="job-status-ic job-status-ic--run" title="Running" aria-label="Running"><span class="job-status-pulse" aria-hidden="true"></span></span>';
+  }
+  return '<span class="job-status-ic job-status-ic--queue" title="Queued" aria-label="Queued">…</span>';
+}
+
+function applySummaryToAnalyzeForm(summary) {
+  if (!summary || typeof summary !== 'object') return;
+  const url = String(summary.url || '').trim();
+  if (url) {
+    const normalized = /^https?:\/\//i.test(url) ? url : `https://${url}`;
+    const u = $('#url-input');
+    const ub = $('#url-input-both');
+    if (u) u.value = normalized;
+    if (ub) ub.value = normalized;
+  }
+  const d = String(summary.depth || '').trim();
+  if (d && ['homepage', 'shallow', 'deep'].includes(d) && !depthPillLocked(d)) {
+    depth = d;
+    $$('.depth-pill').forEach((x) => x.classList.toggle('active', x.dataset.depth === depth));
+  }
+  const sm = String(summary.scanMode || '').trim();
+  if (sm && ['elite', 'images', 'screenshots'].includes(sm)) {
+    scanMode = sm;
+    updateScanModePills();
+    updateScreenshotSweepHint();
+  }
+  const allowedEp = new Set(['quick_brief', 'standard', 'full_harvest', 'quality_first']);
+  const ep = String(summary.extractionProfile || '').trim();
+  if (allowedEp.has(ep)) {
+    extractionProfile = ep;
+    syncExtractionProfilePills();
+  }
+  const ah = $('#asset-harvest-toggle');
+  if (ah) ah.checked = Boolean(summary.assetHarvestMode);
+  const cp = $('#compare-pair');
+  if (cp) cp.checked = Boolean(summary.comparePair);
+  const cd = $('#pref-client-delivery');
+  if (cd) cd.checked = Boolean(summary.clientDelivery);
+  const rmb = $('#pref-remove-image-bg');
+  if (rmb) rmb.checked = Boolean(summary.removeImageBackground);
+  const pkg = String(summary.servicePackage || '').trim();
+  const sel = $('#service-package-select');
+  if (sel && ['basic', 'standard', 'premium'].includes(pkg)) sel.value = pkg;
+  updateFlowWizard();
+  updateDepthEstimate();
+}
+
+async function rerunFromJobRow(jobId) {
+  if (!jobId || !API_EXTRACTION_JOBS) return;
+  try {
+    const res = await fetch(extractionJobUrl(jobId), { headers: analyzeFetchHeaders() });
+    const job = await res.json().catch(() => ({}));
+    if (!res.ok || !job?.summary) {
+      showToast(job.error || 'Could not load that job.', { variant: 'warning', duration: 3200 });
+      return;
+    }
+    if (!String(job.summary.url || '').trim() && Number(job.summary.fileCount) > 0) {
+      showToast('This job used image uploads — add images again, then tap Generate.', { variant: 'warning', duration: 4200 });
+      return;
+    }
+    applySummaryToAnalyzeForm(job.summary);
+    $('#main-app-content')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    showToast('Settings restored from job — tap Generate to re-run.', { duration: 3600 });
+  } catch {
+    showToast('Could not load job details.', { variant: 'warning', duration: 2800 });
+  }
 }
 
 function renderExtractionJobHistory(jobs) {
@@ -3133,6 +3308,7 @@ function renderExtractionJobHistory(jobs) {
     section.hidden = true;
     list.innerHTML = '';
     if (note) note.textContent = '';
+    syncJobHistoryPolling([]);
     return;
   }
   section.hidden = false;
@@ -3144,15 +3320,32 @@ function renderExtractionJobHistory(jobs) {
       const zipArtifact = Array.isArray(job?.artifacts)
         ? job.artifacts.find((item) => /\.zip$/i.test(item?.name || ''))
         : null;
+      const st = String(job?.status || '').toLowerCase();
+      const canStop = st === 'running' || st === 'queued';
+      const canRerun = st === 'failed' || st === 'cancelled' || st === 'completed';
+      const indicator = jobStatusIndicatorMarkup(st);
       return `
         <li class="job-history-item">
-          <div class="job-history-copy">
-            <strong>${status}</strong>
-            <span>${url}</span>
-            <span>${escapeHtml(when)}</span>
+          <div class="job-history-main">
+            ${indicator}
+            <div class="job-history-copy">
+              <strong>${status}</strong>
+              <span>${url}</span>
+              <span>${escapeHtml(when)}</span>
+            </div>
           </div>
           <div class="job-history-actions">
+            ${
+              canStop
+                ? `<button type="button" class="btn-outline btn-sm job-history-stop" data-job-stop="${escapeHtml(job.id)}">Stop</button>`
+                : ''
+            }
             <button type="button" class="btn-outline btn-sm" data-job-open="${escapeHtml(job.id)}">Open</button>
+            ${
+              canRerun
+                ? `<button type="button" class="btn-outline btn-sm job-history-rerun" data-job-rerun="${escapeHtml(job.id)}">Re-run</button>`
+                : ''
+            }
             ${
               zipArtifact
                 ? `<button type="button" class="btn-outline btn-sm" data-job-zip="${escapeHtml(job.id)}" data-zip-name="${escapeHtml(zipArtifact.name)}">ZIP</button>`
@@ -3164,8 +3357,9 @@ function renderExtractionJobHistory(jobs) {
     })
     .join('');
   if (note) {
-    note.textContent = activeExtractionJobId ? `Active job: ${activeExtractionJobId}` : '';
+    note.textContent = activeExtractionJobId ? `Watching: ${activeExtractionJobId}` : '';
   }
+  syncJobHistoryPolling(jobs);
 }
 
 async function refreshExtractionJobHistory() {
@@ -3533,6 +3727,7 @@ function init() {
   $('#service-package-select')?.addEventListener('change', persistOutputPrefs);
 
   $('#analyze-btn').addEventListener('click', () => runAnalyze());
+  $('#progress-stop-btn')?.addEventListener('click', () => void stopActiveRun());
   const rerun = () => {
     $('#results-section').hidden = true;
     runAnalyze();
@@ -3548,6 +3743,8 @@ function init() {
   $('#job-history-refresh-btn')?.addEventListener('click', () => void refreshExtractionJobHistory());
   $('#sticky-upgrade-btn')?.addEventListener('click', () => startBillingCheckout('pro', 'sticky_bar'));
   $('#header-plans-btn')?.addEventListener('click', () => openPricingModal('header_plans'));
+  $('#download-app-banner-btn')?.addEventListener('click', () => showDownloadAppPage(true));
+  $('#download-app-back-btn')?.addEventListener('click', () => showDownloadAppPage(false));
   $('#download-images-btn')?.addEventListener('click', () => downloadSiteImagesZip());
   $('#download-manifest-btn')?.addEventListener('click', () => downloadExtractionManifest('manifest'));
   $('#download-images-json-btn')?.addEventListener('click', () => downloadExtractionManifest('images'));
@@ -3810,6 +4007,7 @@ function init() {
     }
   });
 
+  showDownloadAppPage(false);
   setTab('url');
   updateDepthEstimate();
   updateFlowWizard();
