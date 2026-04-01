@@ -134,6 +134,18 @@ export function acceptLooksLikeBrowserNavigation(accept) {
 const JSON_HINT =
   'This hostname matches FRONTEND_URL, but this response is from the API (no embedded web app here). Set STATIC_APP_URL on this service, move DNS, or use the monolith Dockerfile — see steps below.';
 
+/** Bare apex like `example.com` → `https://www.example.com/` (not `www.` or multi-label hosts like `app.example.com`). */
+export function bareApexWwwTryUrl(reqHost) {
+  const h = normalizeHostLabel(reqHost || '');
+  if (!h || h.startsWith('www.')) return '';
+  if (h.split('.').length !== 2) return '';
+  try {
+    return new URL(`https://www.${h}/`).href;
+  } catch {
+    return '';
+  }
+}
+
 function escapeHtml(s) {
   return String(s || '')
     .replace(/&/g, '&amp;')
@@ -144,17 +156,52 @@ function escapeHtml(s) {
 
 /**
  * Browser-friendly page when GET / hits the API (avoids raw JSON for humans at a misconfigured apex).
+ * @param {{ hint?: string, frontendUrl?: string | null, staticAppUrl?: string | null, apexStaticFallbackUrl?: string | null, requestHost?: string | null }} opts
  */
-export function formatRootLandingHtml({ hint, frontendUrl, staticAppUrl }) {
-  const front = String(frontendUrl || '').trim().replace(/\/$/, '');
+export function formatRootLandingHtml({
+  hint,
+  frontendUrl,
+  staticAppUrl,
+  apexStaticFallbackUrl,
+  requestHost,
+}) {
+  const frontRaw = String(frontendUrl || '').trim().replace(/\/$/, '');
+  const frontOrigin = normalizePublicAppBase(frontRaw);
+  let frontHost = '';
+  if (frontOrigin) {
+    try {
+      frontHost = normalizeHostLabel(new URL(frontOrigin).hostname);
+    } catch {
+      frontHost = '';
+    }
+  }
+  const reqH = normalizeHostLabel(requestHost || '');
   const staticBase = normalizePublicAppBase(String(staticAppUrl || '').trim());
+  const apexBase = normalizePublicAppBase(String(apexStaticFallbackUrl || '').trim());
+  let apexHost = '';
+  if (apexBase) {
+    try {
+      apexHost = normalizeHostLabel(new URL(apexBase).hostname);
+    } catch {
+      apexHost = '';
+    }
+  }
+
   const staticBtn = staticBase
-    ? `<p><a class="btn" href="${escapeHtml(staticBase)}/">Open the CloneAI web app (${escapeHtml(staticBase.replace(/^https?:\/\//, ''))})</a></p>`
+    ? `<p><a class="btn" rel="noopener noreferrer" href="${escapeHtml(staticBase)}/">Open the CloneAI web app (${escapeHtml(staticBase.replace(/^https?:\/\//, ''))})</a></p>`
     : '';
-  const tryLink =
-    front && !hint && !staticBase
-      ? `<p><a class="btn" href="${escapeHtml(front)}/">Open marketing URL</a></p>`
+  const apexBtn =
+    apexBase && apexHost && reqH && apexHost !== reqH
+      ? `<p><a class="btn" rel="noopener noreferrer" href="${escapeHtml(apexBase)}/">Open the CloneAI web app (${escapeHtml(apexBase.replace(/^https?:\/\//, ''))})</a></p>`
       : '';
+  const marketingBtn =
+    frontOrigin && frontHost && reqH && frontHost !== reqH
+      ? `<p><a class="btn" rel="noopener noreferrer" href="${escapeHtml(frontOrigin)}/">Open the CloneAI web app (${escapeHtml(frontOrigin.replace(/^https?:\/\//, ''))})</a></p>`
+      : '';
+  const wwwTryUrl = hint && reqH ? bareApexWwwTryUrl(reqH) : '';
+  const wwwTryBlock = wwwTryUrl
+    ? `<p class="www-try">If the app is on <strong>www</strong>, use <a class="btn btn-outline" rel="noopener noreferrer" href="${escapeHtml(wwwTryUrl)}">https://www.${escapeHtml(reqH)}/</a></p>`
+    : '';
   const deployHelp =
     hint && !staticBase
       ? `<div class="deploy-help">
@@ -181,6 +228,10 @@ export function formatRootLandingHtml({ hint, frontendUrl, staticAppUrl }) {
     .fix-steps { margin: 0; padding-left: 1.25rem; font-size: 0.92rem; }
     .fix-steps li { margin: 0.5rem 0; }
     .btn { display: inline-block; margin-top: 0.5rem; padding: 0.6rem 1.2rem; background: #111; color: #fff; text-decoration: none; border-radius: 8px; font-weight: 600; }
+    .btn-outline { background: #fff; color: #111; border: 2px solid #111; }
+    .www-try { font-size: 0.95rem; }
+    .json-links { font-size: 0.92rem; margin-top: 1rem; }
+    .json-links a { color: #1d4ed8; font-weight: 600; }
     code { font-size: 0.9em; }
   </style>
 </head>
@@ -188,9 +239,12 @@ export function formatRootLandingHtml({ hint, frontendUrl, staticAppUrl }) {
   <h1>CloneAI</h1>
   <p>This URL is the <strong>API</strong>. The web app is usually on Render <code>cloneai-web</code>, bundled with the API (monolith image), or another static host.</p>
   ${staticBtn}
-  ${tryLink}
+  ${apexBtn}
+  ${marketingBtn}
+  ${wwwTryBlock}
   ${deployHelp}
-  <p>API health: <a href="/api/health"><code>/api/health</code></a> — JSON fields include <code>status</code> and <code>openaiConfigured</code>. For JSON on <strong>this</strong> URL instead of HTML, use <code>Accept: application/json</code> or <code>?format=json</code>.</p>
+  <p>API health: <a href="/api/health"><code>/api/health</code></a> returns JSON (<code>status</code>, <code>openaiConfigured</code>).</p>
+  <p class="json-links">For JSON for <strong>this page</strong> (<code>GET /</code>) instead of HTML: <a href="/?format=json">Open <code>/?format=json</code></a> or send header <code>Accept: application/json</code>.</p>
 </body>
 </html>`;
 }

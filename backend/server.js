@@ -814,6 +814,8 @@ if (!serveSpa) {
           hint: r.hint,
           frontendUrl: front || null,
           staticAppUrl: staticApp || null,
+          apexStaticFallbackUrl: apexFallback || null,
+          requestHost: req.hostname || req.get('host') || '',
         })
       );
       return;

@@ -8,12 +8,21 @@ import {
   frontendMarketingHostMatches,
   acceptLooksLikeBrowserNavigation,
   browserSafeFrontendRedirectTarget,
+  bareApexWwwTryUrl,
+  formatRootLandingHtml,
 } from '../rootRedirect.js';
 
-function mockReq({ protocol = 'https', hostname = 'example.com', hostHeader, accept = 'text/html' }) {
+function mockReq({
+  protocol = 'https',
+  hostname = 'example.com',
+  hostHeader,
+  accept = 'text/html',
+  query,
+}) {
   return {
     protocol,
     hostname,
+    query: query ?? {},
     get(name) {
       if (name === 'host') return hostHeader ?? hostname;
       if (name === 'accept') return accept;
@@ -134,6 +143,20 @@ test('different API host + FRONTEND_URL → 301 to FRONTEND_URL', () => {
   assert.equal(r.location, 'https://siteclonerpro.com/');
 });
 
+test('?format=json on API host skips FRONTEND_URL redirect (JSON client)', () => {
+  const req = mockReq({
+    hostname: 'cloneai-mf0z.onrender.com',
+    accept: '*/*',
+    query: { format: 'json' },
+  });
+  const r = resolveRootGet(req, {
+    frontendUrl: 'https://siteclonerpro.com',
+    staticAppUrl: '',
+  });
+  assert.equal(r.kind, 'json');
+  assert.equal(r.hint, undefined);
+});
+
 test('application/json Accept → no redirect, no hint pressure', () => {
   const req = mockReq({
     hostname: 'siteclonerpro.com',
@@ -150,4 +173,23 @@ test('application/json Accept → no redirect, no hint pressure', () => {
 test('browserSafeFrontendRedirectTarget null when already on front origin', () => {
   const req = mockReq({ hostname: 'site.com', accept: 'text/html' });
   assert.equal(browserSafeFrontendRedirectTarget(req, 'https://site.com'), null);
+});
+
+test('bareApexWwwTryUrl: bare domain only', () => {
+  assert.equal(bareApexWwwTryUrl('siteclonerpro.com'), 'https://www.siteclonerpro.com/');
+  assert.equal(bareApexWwwTryUrl('www.siteclonerpro.com'), '');
+  assert.equal(bareApexWwwTryUrl('api.siteclonerpro.com'), '');
+  assert.equal(bareApexWwwTryUrl('example.co.uk'), '');
+});
+
+test('formatRootLandingHtml: misconfigured apex includes www try and /?format=json link', () => {
+  const html = formatRootLandingHtml({
+    hint: 'This hostname matches FRONTEND_URL, but this response is from the API.',
+    frontendUrl: 'https://siteclonerpro.com',
+    staticAppUrl: '',
+    apexStaticFallbackUrl: '',
+    requestHost: 'siteclonerpro.com',
+  });
+  assert.match(html, /https:\/\/www\.siteclonerpro\.com\//);
+  assert.match(html, /\?format=json/);
 });
