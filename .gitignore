@@ -7,4 +7,6 @@ frontend/.env.production.local
 *.log
 .DS_Store
 backend/data/
+# Local copy of SPA for prod smoke tests; Docker image builds its own under /app/public
+backend/public/
 backend-pid.txt

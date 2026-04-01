@@ -4,6 +4,9 @@ import dotenv from 'dotenv';
 import multer from 'multer';
 import axios from 'axios';
 import net from 'node:net';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import rateLimit from 'express-rate-limit';
 import helmet from 'helmet';
@@ -53,7 +56,7 @@ import {
 import { appendLeadRecord } from './leadsStore.js';
 import { promoMatchesRequest, configuredPromoCode } from './promoCode.js';
 import { probeSinkMiddleware } from './probeSink.js';
-import { resolveRootGet } from './rootRedirect.js';
+import { resolveRootGet, formatRootLandingHtml } from './rootRedirect.js';
 import {
   analysisReuseEnabled,
   analysisFastReplayEnabled,
@@ -70,6 +73,11 @@ import { processSiteAssetZipBuffer } from './processAssetZip.js';
 dotenv.config();
 
 const isProd = process.env.NODE_ENV === 'production';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const spaRoot = path.join(__dirname, 'public');
+const spaIndex = path.join(spaRoot, 'index.html');
+const serveSpa = isProd && fs.existsSync(spaIndex);
 
 const app = express();
 app.disable('x-powered-by');
@@ -758,12 +766,30 @@ async function abortBillingIfNeeded(req) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const jitter = (a, b) => sleep(a + Math.floor(Math.random() * (b - a + 1)));
 
+if (!serveSpa) {
+function rootGetPrefersHtml(req) {
+  if (String(req.query?.format || '').toLowerCase() === 'json') return false;
+  const a = String(req.get('accept') || '').toLowerCase();
+  if (a.includes('application/json') && !a.includes('text/html')) return false;
+  if (a.includes('text/html')) return true;
+  return false;
+}
+
 app.get('/', (req, res) => {
   const front = (process.env.FRONTEND_URL || process.env.PUBLIC_APP_URL || '').trim();
   const staticApp = (process.env.STATIC_APP_URL || process.env.WEB_APP_PUBLIC_URL || '').trim();
-  const r = resolveRootGet(req, { frontendUrl: front, staticAppUrl: staticApp });
+  const apexFallback = (process.env.APEX_STATIC_FALLBACK_URL || '').trim();
+  const r = resolveRootGet(req, {
+    frontendUrl: front,
+    staticAppUrl: staticApp,
+    apexStaticFallbackUrl: apexFallback,
+  });
   if (r.kind === 'redirect') {
     res.redirect(r.status, r.location);
+    return;
+  }
+  if (rootGetPrefersHtml(req)) {
+    res.type('html').send(formatRootLandingHtml({ hint: r.hint, frontendUrl: front || null }));
     return;
   }
   res.type('application/json').send({
@@ -774,6 +800,7 @@ app.get('/', (req, res) => {
     hint: r.hint,
   });
 });
+}
 
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok' });
@@ -2763,6 +2790,22 @@ app.post(
   }
 );
 
+if (serveSpa) {
+  app.use(
+    express.static(spaRoot, {
+      maxAge: '2h',
+      etag: true,
+      fallthrough: true,
+      index: 'index.html',
+    })
+  );
+  app.use((req, res, next) => {
+    if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+    if (req.path.startsWith('/api')) return next();
+    res.sendFile(spaIndex, (err) => next(err));
+  });
+}
+
 app.use((err, _req, res, next) => {
   if (err && err.message === 'UNSUPPORTED_UPLOAD_TYPE') {
     res.status(400).json({ error: 'Unsupported file type. Use PNG, JPG, or WebP only.' });
@@ -2792,6 +2835,9 @@ app.use((err, _req, res, next) => {
 
 function onListen() {
   console.log(`CloneAI backend listening on http://localhost:${listenPort}`);
+  if (serveSpa) {
+    console.log(`Serving bundled SPA from ${spaRoot} (same origin as API)`);
+  }
   const corsLog =
     isProd && corsOrigins.length === 0
       ? '(none — set CORS_ORIGINS)'

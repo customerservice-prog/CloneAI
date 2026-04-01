@@ -1,4 +1,4 @@
-# API with Chromium for Playwright screenshots (match playwright version in package.json).
+# API-only image (no SPA). For production with apex → one service, use repo-root Dockerfile.
 # Build: docker build -t cloneai-api ./backend
 # Run:  docker run --env-file backend/.env -p 3001:3001 cloneai-api
 FROM mcr.microsoft.com/playwright:v1.58.2-noble
