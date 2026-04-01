@@ -2,21 +2,22 @@
 # docs/NAMECHEAP_RENDER.md (Namecheap DNS). Set secrets in the dashboard (never commit keys).
 # https://render.com/docs/blueprint-spec
 #
-# Services: cloneai-api (Docker), cloneai-web (static Vite app). Recommended stack with
+# Services: cloneai-api (Node + embedded SPA), cloneai-web (optional static). Recommended stack with
 # Namecheap: DNS only at registrar; no Vercel required.
 #
-# If your Render service uses Native Node + "npm start" (backend/) instead of Docker, set:
-#   Root Directory = (repo root, empty)
-#   Build Command  = npm run render:backend-with-spa
-#   Start Command  = npm start --prefix backend
-# That copies the built SPA into backend/public so siteclonerpro.com serves the app + API.
+# cloneai-api below uses Native Node from repo root (build embeds SPA + Playwright). If your dashboard
+# still has Root Directory = backend and build = "npm ci && playwright…" only, you get API-only (no public/index.html).
+# Fix: Root Directory = (empty / repo root), Build = npm run render:backend-with-spa, Start = npm start --prefix backend
+# — or keep Root Directory = backend and set Build = cd .. && npm run render:backend-with-spa
+#
+# Optional: deploy repo-root Dockerfile instead (Dashboard → Docker, dockerfilePath ./Dockerfile, context .).
 #
 # First deploy: set OPENAI_API_KEY in the dashboard (sync: false).
 # CORS_ORIGINS must list every browser origin (apex + www). FRONTEND_URL = canonical site (Stripe redirects).
 # Billing: BILLING_ENABLED=true requires Stripe secrets + price IDs in the dashboard; without them checkout returns 503.
-# Persistent disk at /app/data: default billing.json + analysis archive paths (under WORKDIR /app) survive redeploys.
+# Persistent disk is mounted at /data; BILLING_DATA_PATH, ANALYSIS_ARCHIVE_DIR, LEADS_DATA_PATH point there.
 # TRUST_PROXY=1: correct client IP / HTTPS behind Render’s proxy (use 2 if CDN + Render).
-# VITE_* URL vars: set on cloneai-web (static). Monolith Docker (cloneai-api): URLs come from Dockerfile ARGs; set CLONEAI_INGRESS_KEY (or VITE_CLONEAI_KEY) on the API service so Render passes it as a build arg and the embedded SPA includes X-CloneAI-Key.
+# Ingress: set CLONEAI_INGRESS_KEY (or VITE_CLONEAI_KEY) on cloneai-api — publish-spa-to-backend.mjs mirrors it into the Vite build. cloneai-web: set VITE_* in env for static builds.
 # If apex DNS points at cloneai-api by mistake, set STATIC_APP_URL on the API to cloneai-web’s
 # public https URL (Dashboard → cloneai-web → URL) so GET / redirects browsers to the SPA until DNS is fixed.
 #
@@ -29,19 +30,26 @@
 services:
   - type: web
     name: cloneai-api
-    runtime: docker
-    # Repo-root image: API + built SPA in /app/public (apex can point here without a second service).
-    dockerfilePath: ./Dockerfile
-    dockerContext: .
+    runtime: node
     plan: starter
     healthCheckPath: /api/health
+    buildCommand: npm run render:backend-with-spa
+    startCommand: npm start --prefix backend
     disk:
       name: cloneai-data
-      mountPath: /app/data
+      mountPath: /data
       sizeGB: 5
     envVars:
+      - key: NODE_VERSION
+        value: "20"
       - key: NODE_ENV
         value: production
+      - key: BILLING_DATA_PATH
+        value: /data/billing.json
+      - key: ANALYSIS_ARCHIVE_DIR
+        value: /data/analyses
+      - key: LEADS_DATA_PATH
+        value: /data/leads.jsonl
       - key: TRUST_PROXY
         value: "1"
       # Do not set PORT — Render injects it; the API must listen on that port only.
@@ -60,8 +68,7 @@ services:
         value: "https://siteclonerpro.com,https://www.siteclonerpro.com,https://cloneai-web.onrender.com"
       - key: FRONTEND_URL
         value: "https://siteclonerpro.com"
-      # If apex DNS hits this service but the image is API-only (no public/), redirect browsers to the static service.
-      # Monolith image (repo-root Dockerfile) includes the SPA — then this redirect is unused. Override if your static URL differs.
+      # If apex hits API-only (no public/) or misconfigured build, redirect to static host. When SPA is embedded, usually unused.
       - key: STATIC_APP_URL
         value: "https://cloneai-web.onrender.com"
       # If apex hits the API but www (or another host) serves the SPA, set this so GET / redirects browsers there.
@@ -71,7 +78,7 @@ services:
       - key: OPENAI_API_KEY
         sync: false
 
-  # Optional second static site — skip or delete on Render if cloneai-api serves the SPA (repo-root Dockerfile).
+  # Optional second static site — skip or delete if cloneai-api already serves the SPA from backend/public.
   - type: web
     name: cloneai-web
     runtime: static

@@ -7,6 +7,7 @@
     "node": ">=20"
   },
   "scripts": {
+    "playwright:install": "playwright install chromium",
     "start": "node server.js",
     "dev": "node server.js",
     "smoke": "node scripts/smoke.mjs",

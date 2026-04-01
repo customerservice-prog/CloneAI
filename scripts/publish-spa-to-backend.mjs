@@ -12,6 +12,10 @@ const fe = join(root, 'frontend');
 const dist = join(fe, 'dist');
 const pub = join(root, 'backend', 'public');
 
+// Match Docker frontend-builder: one dashboard secret (CLONEAI_INGRESS_KEY) can bake X-CloneAI-Key into the SPA.
+const ingress = (process.env.VITE_CLONEAI_KEY || process.env.CLONEAI_INGRESS_KEY || '').trim();
+if (ingress) process.env.VITE_CLONEAI_KEY = ingress;
+
 function run(cmd, args, cwd) {
   const r = spawnSync(cmd, args, {
     cwd,
