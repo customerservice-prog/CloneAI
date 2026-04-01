@@ -58,7 +58,7 @@ test('crawlPageCapForRequest: promo owner >= power deep', () => {
     promoOwner: true,
   });
   assert.ok(promoDeep >= powerDeep);
-  assert.ok(promoDeep <= 1200);
+  assert.ok(promoDeep <= 200_000);
   assert.equal(
     crawlPageCapForRequest({ plan: PLANS.FREE, depth: 'homepage', promoOwner: true }),
     1

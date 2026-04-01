@@ -3,13 +3,12 @@ import { PLANS, isBillingEnabled } from './billingService.js';
 /**
  * Max images to fetch into ZIP (per plan). When billing is off, returns envCap unchanged.
  * @param {number} envCap from IMAGE_HARVEST_MAX (MAX_SAFE_INTEGER = unlimited)
- * @param {boolean} [promoOwner] owner coupon — effectively unlimited vs normal plan caps (still bounded by envCap)
+ * @param {boolean} [promoOwner] owner coupon / owner token — uses env caps only (IMAGE_HARVEST_MAX / ZIP cap)
  */
 export function effectiveHarvestImageCap(plan, assetHarvestMode, envCap, promoOwner = false) {
   if (!isBillingEnabled()) return envCap;
   if (promoOwner) {
-    const soft = assetHarvestMode ? 80_000 : 35_000;
-    return Math.min(envCap, soft);
+    return envCap;
   }
   const pr = plan || PLANS.FREE;
   const caps = {
@@ -31,8 +30,7 @@ export function effectiveHarvestImageCap(plan, assetHarvestMode, envCap, promoOw
 export function effectiveHarvestZipCap(plan, assetHarvestMode, envCap, promoOwner = false) {
   if (!isBillingEnabled()) return envCap;
   if (promoOwner) {
-    const capMb = assetHarvestMode ? 4096 : 2048;
-    return Math.min(envCap, capMb * 1024 * 1024);
+    return envCap;
   }
   const pr = plan || PLANS.FREE;
   const mb = {

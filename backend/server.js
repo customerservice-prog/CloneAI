@@ -6,8 +6,8 @@ import axios from 'axios';
 import net from 'node:net';
 import fs from 'node:fs';
 import path from 'node:path';
+import { EventEmitter } from 'node:events';
 import { fileURLToPath } from 'node:url';
-import { randomBytes } from 'node:crypto';
 import rateLimit from 'express-rate-limit';
 import helmet from 'helmet';
 import {
@@ -702,15 +702,42 @@ async function validateAnalyzeRequest(req, res, next) {
     }
     req.body._options = options;
 
+    const exProf = String(req.body.extractionProfile || req.body.extraction_profile || 'standard')
+      .trim()
+      .toLowerCase();
+    const allowedEx = new Set(['quick_brief', 'standard', 'full_harvest', 'quality_first']);
+    req._extractionProfile = allowedEx.has(exProf) ? exProf : 'standard';
+
     req._removeImageBackground = ['1', 'true', 'yes', 'on'].includes(
       String(req.body.removeImageBackground || '').trim().toLowerCase()
     );
+
+    req._clientDelivery = ['1', 'true', 'yes', 'on'].includes(
+      String(req.body.clientDelivery || '').trim().toLowerCase()
+    );
+    const servicePackage = String(req.body.servicePackage || '').trim().toLowerCase();
+    req._servicePackage = ['basic', 'standard', 'premium'].includes(servicePackage) ? servicePackage : '';
 
     const harvestFromBody = ['1', 'true', 'yes', 'on'].includes(
       String(req.body.assetHarvest || req.body.deepAssetHarvest || '').trim().toLowerCase()
     );
     req._assetHarvestMode =
       harvestFromBody || (req._scanMode === 'images' && Boolean((req.body.url || '').trim()));
+    if (
+      ['full_harvest', 'quality_first'].includes(req._extractionProfile) &&
+      (req.body.url || '').trim() &&
+      req._scanMode !== 'screenshots'
+    ) {
+      req._assetHarvestMode = true;
+    }
+    if (
+      req._privilegedAnalyze &&
+      !['full_harvest', 'quality_first'].includes(req._extractionProfile) &&
+      (req.body.url || '').trim()
+    ) {
+      req._extractionProfile = 'quality_first';
+      if (req._scanMode !== 'screenshots') req._assetHarvestMode = true;
+    }
 
     const files = req.files || [];
     if (!req.body.url && !files.length) {
@@ -787,6 +814,521 @@ async function abortBillingIfNeeded(req) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const jitter = (a, b) => sleep(a + Math.floor(Math.random() * (b - a + 1)));
+
+const activeExtractionJobIds = new Set();
+let extractionJobPumpScheduled = false;
+
+function isTerminalExtractionJobStatus(status) {
+  return status === 'completed' || status === 'failed' || status === 'cancelled';
+}
+
+function extractionJobArtifactUrl(jobId, artifactName) {
+  return `/api/extraction-jobs/${encodeURIComponent(jobId)}/artifacts/${encodeURIComponent(artifactName)}`;
+}
+
+function buildCursorReadyExport(reportText, summary) {
+  const url = String(summary?.url || '').trim();
+  return [
+    '# CloneAI Cursor Export',
+    url ? `Source URL: ${url}` : 'Source URL: (none)',
+    `Depth: ${String(summary?.depth || 'homepage')}`,
+    `Scan mode: ${String(summary?.scanMode || 'elite')}`,
+    `Extraction profile: ${String(summary?.extractionProfile || 'standard')}`,
+    '',
+    'Use the report and manifests in this extraction package as the source of truth.',
+    '',
+    reportText,
+  ].join('\n');
+}
+
+function buildAiHandoffExport(reportText, summary) {
+  const url = String(summary?.url || '').trim();
+  return [
+    '# CloneAI AI Handoff',
+    url ? `Target: ${url}` : 'Target: (none)',
+    '',
+    'This package is a durable extraction output. Prefer manifests, pages, images, and archive artifacts over assumptions.',
+    '',
+    '## Report',
+    '',
+    reportText,
+  ].join('\n');
+}
+
+function buildExtractionJobInputFromRequest(req) {
+  const clientDelivery = ['1', 'true', 'yes', 'on'].includes(
+    String(req.body?.clientDelivery || '').trim().toLowerCase()
+  );
+  const servicePackage = ['basic', 'standard', 'premium'].includes(String(req.body?.servicePackage || '').trim())
+    ? String(req.body?.servicePackage || '').trim()
+    : '';
+  return {
+    headers: {
+      userId: String(req.get('x-cloneai-user-id') || '').trim(),
+      promoCode: String(req.get('x-cloneai-promo-code') || '').trim(),
+    },
+    body: {
+      ...req.body,
+    },
+    derived: {
+      promoValid: Boolean(req._promoValid),
+      privilegedAnalyze: Boolean(req._privilegedAnalyze),
+      scanMode: req._scanMode || 'elite',
+      extractionProfile: req._extractionProfile || 'standard',
+      removeImageBackground: Boolean(req._removeImageBackground),
+      assetHarvestMode: Boolean(req._assetHarvestMode),
+      clientDelivery,
+      servicePackage,
+    },
+    files: (req.files || []).map((file) => ({
+      originalname: file.originalname,
+      mimetype: file.mimetype,
+      size: file.size,
+      buffer: file.buffer,
+    })),
+  };
+}
+
+function buildJobRequestFromInput(input) {
+  return {
+    body: { ...(input.body || {}) },
+    files: Array.isArray(input.files) ? input.files : [],
+    ip: input.sourceIp || '127.0.0.1',
+    socket: { remoteAddress: input.sourceIp || '127.0.0.1' },
+    _promoValid: Boolean(input.derived?.promoValid),
+    _privilegedAnalyze: Boolean(input.derived?.privilegedAnalyze),
+    _scanMode: input.derived?.scanMode || 'elite',
+    _extractionProfile: input.derived?.extractionProfile || 'standard',
+    _removeImageBackground: Boolean(input.derived?.removeImageBackground),
+    _assetHarvestMode: Boolean(input.derived?.assetHarvestMode),
+    _clientDelivery: Boolean(input.derived?.clientDelivery),
+    _servicePackage: input.derived?.servicePackage || '',
+    _jobArtifacts: {},
+    _analyzeStartedAt: Date.now(),
+    get(name) {
+      const key = String(name || '').trim().toLowerCase();
+      if (key === 'x-cloneai-user-id') return input.headers?.userId || '';
+      if (key === 'x-cloneai-promo-code') return input.headers?.promoCode || '';
+      return '';
+    },
+  };
+}
+
+function createMockExtractionJobResponse(jobId, onEvent, onErrorResponse) {
+  class MockResponse extends EventEmitter {
+    constructor() {
+      super();
+      this.headers = {};
+      this.headersSent = false;
+      this.statusCode = 200;
+      this.ended = false;
+      this.pending = Promise.resolve();
+      this.sseBuffer = '';
+    }
+    setHeader(name, value) {
+      this.headers[String(name)] = value;
+    }
+    flushHeaders() {}
+    status(code) {
+      this.statusCode = code;
+      return this;
+    }
+    json(payload) {
+      this.headersSent = true;
+      this.pending = this.pending.then(() =>
+        onErrorResponse({
+          statusCode: this.statusCode,
+          payload,
+        })
+      );
+      this.end();
+      return this;
+    }
+    send(payload) {
+      this.headersSent = true;
+      this.pending = this.pending.then(() =>
+        onErrorResponse({
+          statusCode: this.statusCode,
+          payload,
+        })
+      );
+      this.end();
+      return this;
+    }
+    write(chunk) {
+      this.headersSent = true;
+      this.sseBuffer += Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
+      let splitAt = this.sseBuffer.indexOf('\n\n');
+      while (splitAt >= 0) {
+        const block = this.sseBuffer.slice(0, splitAt);
+        this.sseBuffer = this.sseBuffer.slice(splitAt + 2);
+        if (!block.startsWith(':')) {
+          for (const line of block.split('\n')) {
+            const trimmed = line.trim();
+            if (!trimmed.startsWith('data:')) continue;
+            const payload = trimmed.slice(5).trim();
+            if (!payload) continue;
+            this.pending = this.pending.then(async () => {
+              try {
+                await onEvent(JSON.parse(payload));
+              } catch (err) {
+                logEvent('warn', 'job_event_parse_failed', {
+                  jobId,
+                  detail: String(err?.message || err),
+                });
+              }
+            });
+          }
+        }
+        splitAt = this.sseBuffer.indexOf('\n\n');
+      }
+      return true;
+    }
+    end(chunk) {
+      if (chunk) this.write(chunk);
+      if (this.ended) return this;
+      this.ended = true;
+      this.emit('finish');
+      return this;
+    }
+    async flushPending() {
+      await this.pending;
+    }
+  }
+
+  return new MockResponse();
+}
+
+function updateExtractionJobSummaryFromEvent(job, event) {
+  if (!job || !event || typeof event !== 'object') return job;
+  if (!job.progress || typeof job.progress !== 'object') job.progress = {};
+  if (event.type === 'stage') {
+    job.progress.phase = event.phase || job.progress.phase || 'running';
+    job.progress.label = event.label || job.progress.label || 'Running';
+    if (typeof event.index === 'number') job.progress.stageIndex = event.index;
+  }
+  if (event.type === 'harvest_progress') {
+    job.progress.phase = event.phase || job.progress.phase || 'crawl';
+    job.progress.phaseLabel = event.phaseLabel || job.progress.phaseLabel || null;
+    job.progress.pagesDiscovered = Number(event.pagesDiscovered) || job.progress.pagesDiscovered || 0;
+    job.progress.pagesCrawled = Number(event.pagesCrawled) || job.progress.pagesCrawled || 0;
+    job.progress.queueLength = Number(event.queueLength) || 0;
+    job.progress.imagesFound = Number(event.imagesFound) || job.progress.imagesFound || 0;
+    job.progress.imagesDownloaded = Number(event.imagesDownloaded) || job.progress.imagesDownloaded || 0;
+    job.progress.imagesFailed = Number(event.imagesFailed) || job.progress.imagesFailed || 0;
+    job.progress.duplicatesSkipped = Number(event.duplicatesSkipped) || job.progress.duplicatesSkipped || 0;
+    job.progress.zipBytesSoFar = Number(event.zipBytesSoFar) || job.progress.zipBytesSoFar || 0;
+    job.progress.elapsedMs = Number(event.elapsedMs) || job.progress.elapsedMs || 0;
+  }
+  if (event.type === 'meta') {
+    if (event.scraper && typeof event.scraper === 'object') {
+      job.scraper = event.scraper;
+      job.progress.duplicatesSkipped =
+        Number(event.scraper.harvestContentDuplicatesSkipped) || job.progress.duplicatesSkipped || 0;
+    }
+    if (event.assets && typeof event.assets === 'object') {
+      job.assets = event.assets;
+    }
+    if (event.billing && typeof event.billing === 'object') {
+      job.billing = {
+        ...(job.billing || {}),
+        plan: event.billing.plan || job.billing?.plan || null,
+        promoUnlocked: Boolean(event.billing.promoRun || job.billing?.promoUnlocked),
+      };
+    }
+  }
+  if (event.type === 'error') {
+    job.error = {
+      message: String(event.message || 'Extraction failed.'),
+      at: new Date().toISOString(),
+    };
+  }
+  return job;
+}
+
+async function appendAndApplyJobEvent(jobId, event) {
+  await appendExtractionJobEvent(extractionJobsBaseDir, jobId, event);
+  if (event?.type === 'text' || event?.type === 'warning' || event?.type === 'done') return;
+  await updateExtractionJob(extractionJobsBaseDir, jobId, (job) => updateExtractionJobSummaryFromEvent(job, event));
+}
+
+async function finalizeExtractionJob(jobId, finalState) {
+  await updateExtractionJob(extractionJobsBaseDir, jobId, (job) => {
+    job.status = finalState.status;
+    job.completedAt = new Date().toISOString();
+    if (finalState.scraper) job.scraper = finalState.scraper;
+    if (finalState.assets) job.assets = finalState.assets;
+    if (finalState.error) {
+      job.error = {
+        message: finalState.error,
+        at: new Date().toISOString(),
+      };
+      job.progress = {
+        ...(job.progress || {}),
+        phase: 'failed',
+        label: 'Failed',
+      };
+    } else {
+      job.progress = {
+        ...(job.progress || {}),
+        phase: 'completed',
+        label: 'Completed',
+      };
+      job.error = null;
+    }
+    return job;
+  });
+}
+
+async function runExtractionJob(jobId) {
+  const current = loadExtractionJob(extractionJobsBaseDir, jobId);
+  if (!current || current.status !== 'queued') return;
+  const input = loadExtractionJobInput(extractionJobsBaseDir, jobId);
+  if (!input) {
+    await finalizeExtractionJob(jobId, {
+      status: 'failed',
+      error: 'Job input could not be loaded.',
+    });
+    return;
+  }
+
+  await updateExtractionJob(extractionJobsBaseDir, jobId, (job) => {
+    job.status = 'running';
+    job.startedAt = new Date().toISOString();
+    job.progress = {
+      ...(job.progress || {}),
+      phase: 'starting',
+      label: 'Preparing extraction job',
+    };
+    return job;
+  });
+
+  let fullText = '';
+  let latestScraper = null;
+  let latestAssets = null;
+  let finalError = null;
+  let sawDone = false;
+
+  const req = buildJobRequestFromInput(input);
+  const res = createMockExtractionJobResponse(
+    jobId,
+    async (event) => {
+      if (event?.type === 'text' && event.content) fullText += event.content;
+      if (event?.type === 'warning' && event.message) fullText += event.message;
+      if (event?.type === 'meta' && event.scraper) latestScraper = event.scraper;
+      if (event?.type === 'meta' && event.assets) latestAssets = event.assets;
+      if (event?.type === 'error') finalError = String(event.message || 'Extraction failed');
+      if (event?.type === 'done') sawDone = true;
+      await appendAndApplyJobEvent(jobId, event);
+    },
+    async ({ statusCode, payload }) => {
+      finalError =
+        String(payload?.message || payload?.error || payload?.code || `Request failed (${statusCode || 500})`);
+      await appendAndApplyJobEvent(jobId, {
+        type: 'error',
+        message: finalError,
+        statusCode,
+      });
+    }
+  );
+
+  try {
+    await runAnalyzePipeline(req, res);
+    await res.flushPending();
+  } catch (err) {
+    finalError = String(err?.message || err || 'Extraction failed');
+    await appendAndApplyJobEvent(jobId, {
+      type: 'error',
+      message: finalError,
+    });
+  }
+
+  let durableAssets = latestAssets && typeof latestAssets === 'object' ? { ...latestAssets } : null;
+  try {
+    if (fullText.trim()) {
+      await saveExtractionJobArtifact(extractionJobsBaseDir, jobId, {
+        name: 'report.md',
+        text: fullText,
+        contentType: 'text/markdown; charset=utf-8',
+      });
+      await saveExtractionJobArtifact(extractionJobsBaseDir, jobId, {
+        name: 'cursor-ready.md',
+        text: buildCursorReadyExport(fullText, current.summary),
+        contentType: 'text/markdown; charset=utf-8',
+      });
+      await saveExtractionJobArtifact(extractionJobsBaseDir, jobId, {
+        name: 'ai-handoff.md',
+        text: buildAiHandoffExport(fullText, current.summary),
+        contentType: 'text/markdown; charset=utf-8',
+      });
+    }
+
+    if (req._jobArtifacts?.pagesJson) {
+      await saveExtractionJobArtifact(extractionJobsBaseDir, jobId, {
+        name: 'pages.json',
+        text: JSON.stringify(req._jobArtifacts.pagesJson, null, 2),
+        contentType: 'application/json; charset=utf-8',
+      });
+    }
+    if (req._jobArtifacts?.imagesJson) {
+      await saveExtractionJobArtifact(extractionJobsBaseDir, jobId, {
+        name: 'images.json',
+        text: JSON.stringify(req._jobArtifacts.imagesJson, null, 2),
+        contentType: 'application/json; charset=utf-8',
+      });
+    }
+    if (req._jobArtifacts?.pagesCsvText) {
+      await saveExtractionJobArtifact(extractionJobsBaseDir, jobId, {
+        name: 'pages.csv',
+        text: String(req._jobArtifacts.pagesCsvText || ''),
+        contentType: 'text/csv; charset=utf-8',
+      });
+    }
+    if (req._jobArtifacts?.imagesCsvText) {
+      await saveExtractionJobArtifact(extractionJobsBaseDir, jobId, {
+        name: 'images.csv',
+        text: String(req._jobArtifacts.imagesCsvText || ''),
+        contentType: 'text/csv; charset=utf-8',
+      });
+    }
+    if (req._jobArtifacts?.manifestJson) {
+      const manifestJsonText = JSON.stringify(req._jobArtifacts.manifestJson, null, 2);
+      await saveExtractionJobArtifact(extractionJobsBaseDir, jobId, {
+        name: 'manifest.json',
+        text: manifestJsonText,
+        contentType: 'application/json; charset=utf-8',
+      });
+      await saveExtractionJobArtifact(extractionJobsBaseDir, jobId, {
+        name: 'manifest.csv',
+        text: String(req._jobArtifacts.manifestCsvText || ''),
+        contentType: 'text/csv; charset=utf-8',
+      });
+    }
+    if (req._jobArtifacts?.siteMapText) {
+      await saveExtractionJobArtifact(extractionJobsBaseDir, jobId, {
+        name: 'site-map.txt',
+        text: String(req._jobArtifacts.siteMapText || ''),
+        contentType: 'text/plain; charset=utf-8',
+      });
+    }
+
+    if (latestAssets?.token) {
+      const siteZip = getSiteAssetDownload(latestAssets.token);
+      if (siteZip?.buffer?.length) {
+        const saved = await saveExtractionJobArtifact(extractionJobsBaseDir, jobId, {
+          name: siteZip.filename || 'site-assets.zip',
+          buffer: siteZip.buffer,
+          contentType: 'application/zip',
+        });
+        if (saved?.name) {
+          durableAssets = {
+            ...latestAssets,
+            token: null,
+            artifactName: saved.name,
+            artifactUrl: extractionJobArtifactUrl(jobId, saved.name),
+            filename: saved.name,
+          };
+          await appendAndApplyJobEvent(jobId, {
+            type: 'meta',
+            assets: durableAssets,
+          });
+        }
+      }
+    }
+  } catch (artifactErr) {
+    logEvent('warn', 'job_artifact_save_failed', {
+      jobId,
+      detail: String(artifactErr?.message || artifactErr),
+    });
+  }
+
+  await finalizeExtractionJob(jobId, {
+    status: !finalError && sawDone ? 'completed' : 'failed',
+    scraper: latestScraper,
+    assets: durableAssets,
+    error: !finalError && sawDone ? null : finalError || 'Extraction did not complete cleanly.',
+  });
+}
+
+function scheduleExtractionJobPump() {
+  if (extractionJobPumpScheduled) return;
+  extractionJobPumpScheduled = true;
+  setImmediate(async () => {
+    extractionJobPumpScheduled = false;
+    try {
+      while (activeExtractionJobIds.size < EXTRACTION_JOB_RUNNER_CONCURRENCY) {
+        const nextJob = listExtractionJobs(extractionJobsBaseDir, {
+          limit: 50,
+          statuses: ['queued'],
+        })
+          .sort((a, b) => Date.parse(a.createdAt || 0) - Date.parse(b.createdAt || 0))
+          .find((job) => !activeExtractionJobIds.has(job.id));
+        if (!nextJob) break;
+        activeExtractionJobIds.add(nextJob.id);
+        void runExtractionJob(nextJob.id)
+          .catch((err) => {
+            logEvent('error', 'job_runner_failure', {
+              jobId: nextJob.id,
+              detail: String(err?.stack || err?.message || err),
+            });
+          })
+          .finally(() => {
+            activeExtractionJobIds.delete(nextJob.id);
+            scheduleExtractionJobPump();
+          });
+      }
+    } catch (err) {
+      logEvent('error', 'job_pump_failure', {
+        detail: String(err?.stack || err?.message || err),
+      });
+    }
+  });
+}
+
+function authorizeExtractionJobAccess(req, res, job) {
+  const requester = normalizeUserId(req.get('x-cloneai-user-id'));
+  if (!job) {
+    res.status(404).json({ error: 'Extraction job not found.' });
+    return false;
+  }
+  if (!requester || requester !== normalizeUserId(job.userId)) {
+    res.status(403).json({ error: 'Forbidden.' });
+    return false;
+  }
+  return true;
+}
+
+function streamExtractionJobEvents(req, res, job) {
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  if (typeof res.flushHeaders === 'function') res.flushHeaders();
+
+  let offset = 0;
+  let timer = null;
+  const flush = () => {
+    const slice = readExtractionJobEventsSlice(extractionJobsBaseDir, job.id, offset);
+    offset = slice.nextOffset;
+    for (const event of slice.events) sseWrite(res, event);
+    const latest = loadExtractionJob(extractionJobsBaseDir, job.id);
+    if (latest && isTerminalExtractionJobStatus(latest.status)) {
+      if (!slice.events.some((event) => event?.type === 'done') && latest.status === 'completed') {
+        sseWrite(res, { type: 'done' });
+      }
+      if (latest.status === 'failed' && latest.error?.message && !slice.events.some((event) => event?.type === 'error')) {
+        sseWrite(res, { type: 'error', message: latest.error.message });
+      }
+      clearInterval(timer);
+      res.end();
+    }
+  };
+
+  timer = setInterval(flush, 1000);
+  timer.unref?.();
+  req.on('close', () => clearInterval(timer));
+  flush();
+}
 
 if (!serveSpa) {
   function rootGetPrefersHtml(req) {
@@ -1385,6 +1927,7 @@ function buildCrawlHtmlExtractEntries(pages) {
         'html/: HTML body captured per page (used for image URL discovery and analysis).',
         'urls.txt: crawled URLs in order.',
         '_discovered_image_urls.txt: every unique image-related URL found (HTML + linked CSS), even if not all were downloaded.',
+        'manifests/: pages, images, and extraction summary manifests for developer / AI handoff.',
         '',
         'Large pages may be truncated per-file or by total budget; truncated files include "-truncated" in the name.',
       ].join('\n'),
@@ -1418,6 +1961,10 @@ function buildCrawlHtmlExtractEntries(pages) {
     extras.push({ name, buffer: raw });
   }
   return extras;
+}
+
+function csvEscape(value) {
+  return `"${String(value ?? '').replace(/"/g, '""')}"`;
 }
 
 /**
@@ -1880,14 +2427,28 @@ async function runAnalyzePipeline(req, res) {
       IMAGE_HARVEST_ZIP_CAP,
       Boolean(promoBypass)
     );
+    const archiveExportAllowed =
+      Boolean(promoBypass) ||
+      !isBillingEnabled() ||
+      analyzePlan === PLANS.PRO ||
+      analyzePlan === PLANS.POWER;
     const pageCapForCrawl = crawlPageCapForRequest({
       plan: analyzePlan,
       depth,
       promoOwner: Boolean(promoBypass),
     });
-    const crawlWallMs = promoBypass
-      ? Math.min(1_800_000, Math.max(CRAWL_MAX_WALL_CLOCK_MS * 4, 600_000))
-      : CRAWL_MAX_WALL_CLOCK_MS;
+    const extractionProfile = req._extractionProfile || 'standard';
+    let crawlWallMs;
+    if (promoBypass) {
+      const basePriv = Math.min(7_200_000, Math.max(CRAWL_MAX_WALL_CLOCK_MS * 4, 600_000));
+      const profMul =
+        extractionProfile === 'quality_first' ? 1.5 : extractionProfile === 'full_harvest' ? 1.25 : 1;
+      crawlWallMs = Math.min(7_200_000, Math.floor(basePriv * profMul));
+    } else {
+      const profMul =
+        extractionProfile === 'quality_first' ? 3 : extractionProfile === 'full_harvest' ? 2 : 1;
+      crawlWallMs = Math.min(1_800_000, Math.floor(CRAWL_MAX_WALL_CLOCK_MS * profMul));
+    }
 
     let crawlStopReason = null;
     let crawlQueueRemaining = 0;
@@ -1904,15 +2465,37 @@ async function runAnalyzePipeline(req, res) {
       if (now - harvestProgressLastMs >= harvestProgressThrottleMs) {
         harvestProgressLastMs = now;
         harvestProgressPending = null;
-        send({ type: 'harvest_progress', pagesCrawled: p.pagesCrawled, queueLength: p.queueLength });
+        send({
+          type: 'harvest_progress',
+          phase: p.phase || 'crawl',
+          phaseLabel: p.phaseLabel || null,
+          pagesCrawled: p.pagesCrawled,
+          queueLength: p.queueLength,
+          pagesDiscovered: p.pagesDiscovered,
+          imagesFound: p.imagesFound,
+          imagesDownloaded: p.imagesDownloaded,
+          imagesFailed: p.imagesFailed,
+          duplicatesSkipped: p.duplicatesSkipped,
+          zipBytesSoFar: p.zipBytesSoFar,
+          elapsedMs: p.elapsedMs,
+        });
       }
     };
     const flushHarvestProgress = () => {
       if (harvestProgressPending != null) {
         send({
           type: 'harvest_progress',
+          phase: harvestProgressPending.phase || 'crawl',
+          phaseLabel: harvestProgressPending.phaseLabel || null,
           pagesCrawled: harvestProgressPending.pagesCrawled,
           queueLength: harvestProgressPending.queueLength,
+          pagesDiscovered: harvestProgressPending.pagesDiscovered,
+          imagesFound: harvestProgressPending.imagesFound,
+          imagesDownloaded: harvestProgressPending.imagesDownloaded,
+          imagesFailed: harvestProgressPending.imagesFailed,
+          duplicatesSkipped: harvestProgressPending.duplicatesSkipped,
+          zipBytesSoFar: harvestProgressPending.zipBytesSoFar,
+          elapsedMs: harvestProgressPending.elapsedMs,
         });
         harvestProgressPending = null;
         harvestProgressLastMs = Date.now();
@@ -1935,7 +2518,15 @@ async function runAnalyzePipeline(req, res) {
           maxContentLength: HTML_FETCH_MAX_CONTENT_LENGTH,
           maxRedirects: MAX_REDIRECTS,
           maxCrawlWallClockMs: crawlWallMs,
-          onProgress: pushHarvestProgress,
+          onProgress: (p) =>
+            pushHarvestProgress({
+              phase: 'crawl',
+              phaseLabel: 'Crawling internal pages',
+              pagesCrawled: p.pagesCrawled,
+              queueLength: p.queueLength,
+              pagesDiscovered: p.pagesCrawled + p.queueLength,
+              elapsedMs: Date.now() - (req._analyzeStartedAt || Date.now()),
+            }),
         });
         crawledPages = out.results;
         crawlStopReason = out.stopReason;
@@ -2160,15 +2751,45 @@ async function runAnalyzePipeline(req, res) {
           }
         }
         scraperMeta.imagesDiscoveredCount = allImageUrls.length;
+        scraperMeta.pagesDiscoveredCount = crawledPages.length + crawlQueueRemaining;
         assetsPayload.discoveredUrlCount = allImageUrls.length;
         assetsPayload.cssSheetsProcessed = Number(scraperMeta.cssSheetsProcessed) || 0;
+        assetsPayload.pagesCrawled = crawledPages.length;
+        assetsPayload.pagesDiscovered = crawledPages.length + crawlQueueRemaining;
+        assetsPayload.pagesRemaining = crawlQueueRemaining;
+        assetsPayload.crawlStopReason = crawlStopReason;
+        pushHarvestProgress({
+          phase: 'discover_images',
+          phaseLabel: 'Discovering images and CSS assets',
+          pagesCrawled: crawledPages.length,
+          queueLength: crawlQueueRemaining,
+          pagesDiscovered: crawledPages.length + crawlQueueRemaining,
+          imagesFound: allImageUrls.length,
+          elapsedMs: Date.now() - (req._analyzeStartedAt || Date.now()),
+        });
+        flushHarvestProgress();
         const fetched = await fetchHarvestedImages(allImageUrls, {
           maxImages: harvestImageCap,
           maxBytesPerImage: IMAGE_HARVEST_MAX_BYTES,
           maxTotalBytes: harvestZipCap,
           concurrency: IMAGE_HARVEST_CONCURRENCY,
+          onProgress: (ev) =>
+            pushHarvestProgress({
+              phase: 'download_images',
+              phaseLabel: 'Downloading harvested assets',
+              pagesCrawled: crawledPages.length,
+              queueLength: crawlQueueRemaining,
+              pagesDiscovered: crawledPages.length + crawlQueueRemaining,
+              imagesFound: allImageUrls.length,
+              imagesDownloaded: ev.imagesInZip ?? 0,
+              duplicatesSkipped: ev.contentDuplicatesSkipped ?? 0,
+              zipBytesSoFar: ev.bytesSoFar ?? 0,
+              elapsedMs: Date.now() - (req._analyzeStartedAt || Date.now()),
+            }),
         });
         scraperMeta.harvestContentDuplicatesSkipped = fetched.contentDuplicatesSkipped || 0;
+        scraperMeta.imagesFailedCount = fetched.fetchFailures || 0;
+        scraperMeta.archiveBytes = fetched.archiveBytes || 0;
         const crawlHtmlExtras = buildCrawlHtmlExtractEntries(pagesForImageHarvest);
         if (allImageUrls.length > 0) {
           crawlHtmlExtras.push({
@@ -2184,18 +2805,129 @@ async function runAnalyzePipeline(req, res) {
             ),
           });
         }
-        const zipBuf = await zipImageEntries(fetched.entries, snapshotEntries, crawlHtmlExtras);
+        const pagesManifestJson = pagesForImageHarvest.map((p, index) => ({
+          order: index + 1,
+          url: p.url,
+          htmlBytes: Buffer.byteLength(p.html || '', 'utf8'),
+        }));
+        const imagesManifestJson = fetched.entries.map((e, index) => ({
+          order: index + 1,
+          file: e.name,
+          sourceUrl: e.sourceUrl || '',
+        }));
+        const manifestJson = {
+          generatedAt: new Date().toISOString(),
+          extractionProfile: req._extractionProfile || 'standard',
+          runFocus: req._scanMode || 'elite',
+          crawlStopReason,
+          pagesDiscovered: crawledPages.length + crawlQueueRemaining,
+          pagesCrawled: crawledPages.length,
+          pagesRemaining: crawlQueueRemaining,
+          imagesDiscovered: allImageUrls.length,
+          imagesArchived: fetched.entries.length,
+          imagesFailed: fetched.fetchFailures || 0,
+          duplicatesSkipped: fetched.contentDuplicatesSkipped || 0,
+          skippedEntries: fetched.skipped,
+          snapshots: snapshotEntries.length,
+          archiveBytes: fetched.archiveBytes || 0,
+          cssSheetsProcessed: Number(scraperMeta.cssSheetsProcessed) || 0,
+          elapsedMs: Date.now() - (req._analyzeStartedAt || Date.now()),
+        };
+        const manifestExtras = [
+          {
+            name: 'manifests/pages.json',
+            buffer: Buffer.from(JSON.stringify(pagesManifestJson, null, 2), 'utf8'),
+          },
+          {
+            name: 'manifests/pages.csv',
+            buffer: Buffer.from(
+              ['order,url,html_bytes', ...pagesManifestJson.map((p) => `${p.order},${csvEscape(p.url)},${p.htmlBytes}`)].join('\n'),
+              'utf8'
+            ),
+          },
+          {
+            name: 'manifests/images.json',
+            buffer: Buffer.from(JSON.stringify(imagesManifestJson, null, 2), 'utf8'),
+          },
+          {
+            name: 'manifests/images.csv',
+            buffer: Buffer.from(
+              ['order,file,source_url', ...imagesManifestJson.map((p) => `${p.order},${csvEscape(p.file)},${csvEscape(p.sourceUrl)}`)].join('\n'),
+              'utf8'
+            ),
+          },
+          {
+            name: 'manifests/manifest.json',
+            buffer: Buffer.from(JSON.stringify(manifestJson, null, 2), 'utf8'),
+          },
+          {
+            name: 'manifests/manifest.csv',
+            buffer: Buffer.from(
+              [
+                'metric,value',
+                ...Object.entries(manifestJson).map(([k, v]) => `${csvEscape(k)},${csvEscape(v)}`),
+              ].join('\n'),
+              'utf8'
+            ),
+          },
+          {
+            name: 'manifests/site-map.txt',
+            buffer: Buffer.from(pagesForImageHarvest.map((p) => p.url).join('\n'), 'utf8'),
+          },
+        ];
+        const pagesCsvText = ['order,url,html_bytes', ...pagesManifestJson.map((p) => `${p.order},${csvEscape(p.url)},${p.htmlBytes}`)].join('\n');
+        const imagesCsvText = ['order,file,source_url', ...imagesManifestJson.map((p) => `${p.order},${csvEscape(p.file)},${csvEscape(p.sourceUrl)}`)].join('\n');
+        const manifestCsvText = [
+          'metric,value',
+          ...Object.entries(manifestJson).map(([k, v]) => `${csvEscape(k)},${csvEscape(v)}`),
+        ].join('\n');
+        req._jobArtifacts = {
+          ...(req._jobArtifacts || {}),
+          pagesJson: pagesManifestJson,
+          imagesJson: imagesManifestJson,
+          manifestJson,
+          pagesCsvText,
+          imagesCsvText,
+          manifestCsvText,
+          siteMapText: pagesForImageHarvest.map((p) => p.url).join('\n'),
+        };
+        const zipBuf = await zipImageEntries(fetched.entries, snapshotEntries, [...crawlHtmlExtras, ...manifestExtras]);
         if (zipBuf?.length) {
-          const token = createSiteAssetDownload(zipBuf, 'site-assets.zip');
           if (fetched.entries.length > 0) {
             harvestedImageManifest = buildImageManifestForPrompt(fetched.entries);
           }
           assetsPayload.imageCount = fetched.entries.length;
           assetsPayload.snapshotCount = snapshotEntries.length;
           assetsPayload.count =
-            fetched.entries.length + snapshotEntries.length + crawlHtmlExtras.length;
-          assetsPayload.token = token;
+            fetched.entries.length + snapshotEntries.length + crawlHtmlExtras.length + manifestExtras.length;
           assetsPayload.skipped = fetched.skipped;
+          assetsPayload.archiveBytes = fetched.archiveBytes || 0;
+          assetsPayload.failed = fetched.fetchFailures || 0;
+          assetsPayload.duplicatesSkipped = fetched.contentDuplicatesSkipped || 0;
+          assetsPayload.pagesManifestCount = pagesManifestJson.length;
+          assetsPayload.imagesManifestCount = imagesManifestJson.length;
+          if (archiveExportAllowed) {
+            assetsPayload.token = createSiteAssetDownload(zipBuf, 'site-assets.zip');
+          } else {
+            assetsPayload.token = null;
+            assetsPayload.archiveLocked = true;
+            scraperMeta.archiveLockedMessage =
+              'Archive downloads are unlocked on Pro, Power, or owner mode. This run still recorded completeness metrics and manifests internally.';
+          }
+          pushHarvestProgress({
+            phase: 'package',
+            phaseLabel: 'Packaging ZIP and manifests',
+            pagesCrawled: crawledPages.length,
+            queueLength: crawlQueueRemaining,
+            pagesDiscovered: crawledPages.length + crawlQueueRemaining,
+            imagesFound: allImageUrls.length,
+            imagesDownloaded: fetched.entries.length,
+            imagesFailed: fetched.fetchFailures || 0,
+            duplicatesSkipped: fetched.contentDuplicatesSkipped || 0,
+            zipBytesSoFar: fetched.archiveBytes || 0,
+            elapsedMs: Date.now() - (req._analyzeStartedAt || Date.now()),
+          });
+          flushHarvestProgress();
           logEvent('info', 'asset_bundle_ok', {
             ip: clientIp(req),
             images: fetched.entries.length,
@@ -3184,7 +3916,7 @@ function onListen() {
     `Crawl: max pages (Pro cap) ${crawlMaxPagesEnvCap()}, HTML concurrency ${CRAWL_FETCH_CONCURRENCY}, screenshot concurrency ${CRAWL_SCREENSHOT_CONCURRENCY}`
   );
   console.log(
-    `Cost guards: HTML clean per page ≤ ${HTML_MODEL_MAX_CHARS_PER_PAGE} chars, max ${MAX_ANALYSIS_IMAGES} images, OpenAI body ≤ ${Math.round(MAX_OPENAI_REQUEST_JSON_BYTES / (1024 * 1024))}MiB, global burst ${GLOBAL_BURST_MAX}/${Math.round(GLOBAL_BURST_WINDOW_MS / 1000)}s, max concurrent analyses (instance) ${GLOBAL_ANALYZE_MAX_IN_FLIGHT}, concurrent analyses/user ${String(process.env.ANALYZE_MAX_CONCURRENT_PER_USER || '1')}, asset download cache ≤ ${MAX_SITE_ASSET_DOWNLOADS}`
+    `Cost guards: HTML clean per page ≤ ${HTML_MODEL_MAX_CHARS_PER_PAGE} chars, max ${MAX_ANALYSIS_IMAGES} images, OpenAI body ≤ ${Math.round(MAX_OPENAI_REQUEST_JSON_BYTES / (1024 * 1024))}MiB, global burst ${GLOBAL_BURST_MAX}/${Math.round(GLOBAL_BURST_WINDOW_MS / 1000)}s, max concurrent analyses (instance) ${GLOBAL_ANALYZE_MAX_IN_FLIGHT}, concurrent analyses/user ${String(process.env.ANALYZE_MAX_CONCURRENT_PER_USER || '1')}, asset downloads use expiring token storage`
   );
   console.log(
     `Interaction: hub pages ${INTERACTION_HUB_PAGES}, theme clicks/hub ${INTERACTION_THEME_CLICKS_PER_HUB}, checkout steps ${INTERACTION_CHECKOUT_MAX_STEPS}, extra URL cap ${INTERACTION_EXTRA_URL_CAP}`

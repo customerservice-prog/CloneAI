@@ -32,6 +32,7 @@
         </div>
         <div class="header-actions">
           <button type="button" class="btn-header-login" id="header-plans-btn">Plans</button>
+          <span class="owner-unlock-pill hidden" id="owner-unlock-pill" aria-live="polite"></span>
           <span class="header-usage-wrap hidden" id="header-usage-wrap" aria-live="polite">
             <span class="header-usage" id="header-usage"></span>
             <span class="header-usage-urgent hidden" id="header-usage-urgent">You're almost out of runs</span>
@@ -57,13 +58,13 @@
           Clone Any Website<br />
           <span class="hero-accent">Perfectly.</span>
         </h1>
-        <p class="hero-blueprint-lead">Generate a complete developer-ready blueprint from any website in seconds.</p>
+        <p class="hero-blueprint-lead">Run long-form extraction jobs that crawl, harvest, package, and then write the brief.</p>
         <p class="hero-trust-line">Used by <strong>developers</strong>, <strong>freelancers</strong>, and <strong>agencies</strong> to rebuild sites faster.</p>
         <p class="hero-tagline">
           A coordinated <strong>AI cloning team</strong> — multi-page crawl, harvested media, full-page captures, and a developer-ready spec. Optional <strong>Asset lab</strong> helpers refine the ZIP after your run.
         </p>
         <ul class="hero-helpers" aria-label="Specialist helpers">
-          <li><span class="hero-helper-name">Capture desk</span> — full-page PNGs and harvested images in one bundle</li>
+          <li><span class="hero-helper-name">Capture desk</span> — full-page PNGs, manifests, and harvested images in one package</li>
           <li><span class="hero-helper-name">Pixel lab</span> — HD Lanczos pass on the server (honest upscale, not generative fill)</li>
           <li><span class="hero-helper-name">Naming desk</span> — filenames grounded in real URLs; optional AI only picks among those candidates</li>
         </ul>
@@ -72,8 +73,8 @@
         </p>
         <ol class="hero-steps" aria-label="How it works in three steps">
           <li><span class="hero-step-num" aria-hidden="true">1</span> Paste a URL or upload screenshots</li>
-          <li><span class="hero-step-num" aria-hidden="true">2</span> Let AI analyze layout, styling, and components</li>
-          <li><span class="hero-step-num" aria-hidden="true">3</span> Get a developer-ready brief you can ship from immediately</li>
+          <li><span class="hero-step-num" aria-hidden="true">2</span> Let CloneAI crawl, harvest, and package the site</li>
+          <li><span class="hero-step-num" aria-hidden="true">3</span> Download artifacts and a developer-ready brief</li>
         </ol>
         <p class="hero-pill">
           <span class="hero-pill-dot" aria-hidden="true"></span>
@@ -92,7 +93,7 @@
           <li>Hand off clean build specs</li>
         </ul>
         <p class="how-it-works">
-          <strong>Exports:</strong> after each report — copy, share, <strong>.txt</strong>, <strong>PDF</strong>, Cursor / VS Code prompt, and site assets ZIP when the run includes harvested images.
+          <strong>Exports:</strong> report, manifests, Cursor / VS Code prompt, AI handoff files, and site assets ZIP on qualifying plans or owner mode.
         </p>
       </section>
 
@@ -234,10 +235,52 @@
             <label class="asset-harvest-row">
               <input type="checkbox" id="asset-harvest-toggle" />
               <span class="asset-harvest-label">
-                <strong>Deep Asset Harvest</strong> — prioritize discovering images &amp; media (smaller HTML to the AI;
-                higher image caps on paid plans).
+                <strong>Deep Asset Harvest</strong> — discover images in HTML, inline styles, and linked CSS; full URL
+                list is bundled in the ZIP. Use <strong>Full crawl</strong> depth for every page; paid plans raise fetch
+                caps.
               </span>
             </label>
+            <p class="depth-label extraction-profile-label">
+              Extraction profile
+              <span class="depth-label-hint"
+                >Quality-first and full harvest extend crawl time and prioritize ZIP completeness (runs may take a long
+                time).</span
+              >
+            </p>
+            <div class="extraction-profile-pills scan-mode-pills" role="group" aria-label="Extraction profile">
+              <button
+                type="button"
+                class="scan-mode-pill extraction-profile-pill"
+                data-extraction-profile="quick_brief"
+                title="Shorter crawl window — fastest path to a written brief"
+              >
+                Quick brief
+              </button>
+              <button
+                type="button"
+                class="scan-mode-pill extraction-profile-pill active"
+                data-extraction-profile="standard"
+                title="Balanced crawl and extraction"
+              >
+                Standard crawl
+              </button>
+              <button
+                type="button"
+                class="scan-mode-pill extraction-profile-pill"
+                data-extraction-profile="full_harvest"
+                title="Deep asset discovery; ZIP includes manifests/"
+              >
+                Full asset harvest
+              </button>
+              <button
+                type="button"
+                class="scan-mode-pill extraction-profile-pill"
+                data-extraction-profile="quality_first"
+                title="Longest crawl budget; continue until queue or caps — may run hours on huge sites"
+              >
+                Quality first
+              </button>
+            </div>
             <p class="harvest-live-stats muted" id="harvest-live-stats" hidden aria-live="polite"></p>
             <div class="depth-pill-hint-grid" aria-hidden="true">
               <span><strong>1 page</strong> — fast, homepage only, lightest on runs</span>
@@ -362,8 +405,19 @@
 
       <button type="button" class="analyze-btn" id="analyze-btn">
         <span class="analyze-btn-shine" aria-hidden="true"></span>
-        <span class="analyze-btn-label" id="analyze-btn-label">Run full site analysis</span>
+        <span class="analyze-btn-label" id="analyze-btn-label">Start extraction job</span>
       </button>
+
+      <section class="job-history-card" id="job-history-section" hidden>
+        <div class="job-history-head">
+          <div>
+            <h2 class="job-history-title">Recent extraction jobs</h2>
+            <p class="job-history-note" id="job-active-note"></p>
+          </div>
+          <button type="button" class="btn-outline btn-sm" id="job-history-refresh-btn">Refresh</button>
+        </div>
+        <ul class="job-history-list" id="job-history-list"></ul>
+      </section>
 
       <section class="progress-card" id="progress-section" hidden>
         <div class="progress-upsell" id="progress-upsell" hidden>
@@ -479,6 +533,13 @@
             <button type="button" class="btn-filled" id="copy-brief-btn">Copy to Clipboard</button>
           </div>
         </div>
+        <section class="artifact-panel" id="artifact-panel" hidden>
+          <div class="artifact-panel-head">
+            <h3 class="artifact-panel-title">Extraction artifacts</h3>
+            <p class="artifact-panel-sub">Download the packaged dataset, manifests, and handoff files from this job.</p>
+          </div>
+          <div class="artifact-panel-list" id="artifact-panel-list"></div>
+        </section>
         <p class="analysis-hint" id="analysis-hint" hidden></p>
         <div class="summary-box" id="summary-box">
           <div class="report-watermark" id="report-watermark" hidden>
@@ -534,7 +595,7 @@
       >
         <button type="button" class="modal-close" id="modal-pricing-close" aria-label="Close">×</button>
         <h2 id="modal-pricing-title" class="modal-title">Plans &amp; pricing</h2>
-        <p class="modal-sub">Save time, build faster — pick a plan that matches how many sites you audit each month.</p>
+        <p class="modal-sub">Pick a plan based on how deep you need extraction, packaging, and archive-ready outputs to go.</p>
         <p class="modal-stripe-note">
           Checkout runs on <strong>Stripe</strong> (cards &amp; subscriptions). Multi-page crawls and URL+image combo need a paid plan unless you use an
           <strong>authorized promo code</strong> (under analysis options or the unlock dialog).
@@ -548,19 +609,19 @@
             <ul class="plan-features">
               <li>Homepage scan only</li>
               <li>URL <em>or</em> images — not combined</li>
-              <li>Watermark on report · .txt, PDF, Cursor prompt &amp; ZIP (when the run has assets)</li>
+              <li>Watermark on report · basic brief only · no full asset archive package</li>
             </ul>
             <button type="button" class="btn-plan btn-plan-muted" data-close-pricing>Start Free</button>
           </article>
           <article class="plan-card">
             <h3 class="plan-name">Starter</h3>
             <p class="plan-tagline">Best for freelancers &amp; solo devs</p>
-            <p class="plan-price"><span class="plan-price-num">$5</span><span class="plan-price-unit">/month</span></p>
+            <p class="plan-price"><span class="plan-price-num">$9</span><span class="plan-price-unit">/month</span></p>
             <p class="plan-runs"><strong>10</strong> analyses / month</p>
             <ul class="plan-features">
               <li>Up to ~25 pages per scan</li>
               <li>URL only or images only (combo = Pro or Power)</li>
-              <li>All toggles · no watermark · same export formats as every plan</li>
+              <li>Limited image harvest · txt / basic exports · no full archive mode</li>
             </ul>
             <button
               type="button"
@@ -576,12 +637,12 @@
             <h3 class="plan-name">Pro <span class="plan-best-value">Best value</span></h3>
             <p class="plan-tagline">Best for agencies &amp; power users</p>
             <p class="plan-price">
-              <span class="plan-price-num">$12</span><span class="plan-price-unit">/month</span>
+              <span class="plan-price-num">$19</span><span class="plan-price-unit">/month</span>
             </p>
-            <p class="plan-runs"><strong>50</strong> analyses / month</p>
+            <p class="plan-runs"><strong>30</strong> analyses / month</p>
             <ul class="plan-features">
-              <li>Deep crawl (~300 pages) + URL + images combo</li>
-              <li>Heavy image harvest (1000+ URLs on plan caps)</li>
+              <li>Deep crawl + large image harvest + archive ZIP</li>
+              <li>URL + images combo · full report · PDF / txt / JSON-style exports</li>
               <li>Priority processing in-app</li>
             </ul>
             <button
@@ -595,15 +656,15 @@
           </article>
           <article class="plan-card plan-card-power">
             <span class="plan-badge plan-badge-power">Max assets</span>
-            <h3 class="plan-name">Power</h3>
+            <h3 class="plan-name">Studio / Power</h3>
             <p class="plan-tagline">Studios &amp; theme-heavy storefronts</p>
             <p class="plan-price">
-              <span class="plan-price-num">$19</span><span class="plan-price-unit">/month</span>
+              <span class="plan-price-num">$49</span><span class="plan-price-unit">/month</span>
             </p>
-            <p class="plan-runs"><strong>100</strong> analyses / month</p>
+            <p class="plan-runs"><strong>High volume</strong> analyses / month</p>
             <ul class="plan-features">
-              <li>Highest crawl &amp; image caps + Asset Harvest headroom</li>
-              <li>Same export formats as Pro; higher crawl &amp; harvest caps</li>
+              <li>Very deep crawl · very large harvest · ZIP + manifests</li>
+              <li>Cursor-ready style exports · priority processing · agency-grade</li>
             </ul>
             <button
               type="button"
@@ -623,7 +684,7 @@
             id="pricing-extra-link"
             data-billing-source="pricing_extra"
           >
-            Need just one more run? Buy an extra analysis for $3 (one-time).
+            Need just one more run? Buy an extra analysis (one-time; price in checkout).
           </button>
         </p>
         <p class="pricing-foot pricing-foot-second">
@@ -634,7 +695,7 @@
             id="pricing-deep-extract-link"
             data-billing-source="pricing_deep_extract"
           >
-            One deep extraction run — $5 (bonus run + tracked as deep scan).
+            One deep extraction run — heavy crawl + archive package (target: $9 to $15 one-time; final price in checkout).
           </button>
         </p>
       </div>
@@ -709,7 +770,7 @@
             data-checkout="pro"
             data-billing-source="paywall_pro"
           >
-            Upgrade to Pro — $12/mo
+            Upgrade to Pro
           </button>
           <button
             type="button"
@@ -717,7 +778,7 @@
             data-checkout="starter"
             data-billing-source="paywall_starter"
           >
-            Starter — $5/mo
+            Starter
           </button>
           <button
             type="button"
@@ -726,7 +787,7 @@
             id="paywall-extra-btn"
             data-billing-source="paywall_extra"
           >
-            Buy 1 extra run — $3
+            Buy 1 extra run
           </button>
         </div>
         <p class="paywall-hint"><button type="button" class="link-like" id="paywall-see-plans">See all plans</button></p>

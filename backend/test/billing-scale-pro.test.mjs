@@ -1,5 +1,5 @@
 /**
- * Simulates 100 distinct Pro subscribers: concurrent quota checks and full 50-run/month exhaustion.
+ * Simulates 100 distinct Pro subscribers: concurrent quota checks and full monthly exhaustion (PRO_MONTHLY).
  */
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
@@ -38,7 +38,7 @@ const {
   getAnalyticsSnapshotSync,
 } = await import('../billingService.js');
 
-const PRO_MONTHLY = 50;
+const PRO_MONTHLY = 30;
 const USER_COUNT = 100;
 
 /** Deterministic valid UUIDs (v4-style) for users 0..USER_COUNT-1 */
@@ -63,7 +63,7 @@ test('100 Pro users: concurrent first run — all succeed', async () => {
   }
 });
 
-test('100 Pro users: 49 more concurrent rounds + per-user 51st blocked; analytics = 5000 pro runs', async () => {
+test('100 Pro users: full monthly concurrent rounds + per-user next blocked; analytics = 3000 pro runs', async () => {
   fs.writeFileSync(billingPath, JSON.stringify(initialState));
   for (const id of userIds) {
     applySubscriptionFromCheckoutSync(id, PLANS.PRO, 'cus_x', `sub_${id.slice(0, 8)}`, 'price_pro_test');
@@ -91,12 +91,12 @@ test('100 Pro users: 49 more concurrent rounds + per-user 51st blocked; analytic
   }
 });
 
-test('single Pro user: 60 parallel tryBeginRun — exactly 50 succeed (monthly cap), 10 blocked', async () => {
+test('single Pro user: 40 parallel tryBeginRun — exactly 30 succeed (monthly cap), 10 blocked', async () => {
   fs.writeFileSync(billingPath, JSON.stringify(initialState));
   const one = uidFor(0);
   applySubscriptionFromCheckoutSync(one, PLANS.PRO, 'cus_1', 'sub_1', 'price_pro_test');
 
-  const storm = await Promise.all(Array.from({ length: 60 }, () => tryBeginRun(one)));
+  const storm = await Promise.all(Array.from({ length: 40 }, () => tryBeginRun(one)));
   assert.equal(storm.filter((r) => r.ok).length, PRO_MONTHLY);
   assert.equal(storm.filter((r) => !r.ok).length, 10);
   const s = await getUsageSnapshot(one);

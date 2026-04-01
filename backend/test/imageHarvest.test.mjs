@@ -2,6 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   collectImageUrls,
+  collectStylesheetHrefs,
+  extractImageUrlsFromCss,
+  extractImportUrlsFromCss,
   normalizeHarvestUrlKey,
   dedupeHarvestUrls,
   imageBytesFingerprint,
@@ -28,6 +31,27 @@ test('collectImageUrls finds url() inside style tags', () => {
   const html = '<style>.hero{background-image:url(/tile.png)}</style>';
   const urls = collectImageUrls(html, 'https://x.example/');
   assert.ok(urls.some((u) => u.includes('/tile.png')));
+});
+
+test('collectStylesheetHrefs and extractImageUrlsFromCss cover linked CSS', () => {
+  const html = '<link rel="stylesheet" href="/assets/app.css?v=1">';
+  const sheets = collectStylesheetHrefs(html, 'https://cdn.example/site/page');
+  assert.ok(sheets.some((u) => u.includes('/assets/app.css')));
+  const css = '.x{background:url(../img/banner.webp)}';
+  const fromCss = extractImageUrlsFromCss(css, 'https://cdn.example/assets/app.css');
+  assert.ok(fromCss.some((u) => u.includes('/img/banner.webp')));
+});
+
+test('extractImportUrlsFromCss finds chained stylesheets', () => {
+  const css = '@import url("/fonts/extra.css"); body{}';
+  const im = extractImportUrlsFromCss(css, 'https://x.example/main.css');
+  assert.ok(im.some((u) => u.includes('/fonts/extra.css')));
+});
+
+test('collectImageUrls finds SVG image href', () => {
+  const html = '<svg><image href="/icons/logo.svg" width="10" height="10"/></svg>';
+  const urls = collectImageUrls(html, 'https://app.example/');
+  assert.ok(urls.some((u) => u.includes('/icons/logo.svg')));
 });
 
 test('normalizeHarvestUrlKey strips tracking params; dedupeHarvestUrls merges', () => {

@@ -45,6 +45,7 @@ function apiUrl(path) {
 }
 
 const API_ANALYZE = apiUrl('/api/analyze');
+const API_EXTRACTION_JOBS = apiUrl('/api/extraction-jobs');
 const API_ANALYZE_REVISE = apiUrl('/api/analyze-revise');
 const API_BILLING_STATUS = apiUrl('/api/billing/status');
 const API_BILLING_CHECKOUT = apiUrl('/api/billing/checkout');
@@ -65,6 +66,8 @@ const LS_PREF_CLIENT_DELIVERY = 'cloneai_pref_client_delivery';
 const LS_PREF_SERVICE_PKG = 'cloneai_pref_service_pkg';
 const LS_PROMO_CODE = 'cloneai_promo_code';
 const LS_PREF_SCAN_MODE = 'cloneai_pref_scan_mode';
+const LS_PREF_EXTRACTION_PROFILE = 'cloneai_pref_extraction_profile';
+const LS_ACTIVE_JOB_ID = 'cloneai_active_job_id';
 const WATERMARK_FOOTER = '\n\n---\n\n*Generated with CloneAI — upgrade to remove watermark.*';
 
 /** @type {string | null} */
@@ -148,6 +151,55 @@ function billingJsonHeaders() {
     'Content-Type': 'application/json',
     ...analyzeFetchHeaders(),
   };
+}
+
+function extractionJobUrl(jobId, suffix = '') {
+  if (!jobId) return '';
+  return apiUrl(`/api/extraction-jobs/${encodeURIComponent(jobId)}${suffix}`);
+}
+
+function persistActiveExtractionJob(jobId = '') {
+  activeExtractionJobId = String(jobId || '').trim();
+  try {
+    if (activeExtractionJobId) localStorage.setItem(LS_ACTIVE_JOB_ID, activeExtractionJobId);
+    else localStorage.removeItem(LS_ACTIVE_JOB_ID);
+  } catch {
+    /* ignore */
+  }
+}
+
+function artifactDownloadUrl(jobId, artifactName) {
+  return extractionJobUrl(jobId, `/artifacts/${encodeURIComponent(artifactName || '')}`);
+}
+
+function resetRunSidePanels() {
+  const planBanner = $('#mid-flow-plan-notice');
+  if (planBanner) {
+    planBanner.hidden = true;
+    planBanner.textContent = '';
+  }
+  const analysisHint = $('#analysis-hint');
+  if (analysisHint) {
+    analysisHint.hidden = true;
+    analysisHint.textContent = '';
+  }
+  const harvestStats = $('#harvest-live-stats');
+  if (harvestStats) {
+    harvestStats.hidden = true;
+    harvestStats.textContent = '';
+  }
+  renderArtifactPanel('', []);
+}
+
+function loadPersistedActiveExtractionJob() {
+  try {
+    const jobId = (localStorage.getItem(LS_ACTIVE_JOB_ID) || '').trim();
+    activeExtractionJobId = jobId;
+    return jobId;
+  } catch {
+    activeExtractionJobId = '';
+    return '';
+  }
 }
 
 function planIsProOrPower(plan) {
@@ -424,8 +476,12 @@ async function refreshOpenAiServerNotice() {
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       titleEl.textContent = 'Could not reach the API';
+      const proxyHint =
+        res.status === 502 || res.status === 504
+          ? ` (HTTP ${res.status}: dev proxy could not connect — start the API or match VITE_DEV_API_PROXY to the backend port.)`
+          : res.status ? ` (HTTP ${res.status})` : '';
       detailEl.textContent =
-        'Start the backend (from the repo root, npm run dev starts API + this app). The OpenAI key is read from backend/.env on the server — not from browser settings.';
+        `From the repo root run npm run dev (starts API + this app). Frontend-only npm run dev needs the backend on the proxy port (default 127.0.0.1:3001).${proxyHint} OpenAI key: backend/.env only — not browser settings.`;
       wrap.classList.remove('hidden');
       return;
     }
@@ -442,7 +498,7 @@ async function refreshOpenAiServerNotice() {
   } catch {
     titleEl.textContent = 'Could not reach the API';
     detailEl.textContent =
-      'Check that the backend is running and you are using same-origin /api (e.g. npm run dev). OpenAI keys belong in backend/.env only.';
+      'Network error reaching /api/health. From repo root: npm run dev. If you use frontend-only dev, start the backend and ensure VITE_DEV_API_PROXY (or VITE_API_URL) points at it. Keys: backend/.env only.';
     wrap.classList.remove('hidden');
   }
 }
@@ -453,8 +509,14 @@ async function refreshBillingStatus() {
   const urgentEl = $('#header-usage-urgent');
   const upBtn = $('#header-upgrade-btn');
   const loginBtn = $('#header-login-btn');
+  const ownerPill = $('#owner-unlock-pill');
   const syncLoginBtn = (visible) => {
     if (loginBtn) loginBtn.classList.toggle('hidden', !visible);
+  };
+  const syncOwnerPill = (visible, text = 'Owner / operator mode') => {
+    if (!ownerPill) return;
+    ownerPill.textContent = text;
+    ownerPill.classList.toggle('hidden', !visible);
   };
   if (!usageEl || !upBtn || !usageWrap) {
     updateScanPromoHint();
@@ -476,6 +538,7 @@ async function refreshBillingStatus() {
       upBtn.classList.remove('hidden');
       upBtn.textContent = 'Plans';
       syncLoginBtn(false);
+      syncOwnerPill(false);
       updatePlanGatedControls();
       updateExportGatedControls();
       return;
@@ -498,6 +561,7 @@ async function refreshBillingStatus() {
       upBtn.classList.remove('hidden');
       upBtn.textContent = 'Plans';
       syncLoginBtn(false);
+      syncOwnerPill(false);
       updatePlanGatedControls();
       updateExportGatedControls();
       return;
@@ -516,6 +580,7 @@ async function refreshBillingStatus() {
       upBtn.classList.remove('hidden');
       upBtn.textContent = 'Plans';
       syncLoginBtn(false);
+      syncOwnerPill(false);
       updatePlanGatedControls();
       updateExportGatedControls();
       return;
@@ -530,6 +595,7 @@ async function refreshBillingStatus() {
       upBtn.classList.remove('hidden');
       upBtn.textContent = 'Plans';
       syncLoginBtn(false);
+      syncOwnerPill(false);
       updatePlanGatedControls();
       updateExportGatedControls();
       return;
@@ -569,6 +635,7 @@ async function refreshBillingStatus() {
     }
 
     upBtn.textContent = data.plan === 'pro' ? 'Plans' : 'Upgrade';
+    syncOwnerPill(Boolean(data.promoUnlocked), data.promoUnlocked ? 'Owner / quality-first unlocked' : '');
     enforceDepthForPlan();
     updatePlanGatedControls();
     updateExportGatedControls();
@@ -587,6 +654,7 @@ async function refreshBillingStatus() {
     upBtn.classList.remove('hidden');
     upBtn.textContent = 'Plans';
     syncLoginBtn(false);
+    syncOwnerPill(false);
     updatePlanGatedControls();
     updateExportGatedControls();
   } finally {
@@ -742,6 +810,10 @@ function loadOutputPrefs() {
     loadScanModeFromStorage();
     updateScanModePills();
     updateScreenshotSweepHint();
+    const ep = localStorage.getItem(LS_PREF_EXTRACTION_PROFILE) || 'standard';
+    const allowedEp = new Set(['quick_brief', 'standard', 'full_harvest', 'quality_first']);
+    extractionProfile = allowedEp.has(ep) ? ep : 'standard';
+    syncExtractionProfilePills();
   } catch {
     /* ignore */
   }
@@ -760,6 +832,11 @@ function persistOutputPrefs() {
     const pv = ($('#service-package-select')?.value || '').trim();
     if (pv && ['basic', 'standard', 'premium'].includes(pv)) localStorage.setItem(LS_PREF_SERVICE_PKG, pv);
     else localStorage.removeItem(LS_PREF_SERVICE_PKG);
+    try {
+      localStorage.setItem(LS_PREF_EXTRACTION_PROFILE, extractionProfile);
+    } catch {
+      /* ignore */
+    }
   } catch {
     /* ignore */
   }
@@ -1210,22 +1287,41 @@ let activeTab = 'url';
 /** @type {'elite' | 'images'} */
 let scanMode = 'elite';
 let depth = 'homepage';
+/** @type {'quick_brief' | 'standard' | 'full_harvest' | 'quality_first'} */
+let extractionProfile = 'standard';
 let filesImages = [];
 let filesBoth = [];
 let fullBriefText = '';
-/** @type {{ token?: string, count?: number, imageCount?: number, snapshotCount?: number } | null} */
+/** @type {{ token?: string, artifactUrl?: string, artifactName?: string, count?: number, imageCount?: number, snapshotCount?: number } | null} */
 let lastAssetsSnapshot = null;
 let assetZipDownloadName = 'site-assets.zip';
 let displayIndex = 0;
 let streamActive = false;
 let typewriterRaf = 0;
 let analyzeAbort = null;
+let activeExtractionJobId = '';
+let lastCompletedJobArtifacts = [];
+let lastCompletedJobId = '';
 const selectedOptions = new Set(
   OPTION_DEFS.filter((o) => o.defaultOn).map((o) => o.id)
 );
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
+
+function formatHarvestBytes(b) {
+  const n = Number(b) || 0;
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 ** 3) return `${(n / (1024 * 1024)).toFixed(2)} MB`;
+  return `${(n / 1024 ** 3).toFixed(2)} GB`;
+}
+
+function syncExtractionProfilePills() {
+  $$('.extraction-profile-pill').forEach((x) =>
+    x.classList.toggle('active', (x.dataset.extractionProfile || '') === extractionProfile)
+  );
+}
 
 function escapeHtml(s) {
   return String(s)
@@ -1376,15 +1472,17 @@ function syncZipButtons(assets) {
   const lab = $('#enhance-assets-btn');
   const labSticky = $('#sticky-enhance-assets-btn');
   const label = (summary) => `Download site assets (ZIP · ${summary})`;
-  if (!assets?.token || !assets.count) {
+  if ((!assets?.token && !assets?.artifactUrl) || !assets.count) {
     if (btn) {
       btn.hidden = true;
       btn.dataset.token = '';
+      btn.dataset.artifactUrl = '';
       btn.textContent = 'Download site assets (ZIP)';
     }
     if (sticky) {
       sticky.hidden = true;
       sticky.dataset.token = '';
+      sticky.dataset.artifactUrl = '';
       sticky.textContent = 'ZIP';
     }
     for (const el of [lab, labSticky]) {
@@ -1396,16 +1494,27 @@ function syncZipButtons(assets) {
     return;
   }
   const bits = [];
-  if (assets.imageCount) bits.push(`${assets.imageCount} imgs`);
+  const disc = Number(assets.discoveredUrlCount) || 0;
+  const ic = Number(assets.imageCount) || 0;
+  if (disc > 0 && disc > ic) {
+    bits.push(`${ic}/${disc} imgs`);
+  } else if (ic > 0) {
+    bits.push(`${ic} imgs`);
+  } else if (disc > 0) {
+    bits.push(`URLs list · ${disc}`);
+  }
   if (assets.snapshotCount) bits.push(`${assets.snapshotCount} snapshots`);
   const summary = bits.length ? bits.join(' · ') : `${assets.count} files`;
+  const artifactUrl = assets.artifactUrl || '';
   if (btn) {
-    btn.dataset.token = assets.token;
+    btn.dataset.token = assets.token || '';
+    btn.dataset.artifactUrl = artifactUrl;
     btn.hidden = false;
     btn.textContent = label(summary);
   }
   if (sticky) {
-    sticky.dataset.token = assets.token;
+    sticky.dataset.token = assets.token || '';
+    sticky.dataset.artifactUrl = artifactUrl;
     sticky.hidden = false;
     sticky.textContent = `ZIP · ${summary}`;
     sticky.title = label(summary);
@@ -1413,8 +1522,8 @@ function syncZipButtons(assets) {
   const canLab = Boolean(API_ASSET_PIPELINE_ENHANCE);
   for (const el of [lab, labSticky]) {
     if (!el) continue;
-    el.hidden = !canLab;
-    el.dataset.token = canLab ? assets.token : '';
+    el.hidden = !canLab || !assets.token;
+    el.dataset.token = canLab && assets.token ? assets.token : '';
     el.disabled = false;
     if (labSticky && canLab) {
       labSticky.title = 'HD Lanczos pass + URL-grounded filenames (server-side; see docs)';
@@ -1423,8 +1532,8 @@ function syncZipButtons(assets) {
 }
 
 function applyAssetsMeta(assets) {
-  lastAssetsSnapshot = assets?.token ? { ...assets } : null;
-  assetZipDownloadName = 'site-assets.zip';
+  lastAssetsSnapshot = assets?.token || assets?.artifactUrl ? { ...assets } : null;
+  assetZipDownloadName = assets?.filename || assets?.artifactName || 'site-assets.zip';
   syncZipButtons(assets);
 }
 
@@ -1462,12 +1571,33 @@ function applyMetaScraper(scraper) {
   if (scraper?.crawlPartialMessage) {
     parts.push(scraper.crawlPartialMessage);
   }
+  if (scraper?.archiveLockedMessage) {
+    parts.push(scraper.archiveLockedMessage);
+  }
   if (scraper?.assetHarvestMode) {
     parts.push('Deep Asset Harvest was on: crawl prioritized media discovery; the AI saw a trimmed HTML slice per page.');
+  }
+  const cssSheets = Number(scraper?.cssSheetsProcessed) || 0;
+  if (cssSheets > 0) {
+    parts.push(
+      `Linked stylesheets scanned for images: ${cssSheets} CSS file(s) (see ZIP extract/_discovered_image_urls.txt for every URL found).`
+    );
+  }
+  const remaining = Number(scraper?.crawlQueueRemaining) || 0;
+  if (remaining > 0) {
+    parts.push(`${remaining} page(s) remained in the crawl queue when extraction stopped.`);
+  }
+  const failCount = Number(scraper?.imagesFailedCount) || 0;
+  if (failCount > 0) {
+    parts.push(`${failCount} asset fetch attempt(s) failed or were rejected by technical guards.`);
   }
   const dup = Number(scraper?.harvestContentDuplicatesSkipped) || 0;
   if (dup > 0) {
     parts.push(`${dup} duplicate image file(s) skipped (same bytes as an earlier URL).`);
+  }
+  const archiveBytes = Number(scraper?.archiveBytes) || 0;
+  if (archiveBytes > 0) {
+    parts.push(`Archive payload before ZIP compression: ~${formatHarvestBytes(archiveBytes)}.`);
   }
   if (parts.length) {
     el.textContent = parts.join(' ');
@@ -1481,10 +1611,12 @@ function applyMetaScraper(scraper) {
   if (hEl && (scraper?.crawlPageCount != null || scraper?.imagesDiscoveredCount != null)) {
     const p = scraper.crawlPageCount != null ? scraper.crawlPageCount : '—';
     const im = scraper.imagesDiscoveredCount != null ? scraper.imagesDiscoveredCount : null;
+    const failText = failCount > 0 ? ` · ${failCount} fetch notes` : '';
+    const dupText = dup > 0 ? ` · ${dup} dupes skipped` : '';
     hEl.hidden = false;
     hEl.textContent =
       im != null
-        ? `Crawl: ${p} page(s) · ${im} unique image URL(s) discovered (ZIP count may be lower after plan/server caps).`
+        ? `Crawl: ${p} page(s) · ${im} unique image URL(s) discovered${failText}${dupText} (ZIP count may be lower after plan/server caps).`
         : `Crawl: ${p} page(s).`;
   }
 }
@@ -1888,8 +2020,9 @@ async function downloadSiteImagesZip() {
   const main = $('#download-images-btn');
   const sticky = $('#sticky-download-zip-btn');
   const token = main?.dataset?.token || sticky?.dataset?.token;
-  const url = apiUrl(`/api/site-images/${token}`);
-  if (!token || !url) {
+  const artifactUrl = main?.dataset?.artifactUrl || sticky?.dataset?.artifactUrl || '';
+  const url = artifactUrl || (token ? apiUrl(`/api/site-images/${token}`) : '');
+  if (!url) {
     showToast('No asset bundle for this run');
     return;
   }
@@ -1917,6 +2050,32 @@ async function downloadSiteImagesZip() {
   } finally {
     if (main) main.disabled = false;
     if (sticky) sticky.disabled = false;
+  }
+}
+
+async function downloadJobArtifact(jobId, artifactName) {
+  const url = extractionJobUrl(jobId, `/artifacts/${encodeURIComponent(artifactName || '')}`);
+  if (!url) {
+    showToast('Artifact is not available', { variant: 'warning' });
+    return;
+  }
+  try {
+    const res = await fetch(url, { headers: analyzeFetchHeaders() });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error || `Download failed (${res.status})`);
+    }
+    const blob = await res.blob();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = artifactName || 'download.bin';
+    a.rel = 'noopener';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(a.href);
+  } catch (err) {
+    showToast(err.message || 'Download failed', { variant: 'error', duration: 3600 });
   }
 }
 
@@ -2138,7 +2297,7 @@ function startTypewriter() {
   typewriterRaf = requestAnimationFrame(tick);
 }
 
-async function parseSseStream(response, { onText, signal } = {}) {
+async function parseSseStream(response, { onText, signal, fastStages = false } = {}) {
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
@@ -2162,14 +2321,42 @@ async function parseSseStream(response, { onText, signal } = {}) {
       const hEl = $('#harvest-live-stats');
       if (hEl) {
         hEl.hidden = false;
+        const phase = String(data.phase || 'crawl');
+        const phaseLabel = String(data.phaseLabel || '').trim();
         const pc = Number(data.pagesCrawled) || 0;
         const ql = Number(data.queueLength) || 0;
-        hEl.textContent = `Live: ${pc} page(s) crawled · ${ql} link(s) queued`;
+        const disc = Number(data.pagesDiscovered) || pc + ql;
+        const imgF = Number(data.imagesFound);
+        const imgD = Number(data.imagesDownloaded);
+        const imgFail = Number(data.imagesFailed);
+        const dup = Number(data.duplicatesSkipped);
+        const zipB = Number(data.zipBytesSoFar);
+        const elaps = Number(data.elapsedMs);
+        const parts = [];
+        if (phaseLabel) parts.push(phaseLabel);
+        if (phase === 'crawl' || phase === 'discover_images') {
+          parts.push(`${disc} pages discovered`);
+          parts.push(`${pc} crawled`);
+          if (ql) parts.push(`${ql} queued`);
+        }
+        if (Number.isFinite(imgF) && imgF > 0) parts.push(`${imgF} images found`);
+        if (Number.isFinite(imgD) && imgD > 0) parts.push(`${imgD} downloaded`);
+        if (Number.isFinite(imgFail) && imgFail > 0) parts.push(`${imgFail} fetch notes`);
+        if (Number.isFinite(dup) && dup > 0) parts.push(`${dup} dupes skipped`);
+        if (Number.isFinite(zipB) && zipB > 0) parts.push(`~${formatHarvestBytes(zipB)} in archive`);
+        if (Number.isFinite(elaps) && elaps > 400) parts.push(`${Math.round(elaps / 1000)}s`);
+        if (phase === 'download_images' || phase === 'images_done' || phase === 'package') {
+          parts.push(
+            phase === 'package' ? 'building package' : phase === 'images_done' ? 'packing ZIP' : 'downloading images'
+          );
+        }
+        hEl.textContent = parts.length ? `Live · ${parts.join(' · ')}` : `Live · ${pc} crawled · ${ql} queued`;
       }
     }
     if (data.type === 'stage') {
       applyStageEvent(data);
       if (
+        !fastStages &&
         data.phase === 'done' &&
         typeof data.index === 'number' &&
         data.index < REPORT_WRITER_AGENT_INDEX
@@ -2493,6 +2680,7 @@ async function runReviseBrief() {
     showToast(errMsg, { variant: 'warning', duration: 4200 });
     $('#progress-section').hidden = true;
     $('#results-section').hidden = false;
+    resetRunSidePanels();
     $('#summary-content').innerHTML = renderMarkdown(fullBriefText);
     $('#type-cursor').classList.add('hidden');
     trackClientEvent('revise_failed', { message: String(errMsg || '').slice(0, 120) });
@@ -2503,8 +2691,320 @@ async function runReviseBrief() {
   }
 }
 
+function prepareAnalyzeUiForStream() {
+  $('#progress-section').hidden = false;
+  $('#results-section').hidden = true;
+  $('#try-another-section')?.setAttribute('hidden', '');
+  updateProgressUpsell();
+  resetRunSidePanels();
+  syncZipButtons({});
+  lastAssetsSnapshot = null;
+  assetZipDownloadName = 'site-assets.zip';
+  fullBriefText = '';
+  displayIndex = 0;
+  streamActive = true;
+  $('#summary-content').innerHTML = '';
+  $('#type-cursor').classList.remove('hidden');
+  $('#progress-stage').textContent = 'Connecting...';
+  const pr = $('#progress-reward');
+  if (pr) pr.textContent = '';
+  buildAgentList();
+  setProgress(2);
+  setAnalyzeLoading(true);
+}
+
+async function finalizeAnalyzeSuccess() {
+  streamActive = false;
+  const stripWm = $('#pref-strip-watermarks')?.checked;
+  if (billingCache.enabled && billingCache.plan === 'free' && !billingCache.promoUnlocked && !stripWm) {
+    fullBriefText += WATERMARK_FOOTER;
+  }
+  setProgress(100);
+  $('#progress-stage').textContent = 'Complete';
+
+  stopTypewriter();
+  while (displayIndex < fullBriefText.length) {
+    displayIndex = Math.min(fullBriefText.length, displayIndex + 20);
+    $('#summary-content').innerHTML = renderMarkdown(fullBriefText.slice(0, displayIndex));
+    scrollSummaryIfNeeded();
+    await new Promise((r) => requestAnimationFrame(r));
+  }
+  $('#summary-content').innerHTML = renderMarkdown(fullBriefText);
+  $('#type-cursor').classList.add('hidden');
+
+  updateScorecard(fullBriefText);
+
+  const zipSnap = lastAssetsSnapshot;
+  if (zipSnap?.token && Number(zipSnap.discoveredUrlCount) > Number(zipSnap.imageCount || 0)) {
+    showToast(
+      `Asset ZIP: saved ${Number(zipSnap.imageCount || 0)} image file(s); ${Number(zipSnap.discoveredUrlCount)} unique URLs were found (full list in extract/_discovered_image_urls.txt). Remaining URLs may hit plan limits, blocked hosts, or non-image responses.`,
+      { variant: 'warning', duration: 8200 }
+    );
+  }
+
+  $('#progress-section').hidden = true;
+  $('#results-section').hidden = false;
+  try {
+    await refreshBillingStatus();
+    await refreshExtractionJobHistory();
+  } catch {
+    /* handled internally */
+  }
+  try {
+    localStorage.setItem(LS_BRIEF_OK, '1');
+  } catch {
+    /* ignore */
+  }
+  try {
+    resetTurnstileAfterRun();
+    void ensureTurnstileMounted();
+    trackClientEvent('run_completed', { depth, tab: activeTab });
+    updatePostResultUpsell();
+    updateReportChrome();
+  } catch (postErr) {
+    console.error(postErr);
+  }
+  $('#try-another-section')?.removeAttribute('hidden');
+  persistActiveExtractionJob('');
+}
+
+function applyAnalyzeFailure(e) {
+  console.error(e);
+  streamActive = false;
+  stopTypewriter();
+  let marked = false;
+  for (let i = 0; i < AGENTS.length; i += 1) {
+    const badge = $(`#agent-list li[data-index="${i}"] [data-status]`);
+    if (badge?.classList.contains('running')) {
+      setAgentStatus(i, 'error');
+      marked = true;
+      break;
+    }
+  }
+  if (!marked) setAgentStatus(REPORT_WRITER_AGENT_INDEX, 'error');
+  $('#progress-stage').textContent = 'Failed';
+  setProgress(100);
+  let errMsg = e.name === 'AbortError' ? 'Request cancelled.' : e.message || String(e);
+  if (/failed to fetch|networkerror|load failed/i.test(errMsg)) {
+    errMsg =
+      'Network error — check your connection, disable VPN/ad-block for this site, and confirm the API URL (VITE_API_URL) is correct.';
+  } else if (/connection closed before the brief finished/i.test(errMsg)) {
+    errMsg =
+      'The response stream ended early. Reconnect from the recent jobs panel or retry the extraction.';
+  }
+  fullBriefText = `## Something went wrong\n\n${escapeHtml(errMsg)}\n\n**Try again** with the same inputs. If failures repeat, **upgrade** for deeper crawls and higher limits — complex sites are often more reliable on **Pro**.\n\nTap **Re-run** or **Upgrade** in the header.`;
+  $('#summary-content').innerHTML = renderMarkdown(fullBriefText);
+  $('#type-cursor').classList.add('hidden');
+  $('#metric-issues').textContent = '—';
+  $('#metric-issues').className = 'metric-value issue-high';
+  $('#metric-sections').textContent = '0';
+  $('#metric-words').textContent = '0';
+  $('#metric-coverage').textContent = '0%';
+  $('#metric-coverage').className = 'metric-value issue-mid';
+  $('#progress-section').hidden = true;
+  $('#results-section').hidden = false;
+  resetRunSidePanels();
+  updatePostResultUpsell();
+  updateReportChrome();
+  $('#try-another-section')?.removeAttribute('hidden');
+  trackClientEvent('run_failed', {
+    message: String(errMsg || '').slice(0, 120),
+    detail: String(e?.message || e).slice(0, 160),
+  });
+}
+
+async function connectToExtractionJob(jobId, { signal, fastStages = true } = {}) {
+  const url = extractionJobUrl(jobId, '/events');
+  if (!url) throw new Error('Job stream is unavailable.');
+  const res = await fetch(url, { headers: analyzeFetchHeaders(), signal });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(humanizeError(res.status, body.error, body));
+  }
+  const ct = res.headers.get('content-type') || '';
+  if (!ct.includes('text/event-stream')) {
+    throw new Error('Job stream is unavailable.');
+  }
+  startTypewriter();
+  await parseSseStream(res, {
+    signal,
+    fastStages,
+    onText: () => {
+      bumpStreamProgress();
+      scrollSummaryIfNeeded();
+    },
+  });
+}
+
+function jobStatusTone(status) {
+  if (status === 'completed') return 'Completed';
+  if (status === 'failed') return 'Failed';
+  if (status === 'running') return 'Running';
+  return 'Queued';
+}
+
+function renderExtractionJobHistory(jobs) {
+  const section = $('#job-history-section');
+  const list = $('#job-history-list');
+  const note = $('#job-active-note');
+  if (!section || !list) return;
+  if (!Array.isArray(jobs) || jobs.length === 0) {
+    section.hidden = true;
+    list.innerHTML = '';
+    if (note) note.textContent = '';
+    return;
+  }
+  section.hidden = false;
+  list.innerHTML = jobs
+    .map((job) => {
+      const url = escapeHtml(job?.summary?.url || 'Image-only run');
+      const status = escapeHtml(jobStatusTone(job?.status));
+      const when = new Date(job?.updatedAt || job?.createdAt || Date.now()).toLocaleString();
+      const zipArtifact = Array.isArray(job?.artifacts)
+        ? job.artifacts.find((item) => /\.zip$/i.test(item?.name || ''))
+        : null;
+      return `
+        <li class="job-history-item">
+          <div class="job-history-copy">
+            <strong>${status}</strong>
+            <span>${url}</span>
+            <span>${escapeHtml(when)}</span>
+          </div>
+          <div class="job-history-actions">
+            <button type="button" class="btn-outline btn-sm" data-job-open="${escapeHtml(job.id)}">Open</button>
+            ${
+              zipArtifact
+                ? `<button type="button" class="btn-outline btn-sm" data-job-zip="${escapeHtml(job.id)}" data-zip-name="${escapeHtml(zipArtifact.name)}">ZIP</button>`
+                : ''
+            }
+          </div>
+        </li>
+      `;
+    })
+    .join('');
+  if (note) {
+    note.textContent = activeExtractionJobId ? `Active job: ${activeExtractionJobId}` : '';
+  }
+}
+
+async function refreshExtractionJobHistory() {
+  const section = $('#job-history-section');
+  if (!section || !API_EXTRACTION_JOBS) return;
+  try {
+    const res = await fetch(`${API_EXTRACTION_JOBS}?limit=12`, { headers: analyzeFetchHeaders() });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `Jobs failed (${res.status})`);
+    renderExtractionJobHistory(Array.isArray(data.jobs) ? data.jobs : []);
+  } catch (err) {
+    console.error(err);
+  }
+}
+
+function renderArtifactPanel(jobId, artifacts) {
+  const wrap = $('#artifact-panel');
+  const list = $('#artifact-panel-list');
+  if (!wrap || !list) return;
+  if (!jobId || !Array.isArray(artifacts) || artifacts.length === 0) {
+    wrap.hidden = true;
+    list.innerHTML = '';
+    lastCompletedJobArtifacts = [];
+    lastCompletedJobId = '';
+    return;
+  }
+  lastCompletedJobId = jobId;
+  lastCompletedJobArtifacts = [...artifacts];
+  const preferredOrder = [
+    'site-assets.zip',
+    'manifest.json',
+    'manifest.csv',
+    'pages.json',
+    'pages.csv',
+    'images.json',
+    'images.csv',
+    'site-map.txt',
+    'report.md',
+    'cursor-ready.md',
+    'ai-handoff.md',
+  ];
+  const orderIndex = (name) => {
+    const idx = preferredOrder.indexOf(name);
+    return idx === -1 ? preferredOrder.length + name.localeCompare('') : idx;
+  };
+  const sorted = [...artifacts].sort((a, b) => {
+    const ai = orderIndex(a?.name || '');
+    const bi = orderIndex(b?.name || '');
+    if (ai !== bi) return ai - bi;
+    return String(a?.name || '').localeCompare(String(b?.name || ''));
+  });
+  list.innerHTML = sorted
+    .map((artifact) => {
+      const name = String(artifact?.name || '').trim();
+      return `<button type="button" class="btn-outline btn-sm" data-artifact-download="${escapeHtml(name)}">${escapeHtml(name)}</button>`;
+    })
+    .join('');
+  wrap.hidden = false;
+}
+
+async function hydrateCompletedJobArtifacts(jobId) {
+  if (!jobId) {
+    renderArtifactPanel('', []);
+    return;
+  }
+  try {
+    const res = await fetch(extractionJobUrl(jobId), { headers: analyzeFetchHeaders() });
+    const job = await res.json().catch(() => ({}));
+    if (!res.ok || !job?.id) throw new Error(job.error || `Job lookup failed (${res.status})`);
+    renderArtifactPanel(job.id, Array.isArray(job.artifacts) ? job.artifacts : []);
+    if (job.assets) applyAssetsMeta(job.assets);
+  } catch (err) {
+    console.error(err);
+    renderArtifactPanel('', []);
+  }
+}
+
+async function openExtractionJob(jobId) {
+  if (!jobId) return;
+  if (analyzeAbort) analyzeAbort.abort();
+  analyzeAbort = new AbortController();
+  persistActiveExtractionJob(jobId);
+  prepareAnalyzeUiForStream();
+  try {
+    await connectToExtractionJob(jobId, {
+      signal: analyzeAbort.signal,
+      fastStages: true,
+    });
+    await hydrateCompletedJobArtifacts(jobId);
+    await finalizeAnalyzeSuccess();
+  } catch (err) {
+    applyAnalyzeFailure(err);
+  } finally {
+    setAnalyzeLoading(false);
+    updateFlowWizard();
+    updateProgressUpsell();
+  }
+}
+
+async function resumePersistedExtractionJob() {
+  const jobId = loadPersistedActiveExtractionJob();
+  if (!jobId) return;
+  try {
+    const res = await fetch(extractionJobUrl(jobId), { headers: analyzeFetchHeaders() });
+    const job = await res.json().catch(() => ({}));
+    if (!res.ok || !job?.id) {
+      persistActiveExtractionJob('');
+      return;
+    }
+    if (job.status === 'queued' || job.status === 'running') {
+      showToast('Reconnected to your extraction job.', { duration: 2600 });
+      await openExtractionJob(jobId);
+    }
+  } catch (err) {
+    console.error(err);
+  }
+}
+
 async function runAnalyze() {
-  if (!API_ANALYZE) {
+  if (!API_EXTRACTION_JOBS) {
     showConfigToastOnce('Set VITE_API_URL to your API base URL in the host env and redeploy.', 4500);
     return;
   }
@@ -2576,43 +3076,14 @@ async function runAnalyze() {
   if (analyzeAbort) analyzeAbort.abort();
   analyzeAbort = new AbortController();
   const { signal } = analyzeAbort;
-
-  $('#progress-section').hidden = false;
-  $('#results-section').hidden = true;
-  const planBanner = $('#mid-flow-plan-notice');
-  if (planBanner) {
-    planBanner.hidden = true;
-    planBanner.textContent = '';
-  }
-  $('#try-another-section')?.setAttribute('hidden', '');
-  updateProgressUpsell();
-  $('#analysis-hint').hidden = true;
-  $('#analysis-hint').textContent = '';
-  const hStat = $('#harvest-live-stats');
-  if (hStat) {
-    hStat.hidden = true;
-    hStat.textContent = '';
-  }
-  syncZipButtons({});
-  lastAssetsSnapshot = null;
-  assetZipDownloadName = 'site-assets.zip';
-  fullBriefText = '';
-  displayIndex = 0;
-  streamActive = true;
-  $('#summary-content').innerHTML = '';
-  $('#type-cursor').classList.remove('hidden');
-  $('#progress-stage').textContent = 'Connecting…';
-  const pr = $('#progress-reward');
-  if (pr) pr.textContent = '';
-  buildAgentList();
-  setProgress(2);
-  setAnalyzeLoading(true);
+  prepareAnalyzeUiForStream();
 
   const opts = OPTION_DEFS.filter((o) => selectedOptions.has(o.id)).map((o) => o.label);
   const form = new FormData();
   form.append('url', url);
   form.append('depth', depth);
   form.append('scanMode', scanMode);
+  form.append('extractionProfile', extractionProfile);
   form.append('options', JSON.stringify(opts));
   form.append('comparePair', $('#compare-pair')?.checked ? '1' : '0');
   form.append('removeImageBackground', $('#pref-remove-image-bg')?.checked ? '1' : '0');
@@ -2630,21 +3101,14 @@ async function runAnalyze() {
   const headers = analyzeFetchHeaders();
 
   try {
-    const res = await fetch(API_ANALYZE, { method: 'POST', headers, body: form, signal });
-
+    const res = await fetch(API_EXTRACTION_JOBS, { method: 'POST', headers, body: form, signal });
+    const body = await res.json().catch(() => ({}));
     if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      if (res.status === 403 && body.error === 'LIMIT_REACHED') {
+      if (res.status === 403 && (body.error === 'LIMIT_REACHED' || isFeatureLockedPayload(body))) {
         streamActive = false;
         stopTypewriter();
         $('#progress-section').hidden = true;
-        openPaywallModal(body);
-        return;
-      }
-      if (res.status === 403 && isFeatureLockedPayload(body)) {
-        streamActive = false;
-        stopTypewriter();
-        $('#progress-section').hidden = true;
+        if (body.error === 'LIMIT_REACHED') void refreshBillingStatus();
         openPaywallModal(body);
         return;
       }
@@ -2655,10 +3119,7 @@ async function runAnalyze() {
         showToast('Session issue — refresh the page and try again.', { variant: 'warning', duration: 3800 });
         return;
       }
-      if (
-        res.status === 400 &&
-        /verification|Human verification|Verification required/i.test(String(body.error || ''))
-      ) {
+      if (res.status === 400 && /verification|Human verification|Verification required/i.test(String(body.error || ''))) {
         streamActive = false;
         stopTypewriter();
         $('#progress-section').hidden = true;
@@ -2673,121 +3134,16 @@ async function runAnalyze() {
       }
       throw new Error(humanizeError(res.status, body.error, body));
     }
-    const ct = res.headers.get('content-type') || '';
-    if (!ct.includes('text/event-stream')) {
-      const body = await res.json().catch(() => ({}));
-      if (res.status === 403 && isLimitReachedPayload(body)) {
-        streamActive = false;
-        stopTypewriter();
-        $('#progress-section').hidden = true;
-        void refreshBillingStatus();
-        openPaywallModal(body);
-        return;
-      }
-      if (res.status === 403 && isFeatureLockedPayload(body)) {
-        streamActive = false;
-        stopTypewriter();
-        $('#progress-section').hidden = true;
-        openPaywallModal(body);
-        return;
-      }
-      throw new Error(humanizeError(res.status, body.error, body));
-    }
 
-    startTypewriter();
-
-    await parseSseStream(res, {
-      signal,
-      onText: () => {
-        bumpStreamProgress();
-        scrollSummaryIfNeeded();
-      },
-    });
-
-    streamActive = false;
-    const stripWm = $('#pref-strip-watermarks')?.checked;
-    if (billingCache.enabled && billingCache.plan === 'free' && !billingCache.promoUnlocked && !stripWm) {
-      fullBriefText += WATERMARK_FOOTER;
-    }
-    setProgress(100);
-    $('#progress-stage').textContent = 'Complete';
-
-    stopTypewriter();
-    while (displayIndex < fullBriefText.length) {
-      displayIndex = Math.min(fullBriefText.length, displayIndex + 20);
-      $('#summary-content').innerHTML = renderMarkdown(fullBriefText.slice(0, displayIndex));
-      scrollSummaryIfNeeded();
-      await new Promise((r) => requestAnimationFrame(r));
-    }
-    $('#summary-content').innerHTML = renderMarkdown(fullBriefText);
-    $('#type-cursor').classList.add('hidden');
-
-    updateScorecard(fullBriefText);
-
-    $('#progress-section').hidden = true;
-    $('#results-section').hidden = false;
-    try {
-      await refreshBillingStatus();
-    } catch {
-      /* refreshBillingStatus already handles errors internally */
-    }
-    try {
-      localStorage.setItem(LS_BRIEF_OK, '1');
-    } catch {
-      /* ignore */
-    }
-    try {
-      resetTurnstileAfterRun();
-      void ensureTurnstileMounted();
-      trackClientEvent('run_completed', { depth, tab: activeTab });
-      updatePostResultUpsell();
-      updateReportChrome();
-    } catch (postErr) {
-      console.error(postErr);
-    }
-    $('#try-another-section')?.removeAttribute('hidden');
+    const jobId = String(body.jobId || '').trim();
+    if (!jobId) throw new Error('Server did not return a job id.');
+    persistActiveExtractionJob(jobId);
+    await refreshExtractionJobHistory();
+    await connectToExtractionJob(jobId, { signal, fastStages: true });
+    await hydrateCompletedJobArtifacts(jobId);
+    await finalizeAnalyzeSuccess();
   } catch (e) {
-    console.error(e);
-    streamActive = false;
-    stopTypewriter();
-    let marked = false;
-    for (let i = 0; i < AGENTS.length; i += 1) {
-      const badge = $(`#agent-list li[data-index="${i}"] [data-status]`);
-      if (badge?.classList.contains('running')) {
-        setAgentStatus(i, 'error');
-        marked = true;
-        break;
-      }
-    }
-    if (!marked) setAgentStatus(REPORT_WRITER_AGENT_INDEX, 'error');
-    $('#progress-stage').textContent = 'Failed';
-    setProgress(100);
-    let errMsg = e.name === 'AbortError' ? 'Request cancelled.' : e.message || String(e);
-    if (/failed to fetch|networkerror|load failed/i.test(errMsg)) {
-      errMsg =
-        'Network error — check your connection, disable VPN/ad-block for this site, and confirm the API URL (VITE_API_URL) is correct.';
-    } else if (/connection closed before the brief finished/i.test(errMsg)) {
-      errMsg =
-        'The response stream ended early (often a proxy or browser timeout during long runs). Try again, use a shallower scan, or run the app via `npm run dev` from the repo root with API + Vite together. If you use only `npm run dev` in `frontend`, extend the Vite proxy timeout or point VITE_API_URL at the API directly.';
-    }
-    fullBriefText = `## Something went wrong\n\n${escapeHtml(errMsg)}\n\n**Try again** with the same inputs. If failures repeat, **upgrade** for deeper crawls and higher limits — complex sites are often more reliable on **Pro**.\n\nTap **Re-run** or **Upgrade** in the header.`;
-    $('#summary-content').innerHTML = renderMarkdown(fullBriefText);
-    $('#type-cursor').classList.add('hidden');
-    $('#metric-issues').textContent = '—';
-    $('#metric-issues').className = 'metric-value issue-high';
-    $('#metric-sections').textContent = '0';
-    $('#metric-words').textContent = '0';
-    $('#metric-coverage').textContent = '0%';
-    $('#metric-coverage').className = 'metric-value issue-mid';
-    $('#progress-section').hidden = true;
-    $('#results-section').hidden = false;
-    updatePostResultUpsell();
-    updateReportChrome();
-    $('#try-another-section')?.removeAttribute('hidden');
-    trackClientEvent('run_failed', {
-      message: String(errMsg || '').slice(0, 120),
-      detail: String(e?.message || e).slice(0, 160),
-    });
+    applyAnalyzeFailure(e);
   } finally {
     setAnalyzeLoading(false);
     updateFlowWizard();
@@ -2846,8 +3202,20 @@ function init() {
   loadOutputPrefs();
   $$('.scan-mode-pill').forEach((p) => {
     p.addEventListener('click', () => {
+      if (p.classList.contains('extraction-profile-pill')) return;
       const m = p.getAttribute('data-scan-mode');
       if (m === 'images' || m === 'elite' || m === 'screenshots') setScanMode(m);
+    });
+  });
+  $$('.extraction-profile-pill').forEach((p) => {
+    p.addEventListener('click', () => {
+      const v = p.getAttribute('data-extraction-profile');
+      const allowed = new Set(['quick_brief', 'standard', 'full_harvest', 'quality_first']);
+      if (!v || !allowed.has(v)) return;
+      extractionProfile = v;
+      syncExtractionProfilePills();
+      persistOutputPrefs();
+      updateFlowWizard();
     });
   });
   $('#pref-strip-watermarks')?.addEventListener('change', () => {
@@ -2872,6 +3240,7 @@ function init() {
   $('#sticky-copy-btn')?.addEventListener('click', () => copyBrief());
   $('#sticky-share-btn')?.addEventListener('click', () => void shareReport());
   $('#post-result-share-btn')?.addEventListener('click', () => void shareReport());
+  $('#job-history-refresh-btn')?.addEventListener('click', () => void refreshExtractionJobHistory());
   $('#sticky-upgrade-btn')?.addEventListener('click', () => startBillingCheckout('pro', 'sticky_bar'));
   $('#header-plans-btn')?.addEventListener('click', () => openPricingModal('header_plans'));
   $('#download-images-btn')?.addEventListener('click', () => downloadSiteImagesZip());
@@ -2925,6 +3294,8 @@ function init() {
     lastAssetsSnapshot = null;
     assetZipDownloadName = 'site-assets.zip';
     fullBriefText = '';
+    resetRunSidePanels();
+    persistActiveExtractionJob('');
     updateFlowWizard();
     updatePostResultUpsell();
     showToast('Cleared — enter a new site');
@@ -2954,6 +3325,27 @@ function init() {
     const source =
       explicit || (host ? 'paywall_checkout' : 'pricing_checkout');
     if (product) void startBillingCheckout(product, source);
+  });
+  document.addEventListener('click', (e) => {
+    const openBtn = e.target.closest('[data-job-open]');
+    if (openBtn) {
+      e.preventDefault();
+      void openExtractionJob(openBtn.getAttribute('data-job-open'));
+      return;
+    }
+    const artifactBtn = e.target.closest('[data-artifact-download]');
+    if (artifactBtn) {
+      e.preventDefault();
+      const artifactName = artifactBtn.getAttribute('data-artifact-download');
+      void downloadJobArtifact(lastCompletedJobId, artifactName);
+      return;
+    }
+    const zipBtn = e.target.closest('[data-job-zip]');
+    if (!zipBtn) return;
+    e.preventDefault();
+    const jobId = zipBtn.getAttribute('data-job-zip');
+    const zipName = zipBtn.getAttribute('data-zip-name');
+    void downloadJobArtifact(jobId, zipName);
   });
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
@@ -3001,7 +3393,9 @@ function init() {
   buildTryAnotherChips();
   updatePlanGatedControls();
   void refreshOpenAiServerNotice();
-  refreshBillingStatus();
+  void refreshBillingStatus();
+  void refreshExtractionJobHistory();
+  void resumePersistedExtractionJob();
   updateExportGatedControls();
   updateReportChrome();
   trackClientEvent('landing_page_view');

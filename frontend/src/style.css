@@ -187,6 +187,20 @@ body {
   flex-shrink: 0;
 }
 
+.owner-unlock-pill {
+  font-family: 'DM Mono', monospace;
+  font-size: 0.72rem;
+  color: var(--accent2);
+  padding: 0.35rem 0.65rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(124, 109, 250, 0.45);
+  background: rgba(124, 109, 250, 0.12);
+  white-space: nowrap;
+  max-width: min(340px, 42vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .header-usage {
   font-family: 'DM Mono', monospace;
   font-size: 0.78rem;
@@ -1623,6 +1637,100 @@ label.export-pref-stack {
   inset: 0;
   pointer-events: none;
   background: linear-gradient(135deg, rgba(255, 255, 255, 0.08), transparent 55%);
+}
+
+.job-history-card {
+  background: var(--surface);
+  border: 1px solid var(--border2);
+  border-radius: var(--radius);
+  padding: 1.25rem;
+  margin-bottom: 1.5rem;
+}
+
+.job-history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.9rem;
+}
+
+.job-history-title {
+  margin: 0;
+  font-family: 'Syne', sans-serif;
+  font-size: 0.95rem;
+}
+
+.job-history-note {
+  margin: 0.25rem 0 0;
+  font-size: 0.76rem;
+  color: var(--muted);
+}
+
+.job-history-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: 0.7rem;
+}
+
+.job-history-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 0.85rem 0.95rem;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.job-history-copy {
+  min-width: 0;
+  display: grid;
+  gap: 0.2rem;
+}
+
+.job-history-copy span {
+  color: var(--muted);
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+}
+
+.job-history-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.artifact-panel {
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  padding: 1rem 1.05rem;
+  margin: 0 0 1rem;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.artifact-panel-head {
+  margin-bottom: 0.8rem;
+}
+
+.artifact-panel-title {
+  margin: 0;
+  font-size: 0.92rem;
+}
+
+.artifact-panel-sub {
+  margin: 0.25rem 0 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.artifact-panel-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
 }
 
 .progress-card {

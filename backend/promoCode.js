@@ -1,10 +1,42 @@
 import { timingSafeEqual } from 'node:crypto';
 
 const MAX_LEN = 128;
+const OWNER_TOKEN_MAX = 256;
 
 export function configuredPromoCode() {
   const s = process.env.CLONEAI_PROMO_CODE?.trim();
   return s ? s.slice(0, MAX_LEN) : '';
+}
+
+/** Server-only unlock: never expose in frontend builds. Header X-CloneAI-Owner-Token */
+export function configuredOwnerToken() {
+  const s = process.env.CLONEAI_OWNER_TOKEN?.trim();
+  return s ? s.slice(0, OWNER_TOKEN_MAX) : '';
+}
+
+export function submittedOwnerToken(req) {
+  const h = req.get('x-cloneai-owner-token');
+  if (!h) return '';
+  return String(h).trim().slice(0, OWNER_TOKEN_MAX);
+}
+
+/**
+ * Timing-safe match for CLONEAI_OWNER_TOKEN. Does not bypass billing UI; use for API/script access
+ * with the same server-side limits lift as CLONEAI_PROMO_CODE on analyze.
+ */
+export function ownerTokenMatchesRequest(req) {
+  const expected = configuredOwnerToken();
+  if (!expected) return false;
+  const sent = submittedOwnerToken(req);
+  if (!sent) return false;
+  try {
+    const a = Buffer.from(sent, 'utf8');
+    const b = Buffer.from(expected, 'utf8');
+    if (a.length !== b.length) return false;
+    return timingSafeEqual(a, b);
+  } catch {
+    return false;
+  }
 }
 
 /** Header values are trimmed; body `promoCode` is not trimmed (exact length for timing-safe match). */
@@ -31,4 +63,9 @@ export function promoMatchesRequest(req) {
   } catch {
     return false;
   }
+}
+
+/** Coupon or owner token — use for crawl/harvest caps, billing skip on analyze, captcha skip. */
+export function privilegedAnalyzeBypass(req) {
+  return promoMatchesRequest(req) || ownerTokenMatchesRequest(req);
 }

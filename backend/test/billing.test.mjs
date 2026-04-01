@@ -80,9 +80,9 @@ test('TEST 2: starter — 10 runs OK, 11th blocked', async () => {
   assert.equal(r.ok, false);
 });
 
-test('TEST 3: pro — 50 runs OK, 51st blocked', async () => {
+test('TEST 3: pro — 30 runs OK, 31st blocked', async () => {
   applySubscriptionFromCheckoutSync(uid, PLANS.PRO, 'cus', 'sub', 'price_pro_test');
-  for (let i = 0; i < 50; i += 1) {
+  for (let i = 0; i < 30; i += 1) {
     await tryBeginRun(uid);
   }
   const r = await tryBeginRun(uid);

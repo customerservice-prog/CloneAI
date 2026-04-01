@@ -11,7 +11,7 @@ export const PLANS = {
 
 const FREE_LIFETIME_MAX = 1;
 const STARTER_MONTHLY = 10;
-const PRO_MONTHLY = 50;
+const PRO_MONTHLY = 30;
 const POWER_MONTHLY = 100;
 
 const UUID_RE =

@@ -96,7 +96,18 @@ Full Stripe test matrix: [docs/BILLING_TESTING.md](docs/BILLING_TESTING.md).
 
 ## Run locally
 
-**Backend**
+**Recommended (API + Vite together)** — from the **repository root**:
+
+```bash
+npm install --prefix backend
+npm install --prefix frontend
+cd backend; npx playwright install chromium; cd ..
+npm run dev
+```
+
+Then open [http://localhost:5173](http://localhost:5173). The dev script starts the backend on a free port (usually `3001`) and configures Vite to proxy `/api/*` to it. If you only run `npm run dev` inside `frontend/`, the UI loads but **“Could not reach the API”** appears until something is listening on the proxy target (default `http://127.0.0.1:3001`).
+
+**Backend** (on its own, e.g. port 3001)
 
 ```bash
 cd backend
@@ -125,7 +136,7 @@ npm test
 
 From the **repository root** you can also run `npm test` or `npm run smoke` (they delegate to `backend/`).
 
-**Frontend**
+**Frontend** (without root `npm run dev`)
 
 ```bash
 cd frontend
@@ -133,7 +144,7 @@ npm install
 npm run dev
 ```
 
-Open [http://localhost:5173](http://localhost:5173).
+Open [http://localhost:5173](http://localhost:5173) **and** keep the backend running on **`VITE_DEV_API_PROXY`** (default `http://127.0.0.1:3001`), or set `VITE_API_URL` to your API origin in `frontend/.env.local`.
 
 ## Deploy
 

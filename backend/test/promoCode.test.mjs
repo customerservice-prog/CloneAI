@@ -1,6 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { promoMatchesRequest, configuredPromoCode, submittedPromoCode } from '../promoCode.js';
+import {
+  promoMatchesRequest,
+  configuredPromoCode,
+  submittedPromoCode,
+  ownerTokenMatchesRequest,
+  privilegedAnalyzeBypass,
+} from '../promoCode.js';
 
 function mockReq({ header, body = {} } = {}) {
   return {
@@ -47,4 +53,29 @@ test('promo matches header when body empty', () => {
   assert.equal(submittedPromoCode(mockReq({ header: { 'X-CloneAI-Promo-Code': 'abc123' } })), 'abc123');
   if (prev !== undefined) process.env.CLONEAI_PROMO_CODE = prev;
   else delete process.env.CLONEAI_PROMO_CODE;
+});
+
+test('owner token without env → no match', () => {
+  const prev = process.env.CLONEAI_OWNER_TOKEN;
+  delete process.env.CLONEAI_OWNER_TOKEN;
+  assert.equal(
+    ownerTokenMatchesRequest(mockReq({ header: { 'x-cloneai-owner-token': 'x' } })),
+    false
+  );
+  if (prev !== undefined) process.env.CLONEAI_OWNER_TOKEN = prev;
+});
+
+test('owner token header enables privileged bypass without promo body', () => {
+  const prevP = process.env.CLONEAI_PROMO_CODE;
+  const prevT = process.env.CLONEAI_OWNER_TOKEN;
+  delete process.env.CLONEAI_PROMO_CODE;
+  process.env.CLONEAI_OWNER_TOKEN = 'OwnTokTest';
+  const req = mockReq({ header: { 'x-cloneai-owner-token': 'OwnTokTest' }, body: {} });
+  assert.equal(promoMatchesRequest(req), false);
+  assert.equal(ownerTokenMatchesRequest(req), true);
+  assert.equal(privilegedAnalyzeBypass(req), true);
+  if (prevP !== undefined) process.env.CLONEAI_PROMO_CODE = prevP;
+  else delete process.env.CLONEAI_PROMO_CODE;
+  if (prevT !== undefined) process.env.CLONEAI_OWNER_TOKEN = prevT;
+  else delete process.env.CLONEAI_OWNER_TOKEN;
 });

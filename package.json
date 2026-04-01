@@ -6,6 +6,7 @@
     "node": ">=20"
   },
   "scripts": {
+    "oneclick": "node scripts/oneclick.mjs",
     "dev": "node scripts/dev.mjs",
     "dev:web": "npm run dev --prefix frontend",
     "test": "npm test --prefix backend",

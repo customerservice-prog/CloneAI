@@ -7,6 +7,30 @@ const IMG_ATTR_RE =
   /<(img|source|video|link|meta|picture|object|embed|image)\b([^>]*?)>/gis;
 const LINK_TAG_RE = /<link\b([^>]*?)>/gis;
 const STYLE_BLOCK_RE = /<style\b[^>]*>([\s\S]*?)<\/style>/gi;
+const NO_SCRIPT_RE = /<noscript\b[^>]*>([\s\S]*?)<\/noscript>/gi;
+
+const GENERIC_MEDIA_ATTRS = [
+  'src',
+  'srcset',
+  'data-src',
+  'data-srcset',
+  'data-lazy-src',
+  'data-original',
+  'data-lazy',
+  'data-zoom-image',
+  'data-large_image',
+  'data-large-image',
+  'data-bg',
+  'data-bgset',
+  'data-background',
+  'data-background-image',
+  'data-image',
+  'data-img',
+  'data-thumb',
+  'data-thumbnail',
+  'data-poster',
+  'poster',
+];
 
 function attrVal(tag, name) {
   const re = new RegExp(`\\b${name}\\s*=\\s*(["'])(.*?)\\1`, 'is');
@@ -54,6 +78,15 @@ function resolveHref(raw, baseHref) {
   } catch {
     return null;
   }
+}
+
+function looksLikeMediaPath(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return false;
+  if (/^data:|^blob:/i.test(s)) return false;
+  if (/\.(?:jpg|jpeg|png|webp|gif|avif|svg|ico|bmp|tiff?)(?:[?#]|$)/i.test(s)) return true;
+  if (/(?:image|img|photo|thumb|thumbnail|banner|hero|gallery|poster|background)/i.test(s)) return true;
+  return false;
 }
 
 const TRACKING_PARAMS = new Set([
@@ -253,6 +286,24 @@ export function collectImageUrls(html, pageUrl) {
         }
       }
     }
+
+    for (const attrName of GENERIC_MEDIA_ATTRS) {
+      const value = attrVal(inner, attrName);
+      if (!value) continue;
+      if (/srcset$/i.test(attrName) || attrName === 'data-bgset') {
+        for (const part of String(value).split(',')) {
+          const candidate = part.trim().split(/\s+/)[0] || '';
+          const u = resolveHref(candidate, baseHref);
+          if (u) push(u);
+        }
+        const best = bestUrlFromSrcset(value, baseHref);
+        if (best) push(best);
+        continue;
+      }
+      if (!looksLikeMediaPath(value) && !/^https?:\/\//i.test(value) && !value.startsWith('/')) continue;
+      const u = resolveHref(value, baseHref);
+      if (u) push(u);
+    }
   }
 
   // <img ...> anywhere (catches malformed or non-standard wrappers)
@@ -272,6 +323,14 @@ export function collectImageUrls(html, pageUrl) {
         if (u) push(u);
       }
     }
+  }
+
+  NO_SCRIPT_RE.lastIndex = 0;
+  let ns;
+  while ((ns = NO_SCRIPT_RE.exec(html)) !== null) {
+    const inner = ns[1] || '';
+    const nested = collectImageUrls(inner, baseHref);
+    for (const u of nested) push(u);
   }
 
   // Inline + <style> blocks: background-image: url(...)
@@ -303,6 +362,16 @@ export function collectImageUrls(html, pageUrl) {
     const u = resolveHref(raw, baseHref);
     if (u) push(u);
     looseHits += 1;
+  }
+
+  const relativeRe =
+    /["']((?:\/|\.\/|\.\.\/)[^"'\\\s<>(){}\[\]`]{2,1200}\.(?:jpg|jpeg|png|webp|gif|avif|svg)\b(?:\?[^"'\\\s<>]{0,800})?)["']/gi;
+  let relativeHits = 0;
+  relativeRe.lastIndex = 0;
+  while ((lm = relativeRe.exec(html)) !== null && relativeHits < 8000) {
+    const u = resolveHref(lm[1], baseHref);
+    if (u) push(u);
+    relativeHits += 1;
   }
 
   return ordered;
@@ -437,15 +506,18 @@ export function imageBytesFingerprint(buf) {
   return createHash('sha256').update(buf).digest('hex');
 }
 
-async function poolMap(items, concurrency, fn) {
+async function poolMap(items, concurrency, fn, onProgress = null) {
   const results = new Array(items.length);
   let next = 0;
+  let fetchCompleted = 0;
   async function worker() {
     while (true) {
       const i = next;
       next += 1;
       if (i >= items.length) return;
       results[i] = await fn(items[i], i);
+      fetchCompleted += 1;
+      onProgress?.({ fetchCompleted, fetchTotal: items.length });
     }
   }
   const workers = Array.from({ length: Math.min(concurrency, items.length) }, () => worker());
@@ -463,6 +535,7 @@ export async function fetchHarvestedImages(urls, {
   maxTotalBytes = Number.MAX_SAFE_INTEGER,
   concurrency = 12,
   timeoutMs = 25000,
+  onProgress = null,
 } = {}) {
   const cap =
     Number.isFinite(maxImages) && maxImages < urls.length ? Math.max(0, Math.floor(maxImages)) : urls.length;
@@ -472,11 +545,17 @@ export async function fetchHarvestedImages(urls, {
   const entries = [];
   const seenContent = new Set();
   let contentDuplicatesSkipped = 0;
+  let fetchFailures = 0;
+  let nonImageSkipped = 0;
+  let oversizedSkipped = 0;
+  let totalFetchAttempts = 0;
 
   const results = await poolMap(slice, concurrency, async (imageUrl) => {
+    totalFetchAttempts += 1;
     const safe = await assertUrlSafeForServerFetch(imageUrl);
     if (!safe.ok) {
       errors.push(`${imageUrl}: ${safe.error}`);
+      fetchFailures += 1;
       return null;
     }
     try {
@@ -495,19 +574,22 @@ export async function fetchHarvestedImages(urls, {
       const ct = res.headers['content-type'] || '';
       if (!/^image\//i.test(ct) && !/octet-stream/i.test(ct)) {
         errors.push(`${imageUrl}: not an image (${ct || 'no content-type'})`);
+        nonImageSkipped += 1;
         return null;
       }
       const buf = Buffer.from(res.data);
       if (buf.length > maxBytesPerImage) {
         errors.push(`${imageUrl}: exceeds per-file size limit`);
+        oversizedSkipped += 1;
         return null;
       }
       return { buffer: buf, ext: extFromContentType(ct), url: imageUrl };
     } catch (e) {
       errors.push(`${imageUrl}: ${e.message || 'fetch failed'}`);
+      fetchFailures += 1;
       return null;
     }
-  });
+  }, onProgress);
 
   const totalCap = Number.isFinite(maxTotalBytes) ? maxTotalBytes : Number.MAX_SAFE_INTEGER;
   for (let i = 0; i < results.length; i += 1) {
@@ -529,12 +611,24 @@ export async function fetchHarvestedImages(urls, {
       buffer: r.buffer,
       sourceUrl: r.url,
     });
+    onProgress?.({
+      imagesInZip: entries.length,
+      bytesSoFar: total,
+      contentDuplicatesSkipped,
+      fetchTotal: slice.length,
+      fetchCompleted: slice.length,
+    });
   }
 
   return {
     entries,
     skipped: slice.length - entries.length,
     contentDuplicatesSkipped,
+    fetchFailures,
+    nonImageSkipped,
+    oversizedSkipped,
+    totalFetchAttempts,
+    archiveBytes: total,
     errors: errors.slice(0, 250),
   };
 }
