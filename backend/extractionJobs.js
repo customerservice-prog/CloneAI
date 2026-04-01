@@ -43,6 +43,18 @@ function safeArtifactName(name) {
     .slice(0, 160);
 }
 
+function initialStageStatuses() {
+  return {
+    crawl: 'pending',
+    screenshots: 'pending',
+    assetDiscovery: 'pending',
+    download: 'pending',
+    archive: 'pending',
+    manifest: 'pending',
+    report: 'pending',
+  };
+}
+
 export function getExtractionJobsBaseDir() {
   const raw = (process.env.EXTRACTION_JOBS_DIR || '').trim();
   if (raw) return path.resolve(raw);
@@ -95,6 +107,26 @@ export function withExtractionJobLock(fn) {
     console.error('[extractionJobs] lock error', err);
   });
   return run;
+}
+
+function listJobFolderNames(baseDir) {
+  const jobsRoot = path.join(baseDir, 'jobs');
+  try {
+    return fs
+      .readdirSync(jobsRoot, { withFileTypes: true })
+      .filter((item) => item.isDirectory())
+      .map((item) => item.name);
+  } catch {
+    return [];
+  }
+}
+
+function isStaleRunningJob(job, staleAfterMs) {
+  if (job?.status !== 'running') return false;
+  if (job?.completedAt) return false;
+  const heartbeatAt = Date.parse(job?.runner?.heartbeatAt || job?.updatedAt || job?.startedAt || 0);
+  if (!heartbeatAt) return false;
+  return Date.now() - heartbeatAt > staleAfterMs;
 }
 
 export async function createExtractionJob({ baseDir, userId, input, sourceIp }) {
@@ -157,7 +189,13 @@ export async function createExtractionJob({ baseDir, userId, input, sourceIp }) 
         duplicatesSkipped: 0,
         zipBytesSoFar: 0,
         elapsedMs: 0,
+        stageStatuses: initialStageStatuses(),
+        screenshotPagesPlanned: 0,
+        screenshotPagesCaptured: 0,
+        screenshotFailures: 0,
+        crawlTerminationReason: null,
       },
+      runner: null,
       artifacts: [],
       billing: {
         promoUnlocked: Boolean(input.derived?.promoValid || input.derived?.privilegedAnalyze),
@@ -204,6 +242,57 @@ export async function updateExtractionJob(baseDir, jobId, mutate) {
     next.updatedAt = new Date().toISOString();
     writeJson(getJobJsonPath(baseDir, jobId), next);
     return next;
+  });
+}
+
+export async function claimNextExtractionJob(
+  baseDir,
+  { runnerId = 'runner', staleAfterMs = 10 * 60 * 1000 } = {}
+) {
+  return withExtractionJobLock(async () => {
+    const now = new Date().toISOString();
+    const jobs = listJobFolderNames(baseDir)
+      .map((jobId) => ({ jobId, filePath: getJobJsonPath(baseDir, jobId), job: readJson(getJobJsonPath(baseDir, jobId), null) }))
+      .filter((entry) => entry.job)
+      .sort((a, b) => Date.parse(a.job?.createdAt || 0) - Date.parse(b.job?.createdAt || 0));
+    const nextEntry =
+      jobs.find((entry) => entry.job?.status === 'queued') ||
+      jobs.find((entry) => isStaleRunningJob(entry.job, staleAfterMs));
+    if (!nextEntry) return null;
+    {
+      const { filePath, job } = nextEntry;
+      job.status = 'running';
+      job.startedAt = job.startedAt || now;
+      job.updatedAt = now;
+      job.runner = {
+        id: String(runnerId || 'runner').trim() || 'runner',
+        claimedAt: now,
+        heartbeatAt: now,
+        staleAfterMs,
+      };
+      job.progress = {
+        ...(job.progress || {}),
+        phase: 'starting',
+        label: 'Preparing extraction job',
+        stageStatuses: {
+          ...initialStageStatuses(),
+          ...(job.progress?.stageStatuses || {}),
+        },
+      };
+      writeJson(filePath, job);
+      return structuredClone(job);
+    }
+  });
+}
+
+export async function heartbeatExtractionJob(baseDir, jobId, runnerId = 'runner') {
+  return updateExtractionJob(baseDir, jobId, (job) => {
+    job.runner = {
+      ...(job.runner || {}),
+      id: String(job.runner?.id || runnerId || 'runner').trim() || 'runner',
+      heartbeatAt: new Date().toISOString(),
+    };
+    return job;
   });
 }
 

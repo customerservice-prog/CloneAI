@@ -8,6 +8,7 @@ import {
   powerCrawlPageCap,
   crawlPageCapForRequest,
 } from '../crawlLimits.js';
+import { scraperMetaAllowsArchive, snapshotAllowsReplay } from '../analysisArchive.js';
 import { PLANS } from '../billingService.js';
 import { estimateOpenAiUsd } from '../aiCostEstimate.js';
 
@@ -69,4 +70,24 @@ test('estimateOpenAiUsd is non-negative', () => {
   const v = estimateOpenAiUsd('gpt-4o', 1000, 500);
   assert.ok(v >= 0);
   assert.ok(Number.isFinite(v));
+});
+
+test('archive replay skips degraded scraper runs', () => {
+  assert.equal(scraperMetaAllowsArchive({ ok: true, hint: 'ok', blocked: false }), true);
+  assert.equal(scraperMetaAllowsArchive({ ok: false, hint: 'network_or_tls', blocked: false }), false);
+  assert.equal(scraperMetaAllowsArchive({ ok: true, hint: 'body_too_small', blocked: false }), false);
+  assert.equal(
+    snapshotAllowsReplay({
+      fullText: 'x'.repeat(120),
+      scraperMeta: { ok: true, hint: 'ok', blocked: false },
+    }),
+    true
+  );
+  assert.equal(
+    snapshotAllowsReplay({
+      fullText: 'x'.repeat(120),
+      scraperMeta: { ok: false, hint: 'network_or_tls', blocked: false },
+    }),
+    false
+  );
 });

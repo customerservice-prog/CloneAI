@@ -15,6 +15,12 @@ import {
   verifyTurnstileIfConfigured,
   noteSuccessfulAnalyzeForCaptcha,
 } from './turnstileGate.js';
+import {
+  DEFAULT_DEV_ORIGINS,
+  isLocalDevBrowserOrigin,
+  parseCorsOrigins,
+  shouldAllowBrowserOrigin,
+} from './originPolicy.js';
 import { optimizeImageForModel } from './imageOptimize.js';
 import { assertUrlSafeForServerFetch, isUnsafeIpLiteral } from './ssrf.js';
 import {
@@ -68,7 +74,9 @@ import {
   buildArchiveLookupContext,
   loadLatestSnapshot,
   isSnapshotFresh,
+  scraperMetaAllowsArchive,
   saveAnalysisSnapshot,
+  snapshotAllowsReplay,
   replayAnalysisFromArchive,
 } from './analysisArchive.js';
 import { processSiteAssetZipBuffer } from './processAssetZip.js';
@@ -80,6 +88,8 @@ import {
 import {
   getExtractionJobsBaseDir,
   createExtractionJob,
+  claimNextExtractionJob,
+  heartbeatExtractionJob,
   loadExtractionJob,
   loadExtractionJobInput,
   updateExtractionJob,
@@ -221,64 +231,7 @@ const basePort = hasExplicitPort ? Number(envPortRaw) : 3001;
 let listenPort = basePort;
 const LISTEN_PORT_TRIES = 50;
 
-const DEFAULT_DEV_ORIGINS = [
-  'http://localhost:5173',
-  'http://127.0.0.1:5173',
-  'http://[::1]:5173',
-  'http://localhost:4173',
-  'http://127.0.0.1:4173',
-  'http://[::1]:4173',
-];
-
-function isLocalDevBrowserOrigin(origin) {
-  try {
-    const u = new URL(origin);
-    return (
-      u.protocol === 'http:' &&
-      (u.hostname === 'localhost' ||
-        u.hostname === '127.0.0.1' ||
-        u.hostname === '::1')
-    );
-  } catch {
-    return false;
-  }
-}
-
-function isServedFromSameOrigin(req, origin) {
-  try {
-    const incoming = new URL(String(origin || '').trim());
-    const forwardedProto = String(req.get('x-forwarded-proto') || '').trim().split(',')[0];
-    const proto = (forwardedProto || req.protocol || incoming.protocol.replace(':', '') || 'http').replace(/:$/, '');
-    const host = String(req.get('x-forwarded-host') || req.get('host') || '').trim().split(',')[0];
-    if (!host) return false;
-    return incoming.host === host && incoming.protocol === `${proto}:`;
-  } catch {
-    return false;
-  }
-}
-
-/** No wildcard: list explicit frontend origins. */
-function parseCorsOrigins() {
-  const raw = process.env.CORS_ORIGINS?.trim();
-  if (!raw) {
-    if (isProd) return [];
-    return DEFAULT_DEV_ORIGINS;
-  }
-  const list = raw
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean)
-    .filter((o) => {
-      if (o === '*') {
-        console.warn('CORS_ORIGINS must not use *. Remove * and list exact frontend URLs.');
-        return false;
-      }
-      return true;
-    });
-  return list;
-}
-
-const corsOrigins = parseCorsOrigins();
+const corsOrigins = parseCorsOrigins(process.env.CORS_ORIGINS, { isProd });
 
 app.use(
   cors({
@@ -431,20 +384,22 @@ function requireIngressKey(req, res, next) {
 
 /** In production, POST /api/analyze must include an Origin that matches CORS_ORIGINS (stops simple scripted abuse with spoofed cost). */
 function requireProductionBrowserOrigin(req, res, next) {
-  if (!isProd) return next();
-  if (process.env.RELAX_ANALYZE_ORIGIN_CHECK === 'true') return next();
   const origin = req.get('origin');
-  if (serveSpa && origin && isServedFromSameOrigin(req, origin)) return next();
+  const allowed = shouldAllowBrowserOrigin({
+    isProd,
+    relaxOriginCheck: process.env.RELAX_ANALYZE_ORIGIN_CHECK === 'true',
+    serveSpa,
+    origin,
+    corsOrigins,
+    reqLike: req,
+  });
+  if (allowed) return next();
   if (!corsOrigins.length) {
     res.status(403).json({ error: 'Forbidden.' });
     return;
   }
-  if (!origin || !corsOrigins.includes(origin)) {
-    logEvent('warn', 'analyze_blocked_origin', { ip: clientIp(req), origin: origin || null });
-    res.status(403).json({ error: 'Forbidden.' });
-    return;
-  }
-  next();
+  logEvent('warn', 'analyze_blocked_origin', { ip: clientIp(req), origin: origin || null });
+  res.status(403).json({ error: 'Forbidden.' });
 }
 
 const HTML_FETCH_TIMEOUT_MS = Math.min(
@@ -874,9 +829,63 @@ const jitter = (a, b) => sleep(a + Math.floor(Math.random() * (b - a + 1)));
 
 const activeExtractionJobIds = new Set();
 let extractionJobPumpScheduled = false;
+const EXTRACTION_JOB_STALE_MS = Math.min(
+  24 * 60 * 60 * 1000,
+  Math.max(60 * 1000, Number(process.env.EXTRACTION_JOB_STALE_MS) || 15 * 60 * 1000)
+);
+const EXTRACTION_JOB_HEARTBEAT_MS = Math.min(
+  10 * 60 * 1000,
+  Math.max(5000, Number(process.env.EXTRACTION_JOB_HEARTBEAT_MS) || 15000)
+);
+
+function createInitialStageStatuses() {
+  return {
+    crawl: 'pending',
+    screenshots: 'pending',
+    assetDiscovery: 'pending',
+    download: 'pending',
+    archive: 'pending',
+    manifest: 'pending',
+    report: 'pending',
+  };
+}
 
 function isTerminalExtractionJobStatus(status) {
   return status === 'completed' || status === 'failed' || status === 'cancelled';
+}
+
+function ensureJobStageStatuses(job) {
+  if (!job.progress || typeof job.progress !== 'object') job.progress = {};
+  job.progress.stageStatuses = {
+    ...createInitialStageStatuses(),
+    ...(job.progress.stageStatuses || {}),
+  };
+}
+
+function applyJobStageStatuses(job, updates) {
+  ensureJobStageStatuses(job);
+  for (const [key, value] of Object.entries(updates || {})) {
+    if (!value) continue;
+    job.progress.stageStatuses[key] = value;
+  }
+}
+
+function extractionRunExpectsArtifacts(summary) {
+  return Boolean(String(summary?.url || '').trim());
+}
+
+function durableAssetsSatisfyExtraction(summary, assets) {
+  if (!extractionRunExpectsArtifacts(summary)) return true;
+  if (!assets || typeof assets !== 'object') return false;
+  const archiveStatus = String(assets.archiveStatus || assets.archive_status || '').trim().toLowerCase();
+  const manifestStatus = String(assets.manifestStatus || assets.manifest_status || '').trim().toLowerCase();
+  const downloadStatus = String(assets.downloadStatus || assets.download_status || '').trim().toLowerCase();
+  const hasArchiveLink = Boolean(assets.artifactUrl || assets.zipUrl || assets.zip_url);
+  if (!hasArchiveLink) return false;
+  if (!['completed', 'locked'].includes(archiveStatus)) return false;
+  if (manifestStatus !== 'completed') return false;
+  if (downloadStatus === 'failed') return false;
+  return true;
 }
 
 function extractionJobArtifactUrl(jobId, artifactName) {
@@ -940,6 +949,7 @@ function buildDurableAssetsPayload({
   const archiveFileCount = Number(latestAssets?.count) || 0;
   const manifestCount = ['manifest', 'images', 'pages'].filter((key) => Boolean(manifests[key])).length;
   const archiveLocked = Boolean(latestAssets?.archiveLocked);
+  const screenshotStatus = String(latestAssets?.screenshotStatus || latestAssets?.screenshot_status || '').trim();
   const downloadStatus = deriveExtractionStageStatus({
     discoveredCount,
     archivedCount,
@@ -994,6 +1004,9 @@ function buildDurableAssetsPayload({
     download_status: downloadStatus,
     archiveStatus,
     archive_status: archiveStatus,
+    screenshotStatus: screenshotStatus || (Number(latestAssets?.snapshotCount) > 0 ? 'completed' : 'skipped'),
+    screenshot_status:
+      screenshotStatus || (Number(latestAssets?.snapshotCount) > 0 ? 'completed' : 'skipped'),
     manifestStatus,
     manifest_status: manifestStatus,
     reportStatus: 'completed',
@@ -1182,10 +1195,14 @@ function createMockExtractionJobResponse(jobId, onEvent, onErrorResponse) {
 function updateExtractionJobSummaryFromEvent(job, event) {
   if (!job || !event || typeof event !== 'object') return job;
   if (!job.progress || typeof job.progress !== 'object') job.progress = {};
+  ensureJobStageStatuses(job);
   if (event.type === 'stage') {
     job.progress.phase = event.phase || job.progress.phase || 'running';
     job.progress.label = event.label || job.progress.label || 'Running';
     if (typeof event.index === 'number') job.progress.stageIndex = event.index;
+    if (typeof event.label === 'string' && /report writer/i.test(event.label || '')) {
+      applyJobStageStatuses(job, { report: event.phase === 'done' ? 'completed' : event.phase === 'error' ? 'failed' : 'running' });
+    }
   }
   if (event.type === 'harvest_progress') {
     job.progress.phase = event.phase || job.progress.phase || 'crawl';
@@ -1199,15 +1216,54 @@ function updateExtractionJobSummaryFromEvent(job, event) {
     job.progress.duplicatesSkipped = Number(event.duplicatesSkipped) || job.progress.duplicatesSkipped || 0;
     job.progress.zipBytesSoFar = Number(event.zipBytesSoFar) || job.progress.zipBytesSoFar || 0;
     job.progress.elapsedMs = Number(event.elapsedMs) || job.progress.elapsedMs || 0;
+    if (event.crawlTerminationReason) job.progress.crawlTerminationReason = String(event.crawlTerminationReason);
+    if (typeof event.screenshotPagesPlanned === 'number') {
+      job.progress.screenshotPagesPlanned = Number(event.screenshotPagesPlanned) || 0;
+    }
+    if (typeof event.screenshotPagesCaptured === 'number') {
+      job.progress.screenshotPagesCaptured = Number(event.screenshotPagesCaptured) || 0;
+    }
+    if (typeof event.screenshotFailures === 'number') {
+      job.progress.screenshotFailures = Number(event.screenshotFailures) || 0;
+    }
+    if (event.phase === 'crawl') applyJobStageStatuses(job, { crawl: 'running' });
+    if (event.phase === 'discover_images') {
+      applyJobStageStatuses(job, { crawl: 'completed', assetDiscovery: 'running' });
+    }
+    if (event.phase === 'capture_screenshots') {
+      const screenshotStatus =
+        Number(event.screenshotPagesPlanned) === 0 &&
+        Number(event.screenshotPagesCaptured) === 0 &&
+        /skip/i.test(String(event.phaseLabel || ''))
+          ? 'skipped'
+          : 'running';
+      applyJobStageStatuses(job, { screenshots: screenshotStatus });
+    }
+    if (event.phase === 'download_images') {
+      applyJobStageStatuses(job, { assetDiscovery: 'completed', download: 'running' });
+    }
+    if (event.phase === 'package' || event.phase === 'write_manifests') {
+      applyJobStageStatuses(job, { download: 'completed', archive: 'running', manifest: 'running' });
+    }
   }
   if (event.type === 'meta') {
     if (event.scraper && typeof event.scraper === 'object') {
       job.scraper = event.scraper;
       job.progress.duplicatesSkipped =
         Number(event.scraper.harvestContentDuplicatesSkipped) || job.progress.duplicatesSkipped || 0;
+      if (event.scraper.crawlStopReason) job.progress.crawlTerminationReason = String(event.scraper.crawlStopReason);
     }
     if (event.assets && typeof event.assets === 'object') {
       job.assets = event.assets;
+      applyJobStageStatuses(job, {
+        crawl: event.assets.crawlStatus || event.assets.crawl_status || undefined,
+        screenshots: event.assets.screenshotStatus || event.assets.screenshot_status || undefined,
+        assetDiscovery: event.assets.extractionStatus || event.assets.extraction_status || undefined,
+        download: event.assets.downloadStatus || event.assets.download_status || undefined,
+        archive: event.assets.archiveStatus || event.assets.archive_status || undefined,
+        manifest: event.assets.manifestStatus || event.assets.manifest_status || undefined,
+        report: event.assets.reportStatus || event.assets.report_status || undefined,
+      });
     }
     if (event.billing && typeof event.billing === 'object') {
       job.billing = {
@@ -1222,6 +1278,11 @@ function updateExtractionJobSummaryFromEvent(job, event) {
       message: String(event.message || 'Extraction failed.'),
       at: new Date().toISOString(),
     };
+    applyJobStageStatuses(job, {
+      archive: job.progress.stageStatuses.archive === 'completed' ? 'completed' : 'failed',
+      manifest: job.progress.stageStatuses.manifest === 'completed' ? 'completed' : 'failed',
+      report: job.progress.stageStatuses.report === 'completed' ? 'completed' : 'failed',
+    });
   }
   return job;
 }
@@ -1238,6 +1299,7 @@ async function finalizeExtractionJob(jobId, finalState) {
     job.completedAt = new Date().toISOString();
     if (finalState.scraper) job.scraper = finalState.scraper;
     if (finalState.assets) job.assets = finalState.assets;
+    ensureJobStageStatuses(job);
     if (finalState.error) {
       job.error = {
         message: finalState.error,
@@ -1248,6 +1310,7 @@ async function finalizeExtractionJob(jobId, finalState) {
         phase: 'failed',
         label: 'Failed',
       };
+      if (job.progress.stageStatuses.report !== 'completed') job.progress.stageStatuses.report = 'failed';
     } else {
       job.progress = {
         ...(job.progress || {}),
@@ -1255,14 +1318,26 @@ async function finalizeExtractionJob(jobId, finalState) {
         label: 'Completed',
       };
       job.error = null;
+      job.progress.stageStatuses = {
+        ...job.progress.stageStatuses,
+        crawl: job.progress.stageStatuses.crawl === 'pending' ? 'completed' : job.progress.stageStatuses.crawl,
+        archive: job.progress.stageStatuses.archive === 'pending' ? 'completed' : job.progress.stageStatuses.archive,
+        manifest: job.progress.stageStatuses.manifest === 'pending' ? 'completed' : job.progress.stageStatuses.manifest,
+        report: 'completed',
+      };
     }
+    job.runner = {
+      ...(job.runner || {}),
+      heartbeatAt: new Date().toISOString(),
+      completedAt: new Date().toISOString(),
+    };
     return job;
   });
 }
 
 async function runExtractionJob(jobId) {
   const current = loadExtractionJob(extractionJobsBaseDir, jobId);
-  if (!current || current.status !== 'queued') return;
+  if (!current || current.status !== 'running') return;
   const input = loadExtractionJobInput(extractionJobsBaseDir, jobId);
   if (!input) {
     await finalizeExtractionJob(jobId, {
@@ -1272,13 +1347,21 @@ async function runExtractionJob(jobId) {
     return;
   }
 
+  const heartbeat = setInterval(() => {
+    void heartbeatExtractionJob(extractionJobsBaseDir, jobId, current.runner?.id || `pid-${process.pid}`);
+  }, EXTRACTION_JOB_HEARTBEAT_MS);
+  heartbeat.unref?.();
+
   await updateExtractionJob(extractionJobsBaseDir, jobId, (job) => {
-    job.status = 'running';
-    job.startedAt = new Date().toISOString();
+    job.startedAt = job.startedAt || new Date().toISOString();
     job.progress = {
       ...(job.progress || {}),
       phase: 'starting',
       label: 'Preparing extraction job',
+      stageStatuses: {
+        ...createInitialStageStatuses(),
+        ...(job.progress?.stageStatuses || {}),
+      },
     };
     return job;
   });
@@ -1287,6 +1370,7 @@ async function runExtractionJob(jobId) {
   let latestScraper = null;
   let latestAssets = null;
   let finalError = null;
+  let artifactError = null;
   let sawDone = false;
 
   const req = buildJobRequestFromInput(input);
@@ -1424,17 +1508,26 @@ async function runExtractionJob(jobId) {
       });
     }
   } catch (artifactErr) {
+    artifactError = String(artifactErr?.message || artifactErr || 'Artifact persistence failed.');
     logEvent('warn', 'job_artifact_save_failed', {
       jobId,
-      detail: String(artifactErr?.message || artifactErr),
+      detail: artifactError,
     });
   }
 
+  clearInterval(heartbeat);
+  if (artifactError && !finalError) finalError = artifactError;
+  const extractionSatisfied = durableAssetsSatisfyExtraction(current.summary, durableAssets);
+  if (!extractionSatisfied && !finalError) {
+    finalError = extractionRunExpectsArtifacts(current.summary)
+      ? 'Extraction finished without durable archive/manifests.'
+      : 'Extraction did not complete cleanly.';
+  }
   await finalizeExtractionJob(jobId, {
-    status: !finalError && sawDone ? 'completed' : 'failed',
+    status: !finalError && sawDone && extractionSatisfied ? 'completed' : 'failed',
     scraper: latestScraper,
     assets: durableAssets,
-    error: !finalError && sawDone ? null : finalError || 'Extraction did not complete cleanly.',
+    error: !finalError && sawDone && extractionSatisfied ? null : finalError || 'Extraction did not complete cleanly.',
   });
 }
 
@@ -1445,12 +1538,10 @@ function scheduleExtractionJobPump() {
     extractionJobPumpScheduled = false;
     try {
       while (activeExtractionJobIds.size < EXTRACTION_JOB_RUNNER_CONCURRENCY) {
-        const nextJob = listExtractionJobs(extractionJobsBaseDir, {
-          limit: 50,
-          statuses: ['queued'],
-        })
-          .sort((a, b) => Date.parse(a.createdAt || 0) - Date.parse(b.createdAt || 0))
-          .find((job) => !activeExtractionJobIds.has(job.id));
+        const nextJob = await claimNextExtractionJob(extractionJobsBaseDir, {
+          runnerId: `pid-${process.pid}`,
+          staleAfterMs: EXTRACTION_JOB_STALE_MS,
+        });
         if (!nextJob) break;
         activeExtractionJobIds.add(nextJob.id);
         void runExtractionJob(nextJob.id)
@@ -2110,6 +2201,23 @@ function ssePublicError() {
   return 'We could not complete this analysis. Please try again.';
 }
 
+function fetchFailurePublicMessage(scraperMeta) {
+  const hint = String(scraperMeta?.hint || '').trim().toLowerCase();
+  if (hint === 'challenge_or_waf') {
+    return 'This site appears to block automated access. Try screenshots or another URL.';
+  }
+  if (hint === 'http_error') {
+    return `The URL returned HTTP ${scraperMeta?.statusCode ?? 'error'}. Try another page or use screenshots.`;
+  }
+  if (hint === 'fetch_timeout') {
+    return 'Fetching that URL timed out. Try again, use a lighter page, or upload screenshots.';
+  }
+  if (hint === 'redirect_blocked') {
+    return 'That URL redirected in a way we block for security. Try the final URL directly.';
+  }
+  return 'The server could not reach that URL (network, DNS, or TLS). Check the address and try again.';
+}
+
 const MAX_REVISE_PRIOR_CHARS = Math.min(
   900_000,
   Math.max(80_000, Number(process.env.MAX_REVISE_PRIOR_CHARS) || 480_000)
@@ -2572,10 +2680,15 @@ async function runAnalyzePipeline(req, res) {
 
   try {
     const archiveCtx = buildArchiveLookupContext(req, { openaiModel: OPENAI_MODEL });
+    const requiresFreshDurableArtifacts =
+      Boolean(req._assetHarvestMode) ||
+      req._clientDelivery ||
+      ['images', 'screenshots'].includes(String(req._scanMode || '').trim().toLowerCase());
     if (
       archiveCtx.eligible &&
       analysisReuseEnabled() &&
-      analysisFastReplayEnabled()
+      analysisFastReplayEnabled() &&
+      !requiresFreshDurableArtifacts
     ) {
       const snap = loadLatestSnapshot(
         getAnalysisBaseDir(),
@@ -2585,8 +2698,7 @@ async function runAnalyzePipeline(req, res) {
       if (
         snap &&
         isSnapshotFresh(snap, analysisCacheMaxAgeMs()) &&
-        typeof snap.fullText === 'string' &&
-        snap.fullText.length > 80
+        snapshotAllowsReplay(snap)
       ) {
         const billingMetaThin =
           isBillingEnabled() && req._billingPlan
@@ -2649,6 +2761,21 @@ async function runAnalyzePipeline(req, res) {
       scraperMeta.ok &&
       !scraperMeta.blocked &&
       !harvestBlockedHints.has(scraperMeta.hint || '');
+    const hasUploadedFiles = Array.isArray(req.files) && req.files.length > 0;
+    const fatalUrlOnlyFetchFailure =
+      Boolean(url) &&
+      !hasUploadedFiles &&
+      rawHtml.length < 200 &&
+      (!scraperMeta.ok || scraperMeta.blocked || harvestBlockedHints.has(scraperMeta.hint || ''));
+
+    if (fatalUrlOnlyFetchFailure) {
+      send({ type: 'meta', scraper: scraperMeta });
+      send({ type: 'stage', index: 0, phase: 'error', label: 'Multi-page crawl & assets' });
+      send({ type: 'error', message: fetchFailurePublicMessage(scraperMeta) });
+      await abortBillingIfNeeded(req);
+      res.end();
+      return;
+    }
 
     const assetHarvestMode = Boolean(req._assetHarvestMode);
     scraperMeta.assetHarvestMode = assetHarvestMode;
@@ -2793,8 +2920,11 @@ async function runAnalyzePipeline(req, res) {
 
     const screenshotSweep = req._scanMode === 'screenshots';
 
+    const imageExtractMode = req._scanMode === 'images';
+
     const canInteraction =
       !screenshotSweep &&
+      !imageExtractMode &&
       Boolean(url) &&
       crawledPages.length > 0 &&
       !harvestBlockedHints.has(scraperMeta.hint || '') &&
@@ -2922,6 +3052,7 @@ async function runAnalyzePipeline(req, res) {
       discoveredUrlCount: 0,
       cssSheetsProcessed: 0,
       crawlStatus: 'pending',
+      screenshotStatus: 'pending',
       extractionStatus: 'pending',
       downloadStatus: 'pending',
       archiveStatus: 'pending',
@@ -2940,12 +3071,34 @@ async function runAnalyzePipeline(req, res) {
 
     if (canHarvest) {
       try {
-        const shotUrls = crawledPages.map((p) => p.url);
-        scraperMeta.snapshotAttemptCount = shotUrls.length;
-        const shots = await screenshotUrls(shotUrls, {
-          concurrency: Math.min(CRAWL_SCREENSHOT_CONCURRENCY, shotUrls.length),
-          timeoutMs: SCREENSHOT_TIMEOUT_MS,
+        const shouldCapturePageScreenshots = screenshotSweep || !imageExtractMode;
+        const shotUrls = shouldCapturePageScreenshots ? crawledPages.map((p) => p.url) : [];
+        let shotFailureCount = 0;
+        scraperMeta.snapshotAttemptCount = shotUrls.length + interactionSnapshots.length;
+        assetsPayload.screenshotStatus = shouldCapturePageScreenshots ? 'running' : 'skipped';
+        pushHarvestProgress({
+          phase: 'capture_screenshots',
+          phaseLabel: shouldCapturePageScreenshots
+            ? 'Capturing page screenshots'
+            : 'Skipping bulk screenshots for image-first extraction',
+          pagesCrawled: crawledPages.length,
+          queueLength: crawlQueueRemaining,
+          pagesDiscovered: crawledPages.length + crawlQueueRemaining,
+          imagesFound: assetsPayload.discoveredUrlCount || 0,
+          screenshotPagesPlanned: scraperMeta.snapshotAttemptCount,
+          screenshotPagesCaptured: 0,
+          screenshotFailures: 0,
+          crawlTerminationReason: crawlStopReason,
+          elapsedMs: Date.now() - (req._analyzeStartedAt || Date.now()),
         });
+        flushHarvestProgress();
+        const shots =
+          shouldCapturePageScreenshots && shotUrls.length > 0
+            ? await screenshotUrls(shotUrls, {
+                concurrency: Math.min(CRAWL_SCREENSHOT_CONCURRENCY, shotUrls.length),
+                timeoutMs: SCREENSHOT_TIMEOUT_MS,
+              })
+            : [];
         let snapIndex = 0;
         for (const sh of shots) {
           if (sh.buffer?.length) {
@@ -2957,6 +3110,7 @@ async function runAnalyzePipeline(req, res) {
             snapIndex += 1;
           }
         }
+        shotFailureCount = shots.filter((s) => !s.buffer).length;
         for (const s of interactionSnapshots) {
           if (s.buffer?.length) {
             snapshotEntries.push({
@@ -2967,10 +3121,28 @@ async function runAnalyzePipeline(req, res) {
           }
         }
         scraperMeta.snapshotCount = snapshotEntries.length;
-        scraperMeta.snapshotFailed = shots.filter((s) => !s.buffer).length;
+        scraperMeta.snapshotFailed = shotFailureCount;
+        assetsPayload.screenshotStatus = shouldCapturePageScreenshots ? 'completed' : 'skipped';
+        pushHarvestProgress({
+          phase: 'capture_screenshots',
+          phaseLabel: shouldCapturePageScreenshots
+            ? 'Captured page screenshots'
+            : 'Bulk screenshots skipped for image-first extraction',
+          pagesCrawled: crawledPages.length,
+          queueLength: crawlQueueRemaining,
+          pagesDiscovered: crawledPages.length + crawlQueueRemaining,
+          imagesFound: assetsPayload.discoveredUrlCount || 0,
+          screenshotPagesPlanned: scraperMeta.snapshotAttemptCount,
+          screenshotPagesCaptured: snapshotEntries.length,
+          screenshotFailures: shotFailureCount,
+          crawlTerminationReason: crawlStopReason,
+          elapsedMs: Date.now() - (req._analyzeStartedAt || Date.now()),
+        });
+        flushHarvestProgress();
       } catch (e) {
         logEvent('warn', 'screenshot_batch_failed', { detail: String(e?.message || e) });
         scraperMeta.snapshotError = String(e?.message || e).slice(0, 200);
+        assetsPayload.screenshotStatus = 'failed';
       }
 
       try {
@@ -3257,6 +3429,13 @@ async function runAnalyzePipeline(req, res) {
           assetsPayload.manifest_count = 3;
           assetsPayload.crawlStatus = 'completed';
           assetsPayload.crawl_status = 'completed';
+          assetsPayload.screenshotStatus =
+            assetsPayload.screenshotStatus === 'failed'
+              ? 'failed'
+              : assetsPayload.snapshotCount > 0
+                ? 'completed'
+                : assetsPayload.screenshotStatus || 'skipped';
+          assetsPayload.screenshot_status = assetsPayload.screenshotStatus;
           assetsPayload.downloadStatus = deriveExtractionStageStatus({
             discoveredCount: allImageUrls.length,
             archivedCount: fetched.entries.length,
@@ -3614,7 +3793,7 @@ async function runAnalyzePipeline(req, res) {
     }
 
     const archSave = buildArchiveLookupContext(req, { openaiModel: OPENAI_MODEL });
-    if (archSave.eligible && streamedReportText.length > 80) {
+    if (archSave.eligible && streamedReportText.length > 80 && scraperMetaAllowsArchive(scraperMeta)) {
       let metaJson;
       let assetsJson;
       try {

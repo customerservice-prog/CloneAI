@@ -183,8 +183,11 @@ body {
 .header-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 0.75rem;
   flex-shrink: 0;
+  min-width: 0;
 }
 
 .owner-unlock-pill {
@@ -199,6 +202,7 @@ body {
   max-width: min(340px, 42vw);
   overflow: hidden;
   text-overflow: ellipsis;
+  min-width: 0;
 }
 
 .header-usage {
@@ -208,6 +212,7 @@ body {
   max-width: 280px;
   text-align: right;
   line-height: 1.4;
+  min-width: 0;
 }
 
 .header-usage strong {
@@ -2557,18 +2562,19 @@ button.metric-card-interactive:focus-visible {
   }
 
   .header-actions {
-    flex-direction: column;
-    align-items: flex-end;
-    gap: 0.35rem;
+    width: 100%;
+    justify-content: flex-start;
+    gap: 0.35rem 0.5rem;
   }
 
   .header-usage {
     max-width: 100%;
-    text-align: right;
+    font-size: 0.72rem;
+    text-align: left;
   }
 
   .app-header {
-    padding: 1rem 1rem;
+    padding: 0.85rem 1rem;
   }
 
   .main {
@@ -2602,8 +2608,24 @@ button.metric-card-interactive:focus-visible {
   }
 
   .header-inner {
-    flex-direction: column;
+    flex-wrap: wrap;
     align-items: flex-start;
+    gap: 0.65rem;
+  }
+
+  .owner-unlock-pill {
+    display: none;
+  }
+
+  .header-usage-wrap {
+    max-width: 100%;
+    align-items: flex-start;
+  }
+
+  .btn-header-login,
+  .btn-header-upgrade {
+    padding: 0.4rem 0.8rem;
+    font-size: 0.76rem;
   }
 }
 

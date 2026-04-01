@@ -18,9 +18,12 @@
     "launch-check:prod": "node scripts/launch-check.mjs --production",
     "stripe-webhook:create": "node scripts/create-stripe-webhook.mjs",
     "image-pipeline": "node scripts/image-pipeline-from-zip.mjs",
-    "test": "node --test-concurrency=1 test/billing.test.mjs && node --test-concurrency=1 test/billing-scale-pro.test.mjs && node --test-concurrency=1 test/security.test.mjs && node --test-concurrency=1 test/costControls.test.mjs && node --test-concurrency=1 test/promoCode.test.mjs && node --test-concurrency=1 test/imageHarvest.test.mjs && node --test-concurrency=1 test/harvestZipScale.test.mjs && node --test-concurrency=1 test/imageIntelPipeline.test.mjs && node --test-concurrency=1 test/processAssetZip.test.mjs && node --test-concurrency=1 test/rootRedirect.test.mjs",
+    "test": "node --test-concurrency=1 test/billing.test.mjs && node --test-concurrency=1 test/billing-scale-pro.test.mjs && node --test-concurrency=1 test/security.test.mjs && node --test-concurrency=1 test/costControls.test.mjs && node --test-concurrency=1 test/promoCode.test.mjs && node --test-concurrency=1 test/imageHarvest.test.mjs && node --test-concurrency=1 test/harvestZipScale.test.mjs && node --test-concurrency=1 test/imageIntelPipeline.test.mjs && node --test-concurrency=1 test/processAssetZip.test.mjs && node --test-concurrency=1 test/rootRedirect.test.mjs && node --test-concurrency=1 test/extractionJobs.test.mjs && node --test-concurrency=1 test/originPolicy.test.mjs",
     "verify-live": "node scripts/verify-live.mjs",
-    "verify-harvest-1k": "node scripts/verify-harvest-1k.mjs"
+    "verify-harvest-1k": "node scripts/verify-harvest-1k.mjs",
+    "verify-browser": "node scripts/verify-browser-extraction.mjs",
+    "verify-extraction-job": "node scripts/live-extraction-verify.mjs",
+    "launch-proof": "node scripts/launch-proof.mjs"
   },
   "dependencies": {
     "adm-zip": "^0.5.16",

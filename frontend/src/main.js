@@ -11,14 +11,20 @@ function readMetaApiOrigin() {
   }
 }
 
+function localBrowserOrigin(origin) {
+  return /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/i.test(String(origin || '').trim());
+}
+
 const API_BASE = (() => {
   try {
     const winO =
       typeof window !== 'undefined' ? String(window.__CLONEAI_API_BASE__ || '').trim().replace(/\/$/, '') : '';
     const meta = readMetaApiOrigin();
-    let raw = winO || envBase || meta;
-    if (!raw && isProd && sameOriginApi && typeof window !== 'undefined') {
-      raw = window.location.origin.replace(/\/$/, '');
+    const pageOrigin =
+      typeof window !== 'undefined' ? window.location.origin.replace(/\/$/, '') : '';
+    let raw = winO || meta || envBase;
+    if (isProd && sameOriginApi && pageOrigin && (localBrowserOrigin(pageOrigin) || !raw)) {
+      raw = pageOrigin;
     }
     if (isProd && !raw) return '';
     if (!raw && !isProd) return '';
@@ -504,6 +510,22 @@ async function refreshOpenAiServerNotice() {
   }
 }
 
+function isCompactHeaderViewport() {
+  return typeof window !== 'undefined' && window.matchMedia('(max-width: 640px)').matches;
+}
+
+function compactHeaderSuffix(parts) {
+  return parts
+    .map((part) => {
+      if (part === 'lifetime') return 'life';
+      if (part === 'this month') return 'month';
+      if (part === 'authorized code') return 'code';
+      if (part === 'allow storage for accurate count') return 'enable storage';
+      return part;
+    })
+    .join(' · ');
+}
+
 async function refreshBillingStatus() {
   const usageWrap = $('#header-usage-wrap');
   const usageEl = $('#header-usage');
@@ -623,11 +645,16 @@ async function refreshBillingStatus() {
               : data.plan;
     const used = Number(data.used) || 0;
     const lim = Number(data.limit) || 1;
-    let suffix = data.plan === 'free' ? 'lifetime' : 'this month';
-    if (data.bonusRuns > 0) suffix += ` · +${data.bonusRuns} bonus`;
-    if (data.promoUnlocked) suffix += ' · authorized code';
-    if (data.clientIdUnset) suffix += ' · allow storage for accurate count';
-    usageEl.innerHTML = `<strong>${used} / ${lim}</strong> runs used · ${escapeHtml(planLabel)} <span style="opacity:.85">(${suffix})</span>`;
+    const suffixParts = [data.plan === 'free' ? 'lifetime' : 'this month'];
+    if (data.bonusRuns > 0) suffixParts.push(`+${data.bonusRuns} bonus`);
+    if (data.promoUnlocked) suffixParts.push('authorized code');
+    if (data.clientIdUnset) suffixParts.push('allow storage for accurate count');
+    const suffix = suffixParts.join(' · ');
+    const compact = isCompactHeaderViewport();
+    const compactSuffix = compactHeaderSuffix(suffixParts);
+    usageEl.innerHTML = compact
+      ? `<strong>${used}/${lim}</strong> · ${escapeHtml(planLabel)} <span style="opacity:.85">· ${escapeHtml(compactSuffix)}</span>`
+      : `<strong>${used} / ${lim}</strong> runs used · ${escapeHtml(planLabel)} <span style="opacity:.85">(${escapeHtml(suffix)})</span>`;
 
     const ratio = lim > 0 ? used / lim : 0;
     if (urgentEl) {
@@ -636,7 +663,7 @@ async function refreshBillingStatus() {
     }
 
     upBtn.textContent = data.plan === 'pro' ? 'Plans' : 'Upgrade';
-    syncOwnerPill(Boolean(data.promoUnlocked), data.promoUnlocked ? 'Owner / quality-first unlocked' : '');
+    syncOwnerPill(Boolean(data.promoUnlocked), data.promoUnlocked ? (compact ? 'Owner unlocked' : 'Owner / quality-first unlocked') : '');
     enforceDepthForPlan();
     updatePlanGatedControls();
     updateExportGatedControls();
@@ -1629,6 +1656,7 @@ function renderExtractionResults(assets) {
   const archiveFileCount = Number(assets?.archiveFileCount ?? assets?.archive_file_count ?? assets?.count) || 0;
   const manifestCount = Number(assets?.manifestCount ?? assets?.manifest_count) || 0;
   const crawlStatus = humanizePipelineStatus(assets?.crawlStatus ?? assets?.crawl_status);
+  const screenshotStatus = humanizePipelineStatus(assets?.screenshotStatus ?? assets?.screenshot_status);
   const downloadStatus = humanizePipelineStatus(assets?.downloadStatus ?? assets?.download_status);
   const archiveStatus = humanizePipelineStatus(assets?.archiveStatus ?? assets?.archive_status);
   const manifestStatus = humanizePipelineStatus(assets?.manifestStatus ?? assets?.manifest_status);
@@ -1655,6 +1683,7 @@ function renderExtractionResults(assets) {
   if (sub) {
     const bits = [];
     bits.push(`Crawl ${crawlStatus}`);
+    bits.push(`Screenshots ${screenshotStatus}`);
     bits.push(`Downloads ${downloadStatus}`);
     bits.push(`Archive ${archiveStatus}`);
     bits.push(`Manifests ${manifestStatus}`);

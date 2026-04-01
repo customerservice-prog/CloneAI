@@ -42,6 +42,15 @@ export function analysisCacheMaxAgeMs() {
   return days * 24 * 60 * 60 * 1000;
 }
 
+const NON_REUSABLE_SCRAPER_HINTS = new Set([
+  'body_too_small',
+  'http_error',
+  'challenge_or_waf',
+  'fetch_timeout',
+  'network_or_tls',
+  'redirect_blocked',
+]);
+
 export function getAnalysisBaseDir() {
   const raw = (process.env.ANALYSIS_ARCHIVE_DIR || '').trim();
   if (raw) return path.resolve(raw);
@@ -77,6 +86,19 @@ export function buildAnalysisFingerprint(input) {
     m: String(input.openaiModel || ''),
   });
   return createHash('sha256').update(payload).digest('hex');
+}
+
+export function scraperMetaAllowsArchive(meta) {
+  if (!meta || typeof meta !== 'object') return false;
+  if (meta.blocked) return false;
+  if (meta.ok !== true) return false;
+  return !NON_REUSABLE_SCRAPER_HINTS.has(String(meta.hint || '').trim().toLowerCase());
+}
+
+export function snapshotAllowsReplay(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') return false;
+  if (typeof snapshot.fullText !== 'string' || snapshot.fullText.length <= 80) return false;
+  return scraperMetaAllowsArchive(snapshot.scraperMeta);
 }
 
 /**

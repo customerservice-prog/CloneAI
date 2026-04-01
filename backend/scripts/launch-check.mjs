@@ -4,6 +4,7 @@
  * Usage (from backend/): node scripts/launch-check.mjs [--production]
  * Or: npm run launch-check --prefix backend
  */
+import fs from 'node:fs';
 import dotenv from 'dotenv';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -42,6 +43,10 @@ if (wantProd) {
     );
     need('CORS_ORIGINS use https:// in production (not http:// except localhost)', !badHttp);
   }
+  need(
+    'RELAX_ANALYZE_ORIGIN_CHECK must stay unset/false in production',
+    String(process.env.RELAX_ANALYZE_ORIGIN_CHECK || '').toLowerCase() !== 'true'
+  );
 }
 
 const billingOn = String(process.env.BILLING_ENABLED || '').toLowerCase() === 'true';
@@ -82,6 +87,11 @@ if (ingress) {
   need('CLONEAI_INGRESS_KEY length (use 16+ chars)', ingress.length >= 16);
 }
 
+const extractionJobsDir = (process.env.EXTRACTION_JOBS_DIR || '').trim();
+if (extractionJobsDir) {
+  need('EXTRACTION_JOBS_DIR parent exists', fs.existsSync(path.dirname(path.resolve(extractionJobsDir))));
+}
+
 if (issues.length) {
   console.error('Launch check failed — set or fix the following in backend/.env (or host env):\n');
   for (const i of issues) console.error(`  - ${i}`);
@@ -98,6 +108,11 @@ if (relaxBillingLocal && billingOn) {
 }
 if (wantProd) {
   console.log('(production rules: CORS + billing bundle verified)');
+  if (!extractionJobsDir) {
+    console.warn(
+      '[recommended] EXTRACTION_JOBS_DIR unset — extraction jobs will default to backend/data/extraction-jobs. Use persistent disk storage on deploy.'
+    );
+  }
   const staticApp = (process.env.STATIC_APP_URL || process.env.WEB_APP_PUBLIC_URL || '').trim();
   const apexFb = (process.env.APEX_STATIC_FALLBACK_URL || '').trim();
   if (!staticApp && !apexFb) {
@@ -105,6 +120,7 @@ if (wantProd) {
       '[optional] STATIC_APP_URL / APEX_STATIC_FALLBACK_URL unset — if apex DNS points at this API, set one of them (docs/NAMECHEAP_RENDER.md).'
     );
   }
+  console.warn('[recommended] Run `npm run playwright:install --prefix backend` before repo-owned browser verification.');
 } else {
   console.log('(dev mode: set NODE_ENV=production or pass --production to enforce CORS/billing checks)');
 }
