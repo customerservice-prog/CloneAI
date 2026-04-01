@@ -189,6 +189,7 @@ function resetRunSidePanels() {
     harvestStats.textContent = '';
   }
   renderArtifactPanel('', []);
+  renderExtractionResults(null);
 }
 
 function loadPersistedActiveExtractionJob() {
@@ -1292,7 +1293,7 @@ let extractionProfile = 'standard';
 let filesImages = [];
 let filesBoth = [];
 let fullBriefText = '';
-/** @type {{ token?: string, artifactUrl?: string, artifactName?: string, count?: number, imageCount?: number, snapshotCount?: number } | null} */
+/** @type {{ token?: string, artifactUrl?: string, artifactName?: string, count?: number, imageCount?: number, image_count?: number, snapshotCount?: number, manifests?: Record<string, { name?: string, url?: string }>, images?: Array<object>, pages?: Array<object> } | null} */
 let lastAssetsSnapshot = null;
 let assetZipDownloadName = 'site-assets.zip';
 let displayIndex = 0;
@@ -1316,6 +1317,59 @@ function formatHarvestBytes(b) {
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   if (n < 1024 ** 3) return `${(n / (1024 * 1024)).toFixed(2)} MB`;
   return `${(n / 1024 ** 3).toFixed(2)} GB`;
+}
+
+function formatCount(n) {
+  return (Number(n) || 0).toLocaleString();
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function humanizePipelineStatus(status) {
+  const value = String(status || '').trim().toLowerCase();
+  if (!value) return 'Unknown';
+  if (value === 'completed') return 'Completed';
+  if (value === 'partial') return 'Partial';
+  if (value === 'failed') return 'Failed';
+  if (value === 'locked') return 'Locked';
+  if (value === 'pending') return 'Pending';
+  if (value === 'skipped') return 'Skipped';
+  return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function hasExtractionPayload(assets) {
+  if (!assets || typeof assets !== 'object') return false;
+  return Boolean(
+    assets.token ||
+      assets.artifactUrl ||
+      assets.zipUrl ||
+      assets.zip_url ||
+      Number(assets.count) > 0 ||
+      Number(assets.imageCount) > 0 ||
+      Number(assets.image_count) > 0 ||
+      Number(assets.discoveredUrlCount) > 0 ||
+      Number(assets.pagesCrawled) > 0 ||
+      Number(assets.snapshotCount) > 0 ||
+      (Array.isArray(assets.images) && assets.images.length > 0) ||
+      (Array.isArray(assets.pages) && assets.pages.length > 0) ||
+      Object.keys(assets.manifests || {}).length > 0
+  );
+}
+
+function assetManifestName(kind, assets = lastAssetsSnapshot) {
+  const explicit = assets?.manifests?.[kind]?.name;
+  if (explicit) return explicit;
+  const fallback =
+    kind === 'manifest' ? 'manifest.json' : kind === 'images' ? 'images.json' : kind === 'pages' ? 'pages.json' : '';
+  return lastCompletedJobArtifacts.some((item) => item?.name === fallback) ? fallback : '';
+}
+
+function scrollToExtractionResults() {
+  const section = $('#extraction-results');
+  if (!section || section.hidden) return;
+  section.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 
 function syncExtractionProfilePills() {
@@ -1473,7 +1527,7 @@ function syncZipButtons(assets) {
   const lab = $('#enhance-assets-btn');
   const labSticky = $('#sticky-enhance-assets-btn');
   const label = (summary) => `Download site assets (ZIP · ${summary})`;
-  if ((!assets?.token && !assets?.artifactUrl) || !assets.count) {
+  if ((!assets?.token && !assets?.artifactUrl && !assets?.zipUrl && !assets?.zip_url) || !assets.count) {
     if (btn) {
       btn.hidden = true;
       btn.dataset.token = '';
@@ -1496,7 +1550,7 @@ function syncZipButtons(assets) {
   }
   const bits = [];
   const disc = Number(assets.discoveredUrlCount) || 0;
-  const ic = Number(assets.imageCount) || 0;
+  const ic = Number(assets.imageCount ?? assets.image_count) || 0;
   if (disc > 0 && disc > ic) {
     bits.push(`${ic}/${disc} imgs`);
   } else if (ic > 0) {
@@ -1506,7 +1560,7 @@ function syncZipButtons(assets) {
   }
   if (assets.snapshotCount) bits.push(`${assets.snapshotCount} snapshots`);
   const summary = bits.length ? bits.join(' · ') : `${assets.count} files`;
-  const artifactUrl = assets.artifactUrl || '';
+  const artifactUrl = assets.artifactUrl || assets.zipUrl || assets.zip_url || '';
   if (btn) {
     btn.dataset.token = assets.token || '';
     btn.dataset.artifactUrl = artifactUrl;
@@ -1532,10 +1586,162 @@ function syncZipButtons(assets) {
   }
 }
 
+function renderExtractionResults(assets) {
+  const wrap = $('#extraction-results');
+  const sub = $('#extraction-results-sub');
+  const stats = $('#extraction-stats-grid');
+  const note = $('#extraction-results-note');
+  const preview = $('#extraction-preview-grid');
+  const viewBtn = $('#view-extraction-results-btn');
+  const manifestBtn = $('#download-manifest-btn');
+  const imagesBtn = $('#download-images-json-btn');
+  const pagesBtn = $('#download-pages-json-btn');
+  if (!wrap || !stats || !note || !preview) return;
+
+  if (!hasExtractionPayload(assets)) {
+    wrap.hidden = true;
+    stats.innerHTML = '';
+    preview.innerHTML = '';
+    note.hidden = true;
+    note.textContent = '';
+    if (sub) {
+      sub.textContent = 'Real extracted assets, manifests, and page-to-image mappings from this run.';
+    }
+    if (viewBtn) viewBtn.hidden = true;
+    for (const btn of [manifestBtn, imagesBtn, pagesBtn]) {
+      if (!btn) continue;
+      btn.hidden = true;
+      btn.disabled = false;
+    }
+    return;
+  }
+
+  const imageCount = Number(assets?.imagesDownloaded ?? assets?.imageCount ?? assets?.image_count) || 0;
+  const discoveredCount =
+    Number(assets?.imageCandidatesFound ?? assets?.image_candidates_found ?? assets?.discoveredUrlCount) ||
+    imageCount;
+  const pagesDiscovered = Number(assets?.pagesDiscovered ?? assets?.pages_discovered) || 0;
+  const pagesCrawled = Number(assets?.pagesCrawled ?? assets?.pages_crawled) || 0;
+  const duplicatesSkipped =
+    Number(assets?.imageDuplicatesSkipped ?? assets?.image_duplicates_skipped ?? assets?.duplicatesSkipped) || 0;
+  const failedCount = Number(assets?.assetFailures ?? assets?.asset_failures ?? assets?.failed) || 0;
+  const archiveBytes = Number(assets?.archiveSizeBytes ?? assets?.archive_size_bytes ?? assets?.archiveBytes) || 0;
+  const archiveFileCount = Number(assets?.archiveFileCount ?? assets?.archive_file_count ?? assets?.count) || 0;
+  const manifestCount = Number(assets?.manifestCount ?? assets?.manifest_count) || 0;
+  const crawlStatus = humanizePipelineStatus(assets?.crawlStatus ?? assets?.crawl_status);
+  const downloadStatus = humanizePipelineStatus(assets?.downloadStatus ?? assets?.download_status);
+  const archiveStatus = humanizePipelineStatus(assets?.archiveStatus ?? assets?.archive_status);
+  const manifestStatus = humanizePipelineStatus(assets?.manifestStatus ?? assets?.manifest_status);
+  const reportStatus = humanizePipelineStatus(assets?.reportStatus ?? assets?.report_status);
+
+  const statCards = [
+    ['Pages discovered', formatCount(pagesDiscovered)],
+    ['Images found', formatCount(discoveredCount)],
+    ['Pages crawled', formatCount(pagesCrawled)],
+    ['Images downloaded', formatCount(imageCount)],
+    ['Duplicates skipped', formatCount(duplicatesSkipped)],
+    ['Failed downloads', formatCount(failedCount)],
+    ['Archive files', formatCount(archiveFileCount)],
+    ['Archive size', archiveBytes > 0 ? formatHarvestBytes(archiveBytes) : '0 B'],
+    ['Manifests', formatCount(manifestCount)],
+  ];
+  stats.innerHTML = statCards
+    .map(
+      ([label, value]) =>
+        `<div class="extraction-stat-card"><span class="extraction-stat-label">${escapeHtml(label)}</span><span class="extraction-stat-value">${escapeHtml(value)}</span></div>`
+    )
+    .join('');
+
+  if (sub) {
+    const bits = [];
+    bits.push(`Crawl ${crawlStatus}`);
+    bits.push(`Downloads ${downloadStatus}`);
+    bits.push(`Archive ${archiveStatus}`);
+    bits.push(`Manifests ${manifestStatus}`);
+    bits.push(`Report ${reportStatus}`);
+    if (archiveBytes > 0) bits.push(`ZIP ~${formatHarvestBytes(archiveBytes)}`);
+    if (Number(assets?.snapshotCount) > 0) bits.push(`${formatCount(assets.snapshotCount)} snapshots`);
+    sub.textContent = bits.length
+      ? `Real extracted assets, manifests, and page-to-image mappings from this run. ${bits.join(' · ')}.`
+      : 'Real extracted assets, manifests, and page-to-image mappings from this run.';
+  }
+
+  const notes = [];
+  if (pagesDiscovered > pagesCrawled) {
+    notes.push(
+      `${formatCount(pagesDiscovered - pagesCrawled)} page(s) were discovered but not crawled before the run ended.`
+    );
+  }
+  if (discoveredCount > imageCount) {
+    notes.push(
+      `${formatCount(discoveredCount - imageCount)} discovered image URL(s) were not archived. Check fetch notes, plan limits, or blocked/non-image responses in the manifests.`
+    );
+  }
+  if (assets?.archiveLocked) {
+    notes.push('Archive download is locked for this run, but extraction counts and manifests were still captured.');
+  }
+  note.hidden = notes.length === 0;
+  note.textContent = notes.join(' ');
+
+  const previewItems = Array.isArray(assets?.previewAssets)
+    ? assets.previewAssets
+    : Array.isArray(assets?.preview_assets)
+      ? assets.preview_assets
+      : Array.isArray(assets?.images)
+        ? assets.images.slice(0, 24)
+        : [];
+  if (previewItems.length > 0) {
+    preview.innerHTML = previewItems
+      .map((item) => {
+        const sourcePages = Array.isArray(item?.sourcePages) ? item.sourcePages : [];
+        const pageSummary =
+          sourcePages.length > 1
+            ? `${sourcePages[0]} (+${sourcePages.length - 1} more)`
+            : sourcePages[0] || item?.sourcePage || 'Unmapped page';
+        const sourceUrl = String(item?.sourceUrl || '').trim();
+        const file = String(item?.file || '').trim() || 'archived-image';
+        return `<article class="extraction-preview-card">
+          ${
+            sourceUrl
+              ? `<img class="extraction-preview-thumb" src="${escapeHtml(sourceUrl)}" alt="${escapeHtml(file)}" loading="lazy" referrerpolicy="no-referrer" />`
+              : `<div class="extraction-preview-thumb" aria-hidden="true"></div>`
+          }
+          <div class="extraction-preview-file">${escapeHtml(file)}</div>
+          <div class="extraction-preview-meta">
+            <span>Source page: ${escapeHtml(pageSummary)}</span>
+            <span>Mapped pages: ${escapeHtml(formatCount(sourcePages.length || (item?.sourcePage ? 1 : 0)))}</span>
+            <span class="extraction-preview-url">${escapeHtml(sourceUrl || 'No source URL recorded')}</span>
+          </div>
+        </article>`;
+      })
+      .join('');
+  } else {
+    preview.innerHTML = `<article class="extraction-preview-card"><div class="extraction-preview-meta"><span>${
+      imageCount > 0
+        ? `${escapeHtml(formatCount(imageCount))} archived image(s) recorded. Open the JSON manifests or ZIP for the full asset set.`
+        : 'No archived images were recorded for this run yet.'
+    }</span></div></article>`;
+  }
+
+  const manifestButtons = [
+    ['manifest', manifestBtn],
+    ['images', imagesBtn],
+    ['pages', pagesBtn],
+  ];
+  for (const [kind, btn] of manifestButtons) {
+    if (!btn) continue;
+    btn.hidden = !(lastCompletedJobId && assetManifestName(kind, assets));
+  }
+
+  wrap.hidden = false;
+  if (viewBtn) viewBtn.hidden = false;
+}
+
 function applyAssetsMeta(assets) {
-  lastAssetsSnapshot = assets?.token || assets?.artifactUrl ? { ...assets } : null;
+  lastAssetsSnapshot = hasExtractionPayload(assets) ? { ...assets } : null;
   assetZipDownloadName = assets?.filename || assets?.artifactName || 'site-assets.zip';
   syncZipButtons(assets);
+  renderExtractionResults(lastAssetsSnapshot);
 }
 
 function applyMetaScraper(scraper) {
@@ -2021,7 +2227,7 @@ async function downloadSiteImagesZip() {
   const main = $('#download-images-btn');
   const sticky = $('#sticky-download-zip-btn');
   const token = main?.dataset?.token || sticky?.dataset?.token;
-  const artifactUrl = main?.dataset?.artifactUrl || sticky?.dataset?.artifactUrl || '';
+  const artifactUrl = main?.dataset?.artifactUrl || sticky?.dataset?.artifactUrl || lastAssetsSnapshot?.artifactUrl || lastAssetsSnapshot?.zipUrl || lastAssetsSnapshot?.zip_url || '';
   const url = artifactUrl || (token ? apiUrl(`/api/site-images/${token}`) : '');
   if (!url) {
     showToast('No asset bundle for this run');
@@ -2078,6 +2284,15 @@ async function downloadJobArtifact(jobId, artifactName) {
   } catch (err) {
     showToast(err.message || 'Download failed', { variant: 'error', duration: 3600 });
   }
+}
+
+function downloadExtractionManifest(kind) {
+  const name = assetManifestName(kind);
+  if (!lastCompletedJobId || !name) {
+    showToast('Manifest is not ready yet', { variant: 'warning' });
+    return;
+  }
+  void downloadJobArtifact(lastCompletedJobId, name);
 }
 
 async function enhanceSiteAssetsZip() {
@@ -3014,9 +3229,18 @@ async function hydrateCompletedJobArtifacts(jobId) {
     return;
   }
   try {
-    const res = await fetch(extractionJobUrl(jobId), { headers: analyzeFetchHeaders() });
-    const job = await res.json().catch(() => ({}));
-    if (!res.ok || !job?.id) throw new Error(job.error || `Job lookup failed (${res.status})`);
+    let res = null;
+    let job = null;
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      res = await fetch(extractionJobUrl(jobId), { headers: analyzeFetchHeaders() });
+      job = await res.json().catch(() => ({}));
+      if (!res.ok || !job?.id) throw new Error(job.error || `Job lookup failed (${res.status})`);
+      const hasArtifacts = Array.isArray(job.artifacts) && job.artifacts.length > 0;
+      const hasAssets = hasExtractionPayload(job.assets);
+      const terminal = job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled';
+      if (terminal || hasArtifacts || hasAssets) break;
+      await delay(350);
+    }
     renderArtifactPanel(job.id, Array.isArray(job.artifacts) ? job.artifacts : []);
     if (job.assets) applyAssetsMeta(job.assets);
   } catch (err) {
@@ -3307,6 +3531,7 @@ function init() {
   };
   $('#rerun-btn').addEventListener('click', rerun);
   $('#sticky-rerun-btn')?.addEventListener('click', rerun);
+  $('#view-extraction-results-btn')?.addEventListener('click', () => scrollToExtractionResults());
   $('#copy-brief-btn').addEventListener('click', () => copyBrief());
   $('#copy-toolbar-btn').addEventListener('click', () => copyBrief());
   $('#sticky-copy-btn')?.addEventListener('click', () => copyBrief());
@@ -3316,6 +3541,9 @@ function init() {
   $('#sticky-upgrade-btn')?.addEventListener('click', () => startBillingCheckout('pro', 'sticky_bar'));
   $('#header-plans-btn')?.addEventListener('click', () => openPricingModal('header_plans'));
   $('#download-images-btn')?.addEventListener('click', () => downloadSiteImagesZip());
+  $('#download-manifest-btn')?.addEventListener('click', () => downloadExtractionManifest('manifest'));
+  $('#download-images-json-btn')?.addEventListener('click', () => downloadExtractionManifest('images'));
+  $('#download-pages-json-btn')?.addEventListener('click', () => downloadExtractionManifest('pages'));
   $('#sticky-download-zip-btn')?.addEventListener('click', () => downloadSiteImagesZip());
   $('#enhance-assets-btn')?.addEventListener('click', () => enhanceSiteAssetsZip());
   $('#sticky-enhance-assets-btn')?.addEventListener('click', () => enhanceSiteAssetsZip());

@@ -57,7 +57,7 @@ import {
   postAuthLogin,
 } from './billingHttp.js';
 import { appendLeadRecord } from './leadsStore.js';
-import { promoMatchesRequest, configuredPromoCode } from './promoCode.js';
+import { promoMatchesRequest, ownerTokenMatchesRequest, configuredPromoCode } from './promoCode.js';
 import { probeSinkMiddleware } from './probeSink.js';
 import { resolveRootGet, formatRootLandingHtml, mergeStaticEnvWithSiteDefaults } from './rootRedirect.js';
 import {
@@ -91,19 +91,61 @@ import {
   listExtractionJobsForUser,
 } from './extractionJobs.js';
 
-dotenv.config();
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+dotenv.config({ path: path.join(__dirname, '.env') });
 
 const isProd = process.env.NODE_ENV === 'production';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const spaRoot = path.join(__dirname, 'public');
 const spaIndex = path.join(spaRoot, 'index.html');
 const serveSpa = isProd && fs.existsSync(spaIndex);
+const ROOT_REDIRECT_PROBE_TTL_MS = 5 * 60 * 1000;
+const rootRedirectProbeCache = new Map();
 
 if (isProd && !serveSpa) {
   console.warn(
     '[cloneai] No SPA bundle at public/index.html — GET / will not serve the app. Use the repo-root Dockerfile (see render.yaml), or set STATIC_APP_URL / APEX_STATIC_FALLBACK_URL so apex traffic redirects to your static host.'
   );
+}
+
+function normalizeRootRedirectTarget(rawUrl) {
+  try {
+    const u = new URL(String(rawUrl || '').trim());
+    if (u.protocol !== 'https:' && u.protocol !== 'http:') return '';
+    u.pathname = '/';
+    u.search = '';
+    u.hash = '';
+    return u.toString();
+  } catch {
+    return '';
+  }
+}
+
+async function redirectTargetLooksReachable(rawUrl) {
+  if (!isProd) return true;
+  const target = normalizeRootRedirectTarget(rawUrl);
+  if (!target) return false;
+  const now = Date.now();
+  const cached = rootRedirectProbeCache.get(target);
+  if (cached && cached.expiresAt > now) return cached.ok;
+
+  let ok = false;
+  try {
+    const resp = await axios.get(target, {
+      headers: { Accept: 'text/html,application/xhtml+xml' },
+      maxRedirects: 5,
+      responseType: 'stream',
+      timeout: 2500,
+      validateStatus: () => true,
+    });
+    ok = resp.status !== 404;
+    resp.data?.destroy?.();
+  } catch {
+    ok = false;
+  }
+
+  rootRedirectProbeCache.set(target, { ok, expiresAt: now + ROOT_REDIRECT_PROBE_TTL_MS });
+  return ok;
 }
 
 const app = express();
@@ -197,6 +239,19 @@ function isLocalDevBrowserOrigin(origin) {
         u.hostname === '127.0.0.1' ||
         u.hostname === '::1')
     );
+  } catch {
+    return false;
+  }
+}
+
+function isServedFromSameOrigin(req, origin) {
+  try {
+    const incoming = new URL(String(origin || '').trim());
+    const forwardedProto = String(req.get('x-forwarded-proto') || '').trim().split(',')[0];
+    const proto = (forwardedProto || req.protocol || incoming.protocol.replace(':', '') || 'http').replace(/:$/, '');
+    const host = String(req.get('x-forwarded-host') || req.get('host') || '').trim().split(',')[0];
+    if (!host) return false;
+    return incoming.host === host && incoming.protocol === `${proto}:`;
   } catch {
     return false;
   }
@@ -378,11 +433,12 @@ function requireIngressKey(req, res, next) {
 function requireProductionBrowserOrigin(req, res, next) {
   if (!isProd) return next();
   if (process.env.RELAX_ANALYZE_ORIGIN_CHECK === 'true') return next();
+  const origin = req.get('origin');
+  if (serveSpa && origin && isServedFromSameOrigin(req, origin)) return next();
   if (!corsOrigins.length) {
     res.status(403).json({ error: 'Forbidden.' });
     return;
   }
-  const origin = req.get('origin');
   if (!origin || !corsOrigins.includes(origin)) {
     logEvent('warn', 'analyze_blocked_origin', { ip: clientIp(req), origin: origin || null });
     res.status(403).json({ error: 'Forbidden.' });
@@ -635,7 +691,8 @@ async function validateAnalyzeRequest(req, res, next) {
 
     const ipGate = clientIp(req);
     req._promoValid = promoMatchesRequest(req);
-    if (!req._promoValid && captchaRequiredForAnalyze(ipGate)) {
+    req._privilegedAnalyze = ownerTokenMatchesRequest(req);
+    if (!req._privilegedAnalyze && captchaRequiredForAnalyze(ipGate)) {
       const token = String(
         req.body.cf_turnstile_response || req.body['cf-turnstile-response'] || ''
       ).trim();
@@ -824,6 +881,129 @@ function isTerminalExtractionJobStatus(status) {
 
 function extractionJobArtifactUrl(jobId, artifactName) {
   return `/api/extraction-jobs/${encodeURIComponent(jobId)}/artifacts/${encodeURIComponent(artifactName)}`;
+}
+
+function sortUniqueStrings(values) {
+  return [...new Set((Array.isArray(values) ? values : []).map((v) => String(v || '').trim()).filter(Boolean))].sort();
+}
+
+function buildDurableAssetLinks(jobId, artifactNames) {
+  const names = artifactNames instanceof Set ? artifactNames : new Set(artifactNames || []);
+  const link = (name) =>
+    names.has(name)
+      ? {
+          name,
+          url: extractionJobArtifactUrl(jobId, name),
+        }
+      : null;
+  return {
+    manifest: link('manifest.json'),
+    images: link('images.json'),
+    pages: link('pages.json'),
+  };
+}
+
+function deriveExtractionStageStatus({ discoveredCount = 0, archivedCount = 0, failedCount = 0, archiveLocked = false } = {}) {
+  if (archiveLocked) return 'locked';
+  if (discoveredCount <= 0) return 'skipped';
+  if (archivedCount <= 0 && failedCount > 0) return 'failed';
+  if (archivedCount < discoveredCount || failedCount > 0) return 'partial';
+  if (archivedCount > 0) return 'completed';
+  return 'failed';
+}
+
+function buildDurableAssetsPayload({
+  jobId,
+  latestAssets,
+  artifactNames,
+  pagesJson,
+  imagesJson,
+  manifestJson,
+}) {
+  const names = artifactNames instanceof Set ? artifactNames : new Set(artifactNames || []);
+  const manifests = buildDurableAssetLinks(jobId, names);
+  const zipName =
+    [...names].find((name) => name === 'site-assets.zip') ||
+    [...names].find((name) => /\.zip$/i.test(String(name || '')));
+  const zipUrl = zipName ? extractionJobArtifactUrl(jobId, zipName) : '';
+  if (!latestAssets && !zipUrl && !manifests.manifest && !manifests.images && !manifests.pages) return null;
+  const pagesDiscovered = Number(latestAssets?.pagesDiscovered) || Number(manifestJson?.pagesDiscovered) || 0;
+  const pagesCrawled = Number(latestAssets?.pagesCrawled) || Number(manifestJson?.pagesCrawled) || 0;
+  const discoveredCount =
+    Number(latestAssets?.discoveredUrlCount) || Number(manifestJson?.imagesDiscovered) || 0;
+  const archivedCountRaw = Number(latestAssets?.imageCount) || Number(manifestJson?.imagesArchived) || 0;
+  const archivedCount = archivedCountRaw || (Array.isArray(imagesJson) ? imagesJson.length : 0);
+  const duplicatesSkipped =
+    Number(latestAssets?.duplicatesSkipped) || Number(manifestJson?.duplicatesSkipped) || 0;
+  const failedCount = Number(latestAssets?.failed) || Number(manifestJson?.imagesFailed) || 0;
+  const archiveBytes = Number(latestAssets?.archiveBytes) || Number(manifestJson?.archiveBytes) || 0;
+  const archiveFileCount = Number(latestAssets?.count) || 0;
+  const manifestCount = ['manifest', 'images', 'pages'].filter((key) => Boolean(manifests[key])).length;
+  const archiveLocked = Boolean(latestAssets?.archiveLocked);
+  const downloadStatus = deriveExtractionStageStatus({
+    discoveredCount,
+    archivedCount,
+    failedCount,
+    archiveLocked: false,
+  });
+  const archiveStatus = archiveLocked
+    ? 'locked'
+    : zipUrl || archiveBytes > 0
+      ? 'completed'
+      : archivedCount > 0
+        ? 'failed'
+        : 'skipped';
+  const manifestStatus = manifestCount >= 3 ? 'completed' : manifestCount > 0 ? 'partial' : 'failed';
+  const crawlStatus = pagesDiscovered > 0 || pagesCrawled > 0 ? 'completed' : 'skipped';
+  return {
+    ...(latestAssets || {}),
+    token: null,
+    artifactName: zipName || latestAssets?.artifactName || latestAssets?.filename || 'site-assets.zip',
+    artifactUrl: zipUrl || latestAssets?.artifactUrl || '',
+    filename: zipName || latestAssets?.filename || 'site-assets.zip',
+    zipUrl: zipUrl || latestAssets?.zipUrl || latestAssets?.artifactUrl || '',
+    zip_url: zipUrl || latestAssets?.zip_url || latestAssets?.artifactUrl || '',
+    imageCount: archivedCount || (Array.isArray(imagesJson) ? imagesJson.length : 0),
+    image_count: archivedCount || (Array.isArray(imagesJson) ? imagesJson.length : 0),
+    imagesDownloaded: archivedCount,
+    images_downloaded: archivedCount,
+    imageCandidatesFound: discoveredCount,
+    image_candidates_found: discoveredCount,
+    imageDuplicatesSkipped: duplicatesSkipped,
+    image_duplicates_skipped: duplicatesSkipped,
+    assetFailures: failedCount,
+    asset_failures: failedCount,
+    pagesCrawled,
+    pages_crawled: pagesCrawled,
+    pagesDiscovered,
+    pages_discovered: pagesDiscovered,
+    duplicatesSkipped,
+    failed: failedCount,
+    archiveBytes,
+    archiveSizeBytes: archiveBytes,
+    archive_size_bytes: archiveBytes,
+    archiveFileCount,
+    archive_file_count: archiveFileCount,
+    manifestCount,
+    manifest_count: manifestCount,
+    crawlStatus,
+    crawl_status: crawlStatus,
+    extractionStatus: downloadStatus,
+    extraction_status: downloadStatus,
+    downloadStatus,
+    download_status: downloadStatus,
+    archiveStatus,
+    archive_status: archiveStatus,
+    manifestStatus,
+    manifest_status: manifestStatus,
+    reportStatus: 'completed',
+    report_status: 'completed',
+    images: Array.isArray(imagesJson) ? imagesJson : [],
+    pages: Array.isArray(pagesJson) ? pagesJson : [],
+    previewAssets: Array.isArray(imagesJson) ? imagesJson.slice(0, 24) : [],
+    preview_assets: Array.isArray(imagesJson) ? imagesJson.slice(0, 24) : [],
+    manifests,
+  };
 }
 
 function buildCursorReadyExport(reportText, summary) {
@@ -1163,29 +1343,36 @@ async function runExtractionJob(jobId) {
       });
     }
 
+    const durableArtifactNames = new Set();
+    const rememberSavedArtifact = async (artifact) => {
+      const saved = await saveExtractionJobArtifact(extractionJobsBaseDir, jobId, artifact);
+      if (saved?.name) durableArtifactNames.add(saved.name);
+      return saved;
+    };
+
     if (req._jobArtifacts?.pagesJson) {
-      await saveExtractionJobArtifact(extractionJobsBaseDir, jobId, {
+      await rememberSavedArtifact({
         name: 'pages.json',
         text: JSON.stringify(req._jobArtifacts.pagesJson, null, 2),
         contentType: 'application/json; charset=utf-8',
       });
     }
     if (req._jobArtifacts?.imagesJson) {
-      await saveExtractionJobArtifact(extractionJobsBaseDir, jobId, {
+      await rememberSavedArtifact({
         name: 'images.json',
         text: JSON.stringify(req._jobArtifacts.imagesJson, null, 2),
         contentType: 'application/json; charset=utf-8',
       });
     }
     if (req._jobArtifacts?.pagesCsvText) {
-      await saveExtractionJobArtifact(extractionJobsBaseDir, jobId, {
+      await rememberSavedArtifact({
         name: 'pages.csv',
         text: String(req._jobArtifacts.pagesCsvText || ''),
         contentType: 'text/csv; charset=utf-8',
       });
     }
     if (req._jobArtifacts?.imagesCsvText) {
-      await saveExtractionJobArtifact(extractionJobsBaseDir, jobId, {
+      await rememberSavedArtifact({
         name: 'images.csv',
         text: String(req._jobArtifacts.imagesCsvText || ''),
         contentType: 'text/csv; charset=utf-8',
@@ -1193,19 +1380,19 @@ async function runExtractionJob(jobId) {
     }
     if (req._jobArtifacts?.manifestJson) {
       const manifestJsonText = JSON.stringify(req._jobArtifacts.manifestJson, null, 2);
-      await saveExtractionJobArtifact(extractionJobsBaseDir, jobId, {
+      await rememberSavedArtifact({
         name: 'manifest.json',
         text: manifestJsonText,
         contentType: 'application/json; charset=utf-8',
       });
-      await saveExtractionJobArtifact(extractionJobsBaseDir, jobId, {
+      await rememberSavedArtifact({
         name: 'manifest.csv',
         text: String(req._jobArtifacts.manifestCsvText || ''),
         contentType: 'text/csv; charset=utf-8',
       });
     }
     if (req._jobArtifacts?.siteMapText) {
-      await saveExtractionJobArtifact(extractionJobsBaseDir, jobId, {
+      await rememberSavedArtifact({
         name: 'site-map.txt',
         text: String(req._jobArtifacts.siteMapText || ''),
         contentType: 'text/plain; charset=utf-8',
@@ -1215,25 +1402,26 @@ async function runExtractionJob(jobId) {
     if (latestAssets?.token) {
       const siteZip = getSiteAssetDownload(latestAssets.token);
       if (siteZip?.buffer?.length) {
-        const saved = await saveExtractionJobArtifact(extractionJobsBaseDir, jobId, {
+        await rememberSavedArtifact({
           name: siteZip.filename || 'site-assets.zip',
           buffer: siteZip.buffer,
           contentType: 'application/zip',
         });
-        if (saved?.name) {
-          durableAssets = {
-            ...latestAssets,
-            token: null,
-            artifactName: saved.name,
-            artifactUrl: extractionJobArtifactUrl(jobId, saved.name),
-            filename: saved.name,
-          };
-          await appendAndApplyJobEvent(jobId, {
-            type: 'meta',
-            assets: durableAssets,
-          });
-        }
       }
+    }
+    durableAssets = buildDurableAssetsPayload({
+      jobId,
+      latestAssets,
+      artifactNames: durableArtifactNames,
+      pagesJson: req._jobArtifacts?.pagesJson,
+      imagesJson: req._jobArtifacts?.imagesJson,
+      manifestJson: req._jobArtifacts?.manifestJson,
+    });
+    if (durableAssets) {
+      await appendAndApplyJobEvent(jobId, {
+        type: 'meta',
+        assets: durableAssets,
+      });
     }
   } catch (artifactErr) {
     logEvent('warn', 'job_artifact_save_failed', {
@@ -1319,8 +1507,12 @@ function streamExtractionJobEvents(req, res, job) {
   const flush = () => {
     const slice = readExtractionJobEventsSlice(extractionJobsBaseDir, job.id, offset);
     offset = slice.nextOffset;
-    for (const event of slice.events) sseWrite(res, event);
     const latest = loadExtractionJob(extractionJobsBaseDir, job.id);
+    const holdDoneUntilTerminal = !latest || !isTerminalExtractionJobStatus(latest.status);
+    for (const event of slice.events) {
+      if (event?.type === 'done' && holdDoneUntilTerminal) continue;
+      sseWrite(res, event);
+    }
     if (latest && isTerminalExtractionJobStatus(latest.status)) {
       if (!slice.events.some((event) => event?.type === 'done') && latest.status === 'completed') {
         sseWrite(res, { type: 'done' });
@@ -1352,7 +1544,7 @@ if (!serveSpa) {
     return true;
   }
 
-  app.get('/', (req, res) => {
+  app.get('/', async (req, res) => {
     const front = (process.env.FRONTEND_URL || process.env.PUBLIC_APP_URL || '').trim();
     const staticExplicit = (process.env.STATIC_APP_URL || process.env.WEB_APP_PUBLIC_URL || '').trim();
     const apexExplicit = (process.env.APEX_STATIC_FALLBACK_URL || '').trim();
@@ -1369,14 +1561,25 @@ if (!serveSpa) {
       apexStaticFallbackUrl: apexFallback,
       corsOrigins: (process.env.CORS_ORIGINS || '').trim(),
     });
+    let landingHint = r.hint;
     if (r.kind === 'redirect') {
-      res.redirect(r.status, r.location);
-      return;
+      if (await redirectTargetLooksReachable(r.location)) {
+        res.redirect(r.status, r.location);
+        return;
+      }
+      let targetHost = r.location;
+      try {
+        targetHost = new URL(r.location).host;
+      } catch {
+        /* keep raw location */
+      }
+      landingHint = `Configured web app redirect target ${targetHost} appears unavailable right now. Update STATIC_APP_URL / APEX_STATIC_FALLBACK_URL or deploy the static app so browsers stop landing on a dead host.`;
+      console.warn(`[cloneai] Suppressed GET / redirect to unavailable target: ${r.location}`);
     }
     if (rootGetPrefersHtml(req)) {
       res.type('html').send(
         formatRootLandingHtml({
-          hint: r.hint,
+          hint: landingHint,
           frontendUrl: front || null,
           staticAppUrl: staticApp || null,
           apexStaticFallbackUrl: apexFallback || null,
@@ -1390,7 +1593,7 @@ if (!serveSpa) {
       service: 'cloneai-api',
       docs: 'Use POST /api/analyze, POST /api/analyze-revise (JSON), and GET /api/health — the web app is hosted separately.',
       health: '/api/health',
-      hint: r.hint,
+      hint: landingHint,
     });
   });
 }
@@ -1984,17 +2187,21 @@ function csvEscape(value) {
 async function harvestLinkedStylesheetImageUrls(pages) {
   const list = Array.isArray(pages) ? pages.filter((p) => (p.html || '').length > 0) : [];
   if (!list.length) {
-    return { imageUrls: [], sheetsProcessed: 0 };
+    return { imageUrls: [], sheetsProcessed: 0, pageImageUrls: [] };
   }
 
   const sheetKey = (u) => normalizeHarvestUrlKey(u) || u;
   const pending = [];
   const pendingKeys = new Set();
   const processedKeys = new Set();
+  const stylesheetOwners = new Map();
 
   for (const p of list) {
     for (const href of collectStylesheetHrefs(p.html, p.url)) {
       const k = sheetKey(href);
+      const owners = stylesheetOwners.get(k) || new Set();
+      owners.add(p.url);
+      stylesheetOwners.set(k, owners);
       if (processedKeys.has(k) || pendingKeys.has(k)) continue;
       pendingKeys.add(k);
       pending.push(href);
@@ -2003,6 +2210,7 @@ async function harvestLinkedStylesheetImageUrls(pages) {
 
   const imageUrls = [];
   const imgKeys = new Set();
+  const pageImageUrls = new Map();
 
   async function fetchOneStylesheet(sheetUrl) {
     const safe = await assertUrlSafeForServerFetch(sheetUrl);
@@ -2056,15 +2264,25 @@ async function harvestLinkedStylesheetImageUrls(pages) {
       const sheetUrl = batch[i];
       const css = cssTexts[i];
       if (!css) continue;
+      const ownerPages = [...(stylesheetOwners.get(sheetKey(sheetUrl)) || [])];
       for (const iu of extractImageUrlsFromCss(css, sheetUrl)) {
         const ik = normalizeHarvestUrlKey(iu);
-        if (!ik || imgKeys.has(ik)) continue;
+        if (!ik) continue;
+        for (const pageUrl of ownerPages) {
+          const current = pageImageUrls.get(pageUrl) || [];
+          current.push(iu);
+          pageImageUrls.set(pageUrl, current);
+        }
+        if (imgKeys.has(ik)) continue;
         imgKeys.add(ik);
         imageUrls.push(iu);
       }
       if (processedKeys.size >= HARVEST_CSS_MAX_SHEETS) break;
       for (const imp of extractImportUrlsFromCss(css, sheetUrl)) {
         const sk = sheetKey(imp);
+        const importOwners = stylesheetOwners.get(sk) || new Set();
+        for (const pageUrl of ownerPages) importOwners.add(pageUrl);
+        stylesheetOwners.set(sk, importOwners);
         if (processedKeys.has(sk) || pendingKeys.has(sk)) continue;
         if (processedKeys.size + pendingKeys.size >= HARVEST_CSS_MAX_SHEETS) break;
         pendingKeys.add(sk);
@@ -2073,7 +2291,14 @@ async function harvestLinkedStylesheetImageUrls(pages) {
     }
   }
 
-  return { imageUrls, sheetsProcessed: processedKeys.size };
+  return {
+    imageUrls,
+    sheetsProcessed: processedKeys.size,
+    pageImageUrls: [...pageImageUrls.entries()].map(([pageUrl, urls]) => ({
+      pageUrl,
+      urls: sortUniqueStrings(urls),
+    })),
+  };
 }
 
 const SYSTEM_PROMPT_REVISE = `${SYSTEM_PROMPT_BASE}
@@ -2097,8 +2322,9 @@ async function validateReviseRequest(req, res, next) {
     }
 
     req._promoValid = promoMatchesRequest(req);
+    req._privilegedAnalyze = ownerTokenMatchesRequest(req);
     const ipGate = clientIp(req);
-    if (!req._promoValid && captchaRequiredForAnalyze(ipGate)) {
+    if (!req._privilegedAnalyze && captchaRequiredForAnalyze(ipGate)) {
       const token = String(
         req.body?.cf_turnstile_response || req.body?.['cf-turnstile-response'] || ''
       ).trim();
@@ -2169,6 +2395,7 @@ async function runAnalyzePipeline(req, res) {
   let analyzeUserId = normalizeUserId(req.get('x-cloneai-user-id'));
 
   const promoBypass = Boolean(req._promoValid);
+  const privilegedBypass = Boolean(req._privilegedAnalyze);
 
   if (isBillingEnabled()) {
     const billingUserId = normalizeUserId(req.get('x-cloneai-user-id'));
@@ -2183,14 +2410,17 @@ async function runAnalyzePipeline(req, res) {
     }
     analyzeUserId = billingUserId;
 
-    if (promoBypass) {
-      logEvent('info', 'analyze_promo_run', { ip: clientIp(req), userId: billingUserId });
-      analyzePlan = PLANS.POWER;
+    if (promoBypass || privilegedBypass) {
+      logEvent('info', privilegedBypass ? 'analyze_owner_run' : 'analyze_promo_run', {
+        ip: clientIp(req),
+        userId: billingUserId,
+      });
+      analyzePlan = privilegedBypass ? PLANS.POWER : PLANS.PRO;
       req._planGateNotes = [];
       req._billingUserId = billingUserId;
       req._billingReservation = null;
-      req._billingPlan = PLANS.POWER;
-      /* Owner coupon: no usage reservation, no feature gate (same limits as POWER+ for crawl/harvest; see crawlPageCapForRequest / harvest caps). */
+      req._billingPlan = analyzePlan;
+      /* Promo unlock skips billing limits; owner token also unlocks elevated crawl/harvest/output budgets. */
     } else {
       const usageSnap = await getUsageSnapshot(billingUserId);
       analyzePlan = usageSnap.plan || PLANS.FREE;
@@ -2379,7 +2609,7 @@ async function runAnalyzePipeline(req, res) {
           ms,
           host: archiveCtx.hostSlug,
         });
-        if (!req._promoValid) {
+        if (!req._privilegedAnalyze) {
           noteSuccessfulAnalyzeForCaptcha(clientIp(req));
         }
         if (analyzeUserId) {
@@ -2428,27 +2658,27 @@ async function runAnalyzePipeline(req, res) {
       isBillingEnabled() ? analyzePlan : null,
       assetHarvestMode,
       IMAGE_HARVEST_MAX,
-      Boolean(promoBypass)
+      Boolean(privilegedBypass)
     );
     const harvestZipCap = effectiveHarvestZipCap(
       isBillingEnabled() ? analyzePlan : null,
       assetHarvestMode,
       IMAGE_HARVEST_ZIP_CAP,
-      Boolean(promoBypass)
+      Boolean(privilegedBypass)
     );
     const archiveExportAllowed =
-      Boolean(promoBypass) ||
+      Boolean(privilegedBypass) ||
       !isBillingEnabled() ||
       analyzePlan === PLANS.PRO ||
       analyzePlan === PLANS.POWER;
     const pageCapForCrawl = crawlPageCapForRequest({
       plan: analyzePlan,
       depth,
-      promoOwner: Boolean(promoBypass),
+      promoOwner: Boolean(privilegedBypass),
     });
     const extractionProfile = req._extractionProfile || 'standard';
     let crawlWallMs;
-    if (promoBypass) {
+    if (privilegedBypass) {
       const basePriv = Math.min(7_200_000, Math.max(CRAWL_MAX_WALL_CLOCK_MS * 4, 600_000));
       const profMul =
         extractionProfile === 'quality_first' ? 1.5 : extractionProfile === 'full_harvest' ? 1.25 : 1;
@@ -2574,7 +2804,7 @@ async function runAnalyzePipeline(req, res) {
     if (canInteraction) {
       try {
         const baseCap = pageCapForCrawl;
-        const maxCrawlTotal = promoBypass
+        const maxCrawlTotal = privilegedBypass
           ? Math.min(400, baseCap + Math.min(INTERACTION_EXTRA_URL_CAP * 2, 120))
           : Math.min(160, baseCap + Math.min(INTERACTION_EXTRA_URL_CAP, 40));
         const hubUrls = crawledPages.slice(0, INTERACTION_HUB_PAGES).map((p) => p.url);
@@ -2691,6 +2921,12 @@ async function runAnalyzePipeline(req, res) {
       skipped: 0,
       discoveredUrlCount: 0,
       cssSheetsProcessed: 0,
+      crawlStatus: 'pending',
+      extractionStatus: 'pending',
+      downloadStatus: 'pending',
+      archiveStatus: 'pending',
+      manifestStatus: 'pending',
+      reportStatus: 'pending',
     };
 
     const canHarvest =
@@ -2740,18 +2976,43 @@ async function runAnalyzePipeline(req, res) {
       try {
         const imgSeen = new Set();
         const allImageUrls = [];
+        const pageDiscoveredUrls = new Map();
+        const imageSourceMap = new Map();
+        const trackImageOnPage = (imageUrl, pageUrl, discoveredFrom = 'html') => {
+          const key = normalizeHarvestUrlKey(imageUrl);
+          if (!key || !pageUrl) return;
+          const currentPageUrls = pageDiscoveredUrls.get(pageUrl) || [];
+          if (!currentPageUrls.includes(imageUrl)) {
+            currentPageUrls.push(imageUrl);
+            pageDiscoveredUrls.set(pageUrl, currentPageUrls);
+          }
+          const current = imageSourceMap.get(key) || {
+            sourceUrl: imageUrl,
+            sourcePages: new Set(),
+            discoveredFrom: new Set(),
+          };
+          current.sourceUrl = current.sourceUrl || imageUrl;
+          current.sourcePages.add(pageUrl);
+          current.discoveredFrom.add(discoveredFrom);
+          imageSourceMap.set(key, current);
+        };
         for (const p of pagesForImageHarvest) {
           for (const u of collectImageUrls(p.html, p.url)) {
             const k = normalizeHarvestUrlKey(u);
-            if (!k || imgSeen.has(k)) continue;
+            if (!k) continue;
+            trackImageOnPage(u, p.url, 'html');
+            if (imgSeen.has(k)) continue;
             imgSeen.add(k);
             allImageUrls.push(u);
           }
         }
         if (pagesForImageHarvest.length > 0) {
-          const { imageUrls: cssImageUrls, sheetsProcessed } =
+          const { imageUrls: cssImageUrls, sheetsProcessed, pageImageUrls } =
             await harvestLinkedStylesheetImageUrls(pagesForImageHarvest);
           scraperMeta.cssSheetsProcessed = sheetsProcessed;
+          for (const entry of pageImageUrls || []) {
+            for (const u of entry.urls || []) trackImageOnPage(u, entry.pageUrl, 'css');
+          }
           for (const u of cssImageUrls) {
             const k = normalizeHarvestUrlKey(u);
             if (!k || imgSeen.has(k)) continue;
@@ -2814,16 +3075,40 @@ async function runAnalyzePipeline(req, res) {
             ),
           });
         }
-        const pagesManifestJson = pagesForImageHarvest.map((p, index) => ({
-          order: index + 1,
-          url: p.url,
-          htmlBytes: Buffer.byteLength(p.html || '', 'utf8'),
-        }));
-        const imagesManifestJson = fetched.entries.map((e, index) => ({
-          order: index + 1,
-          file: e.name,
-          sourceUrl: e.sourceUrl || '',
-        }));
+        const archivedFilesByPage = new Map();
+        const imagesManifestJson = fetched.entries.map((e, index) => {
+          const key = normalizeHarvestUrlKey(e.sourceUrl || '');
+          const sourceMeta = key ? imageSourceMap.get(key) : null;
+          const sourcePages = sortUniqueStrings(sourceMeta ? [...sourceMeta.sourcePages] : []);
+          const discoveredFrom = sortUniqueStrings(sourceMeta ? [...sourceMeta.discoveredFrom] : []);
+          for (const pageUrl of sourcePages) {
+            const currentFiles = archivedFilesByPage.get(pageUrl) || [];
+            currentFiles.push(e.name);
+            archivedFilesByPage.set(pageUrl, currentFiles);
+          }
+          return {
+            order: index + 1,
+            file: e.name,
+            sourceUrl: e.sourceUrl || '',
+            sourcePage: sourcePages[0] || '',
+            sourcePages,
+            sourcePageCount: sourcePages.length,
+            discoveredFrom,
+          };
+        });
+        const pagesManifestJson = pagesForImageHarvest.map((p, index) => {
+          const discoveredImageUrls = sortUniqueStrings(pageDiscoveredUrls.get(p.url) || []);
+          const archivedFiles = sortUniqueStrings(archivedFilesByPage.get(p.url) || []);
+          return {
+            order: index + 1,
+            url: p.url,
+            htmlBytes: Buffer.byteLength(p.html || '', 'utf8'),
+            discoveredImageUrls,
+            discoveredImageCount: discoveredImageUrls.length,
+            archivedFiles,
+            archivedImageCount: archivedFiles.length,
+          };
+        });
         const manifestJson = {
           generatedAt: new Date().toISOString(),
           extractionProfile: req._extractionProfile || 'standard',
@@ -2838,6 +3123,8 @@ async function runAnalyzePipeline(req, res) {
           duplicatesSkipped: fetched.contentDuplicatesSkipped || 0,
           skippedEntries: fetched.skipped,
           snapshots: snapshotEntries.length,
+          pagesWithDiscoveredImages: pagesManifestJson.filter((p) => p.discoveredImageCount > 0).length,
+          pagesWithArchivedImages: pagesManifestJson.filter((p) => p.archivedImageCount > 0).length,
           archiveBytes: fetched.archiveBytes || 0,
           cssSheetsProcessed: Number(scraperMeta.cssSheetsProcessed) || 0,
           elapsedMs: Date.now() - (req._analyzeStartedAt || Date.now()),
@@ -2850,7 +3137,15 @@ async function runAnalyzePipeline(req, res) {
           {
             name: 'manifests/pages.csv',
             buffer: Buffer.from(
-              ['order,url,html_bytes', ...pagesManifestJson.map((p) => `${p.order},${csvEscape(p.url)},${p.htmlBytes}`)].join('\n'),
+              [
+                'order,url,html_bytes,discovered_image_count,archived_image_count,discovered_image_urls,archived_files',
+                ...pagesManifestJson.map(
+                  (p) =>
+                    `${p.order},${csvEscape(p.url)},${p.htmlBytes},${p.discoveredImageCount},${p.archivedImageCount},${csvEscape(
+                      p.discoveredImageUrls.join(' | ')
+                    )},${csvEscape(p.archivedFiles.join(' | '))}`
+                ),
+              ].join('\n'),
               'utf8'
             ),
           },
@@ -2861,7 +3156,17 @@ async function runAnalyzePipeline(req, res) {
           {
             name: 'manifests/images.csv',
             buffer: Buffer.from(
-              ['order,file,source_url', ...imagesManifestJson.map((p) => `${p.order},${csvEscape(p.file)},${csvEscape(p.sourceUrl)}`)].join('\n'),
+              [
+                'order,file,source_url,source_page,source_pages,source_page_count,discovered_from',
+                ...imagesManifestJson.map(
+                  (p) =>
+                    `${p.order},${csvEscape(p.file)},${csvEscape(p.sourceUrl)},${csvEscape(
+                      p.sourcePage
+                    )},${csvEscape(p.sourcePages.join(' | '))},${p.sourcePageCount},${csvEscape(
+                      p.discoveredFrom.join(' | ')
+                    )}`
+                ),
+              ].join('\n'),
               'utf8'
             ),
           },
@@ -2884,8 +3189,26 @@ async function runAnalyzePipeline(req, res) {
             buffer: Buffer.from(pagesForImageHarvest.map((p) => p.url).join('\n'), 'utf8'),
           },
         ];
-        const pagesCsvText = ['order,url,html_bytes', ...pagesManifestJson.map((p) => `${p.order},${csvEscape(p.url)},${p.htmlBytes}`)].join('\n');
-        const imagesCsvText = ['order,file,source_url', ...imagesManifestJson.map((p) => `${p.order},${csvEscape(p.file)},${csvEscape(p.sourceUrl)}`)].join('\n');
+        const pagesCsvText = [
+          'order,url,html_bytes,discovered_image_count,archived_image_count,discovered_image_urls,archived_files',
+          ...pagesManifestJson.map(
+            (p) =>
+              `${p.order},${csvEscape(p.url)},${p.htmlBytes},${p.discoveredImageCount},${p.archivedImageCount},${csvEscape(
+                p.discoveredImageUrls.join(' | ')
+              )},${csvEscape(p.archivedFiles.join(' | '))}`
+          ),
+        ].join('\n');
+        const imagesCsvText = [
+          'order,file,source_url,source_page,source_pages,source_page_count,discovered_from',
+          ...imagesManifestJson.map(
+            (p) =>
+              `${p.order},${csvEscape(p.file)},${csvEscape(p.sourceUrl)},${csvEscape(
+                p.sourcePage
+              )},${csvEscape(p.sourcePages.join(' | '))},${p.sourcePageCount},${csvEscape(
+                p.discoveredFrom.join(' | ')
+              )}`
+          ),
+        ].join('\n');
         const manifestCsvText = [
           'metric,value',
           ...Object.entries(manifestJson).map(([k, v]) => `${csvEscape(k)},${csvEscape(v)}`),
@@ -2915,8 +3238,49 @@ async function runAnalyzePipeline(req, res) {
           assetsPayload.duplicatesSkipped = fetched.contentDuplicatesSkipped || 0;
           assetsPayload.pagesManifestCount = pagesManifestJson.length;
           assetsPayload.imagesManifestCount = imagesManifestJson.length;
+          assetsPayload.image_count = fetched.entries.length;
+          assetsPayload.imagesDownloaded = fetched.entries.length;
+          assetsPayload.images_downloaded = fetched.entries.length;
+          assetsPayload.imageCandidatesFound = allImageUrls.length;
+          assetsPayload.image_candidates_found = allImageUrls.length;
+          assetsPayload.imageDuplicatesSkipped = fetched.contentDuplicatesSkipped || 0;
+          assetsPayload.image_duplicates_skipped = fetched.contentDuplicatesSkipped || 0;
+          assetsPayload.assetFailures = fetched.fetchFailures || 0;
+          assetsPayload.asset_failures = fetched.fetchFailures || 0;
+          assetsPayload.pages_crawled = crawledPages.length;
+          assetsPayload.pages_discovered = crawledPages.length + crawlQueueRemaining;
+          assetsPayload.archiveSizeBytes = fetched.archiveBytes || 0;
+          assetsPayload.archive_size_bytes = fetched.archiveBytes || 0;
+          assetsPayload.archiveFileCount = assetsPayload.count;
+          assetsPayload.archive_file_count = assetsPayload.count;
+          assetsPayload.manifestCount = 3;
+          assetsPayload.manifest_count = 3;
+          assetsPayload.crawlStatus = 'completed';
+          assetsPayload.crawl_status = 'completed';
+          assetsPayload.downloadStatus = deriveExtractionStageStatus({
+            discoveredCount: allImageUrls.length,
+            archivedCount: fetched.entries.length,
+            failedCount: fetched.fetchFailures || 0,
+            archiveLocked: false,
+          });
+          assetsPayload.download_status = assetsPayload.downloadStatus;
+          assetsPayload.extractionStatus = assetsPayload.downloadStatus;
+          assetsPayload.extraction_status = assetsPayload.extractionStatus;
+          assetsPayload.archiveStatus = archiveExportAllowed ? 'completed' : 'locked';
+          assetsPayload.archive_status = assetsPayload.archiveStatus;
+          assetsPayload.manifestStatus = 'completed';
+          assetsPayload.manifest_status = 'completed';
+          assetsPayload.reportStatus = 'running';
+          assetsPayload.report_status = 'running';
+          assetsPayload.manifests = {
+            manifest: { name: 'manifest.json' },
+            images: { name: 'images.json' },
+            pages: { name: 'pages.json' },
+          };
           if (archiveExportAllowed) {
             assetsPayload.token = createSiteAssetDownload(zipBuf, 'site-assets.zip');
+            assetsPayload.zipUrl = `/api/site-images/${assetsPayload.token}`;
+            assetsPayload.zip_url = assetsPayload.zipUrl;
           } else {
             assetsPayload.token = null;
             assetsPayload.archiveLocked = true;
@@ -3046,16 +3410,16 @@ async function runAnalyzePipeline(req, res) {
       clientDelivery: Boolean(req._clientDelivery),
       servicePackage: req._servicePackage || '',
       scanMode: req._scanMode || 'elite',
-      promoAuthorized: Boolean(req._promoValid),
+      promoAuthorized: Boolean(req._privilegedAnalyze),
     });
 
     const systemContent =
       SYSTEM_PROMPT_BASE +
-      buildPromoOwnerQualityAddon(Boolean(req._promoValid)) +
+      buildPromoOwnerQualityAddon(Boolean(req._privilegedAnalyze)) +
       buildAnalyzerDeliveryAddons(Boolean(req._clientDelivery), req._servicePackage || '') +
-      buildScanModeSystemAddon(req._scanMode || 'elite', Boolean(req._promoValid));
+      buildScanModeSystemAddon(req._scanMode || 'elite', Boolean(req._privilegedAnalyze));
 
-    const reportMaxTokens = req._promoValid
+    const reportMaxTokens = req._privilegedAnalyze
       ? Math.min(
           16384,
           Math.max(MAX_OUTPUT_TOKENS, Number(process.env.OPENAI_MAX_TOKENS_PROMO_OWNER) || 12000)
@@ -3093,7 +3457,7 @@ async function runAnalyzePipeline(req, res) {
       return;
     }
 
-    const streamBudgetMs = req._promoValid
+    const streamBudgetMs = req._privilegedAnalyze
       ? Math.min(3_600_000, OPENAI_STREAM_MS * 4 + crawledPages.length * 40000)
       : Math.min(900000, OPENAI_STREAM_MS + crawledPages.length * 25000);
     const ac = new AbortController();
@@ -3213,7 +3577,7 @@ async function runAnalyzePipeline(req, res) {
       send({
         type: 'warning',
         code: 'truncated',
-        message: req._promoValid
+        message: req._privilegedAnalyze
           ? '\n\n---\n\n> **Output limit reached.** Raise `OPENAI_MAX_TOKENS_PROMO_OWNER` (cap 16384) or use a model with a higher completion limit, then re-run.\n'
           : '\n\n---\n\n> **Output limit reached.** The brief was truncated at the model token ceiling. Re-run with fewer images, shallower depth, or fewer analysis toggles for a complete report.\n',
       });
@@ -3229,7 +3593,7 @@ async function runAnalyzePipeline(req, res) {
 
     const ms = Date.now() - (req._analyzeStartedAt || Date.now());
     logEvent('info', 'analyze_success', { ip: clientIp(req), ms });
-    if (!req._promoValid) {
+    if (!req._privilegedAnalyze) {
       noteSuccessfulAnalyzeForCaptcha(clientIp(req));
     }
     if (analyzeUserId) {
@@ -3327,6 +3691,7 @@ async function runRevisePipeline(req, res) {
   let analyzePlan = null;
   let analyzeUserId = normalizeUserId(req.get('x-cloneai-user-id'));
   const promoBypass = Boolean(req._promoValid);
+  const privilegedBypass = Boolean(req._privilegedAnalyze);
 
   if (isBillingEnabled()) {
     const billingUserId = normalizeUserId(req.get('x-cloneai-user-id'));
@@ -3341,12 +3706,15 @@ async function runRevisePipeline(req, res) {
     }
     analyzeUserId = billingUserId;
 
-    if (promoBypass) {
-      logEvent('info', 'revise_promo_run', { ip: clientIp(req), userId: billingUserId });
-      analyzePlan = PLANS.POWER;
+    if (promoBypass || privilegedBypass) {
+      logEvent('info', privilegedBypass ? 'revise_owner_run' : 'revise_promo_run', {
+        ip: clientIp(req),
+        userId: billingUserId,
+      });
+      analyzePlan = privilegedBypass ? PLANS.POWER : PLANS.PRO;
       req._billingUserId = billingUserId;
       req._billingReservation = null;
-      req._billingPlan = PLANS.POWER;
+      req._billingPlan = analyzePlan;
     } else {
       const billingReservation = await tryBeginRun(billingUserId);
       if (!billingReservation.ok) {
@@ -3437,7 +3805,7 @@ async function runRevisePipeline(req, res) {
 
   try {
     const userMsg = buildReviseUserMessage(prior, fixNote);
-    const reviseMaxTokens = promoBypass
+    const reviseMaxTokens = privilegedBypass
       ? Math.min(
           16384,
           Math.max(MAX_OUTPUT_TOKENS, Number(process.env.OPENAI_MAX_TOKENS_PROMO_OWNER) || 12000)
@@ -3476,7 +3844,7 @@ async function runRevisePipeline(req, res) {
       label: 'Report writer (AI revise)',
     });
 
-    const reviseStreamBudgetMs = promoBypass
+    const reviseStreamBudgetMs = privilegedBypass
       ? Math.min(3_600_000, OPENAI_STREAM_MS * 4)
       : OPENAI_STREAM_MS;
     const ac = new AbortController();
@@ -3497,7 +3865,7 @@ async function runRevisePipeline(req, res) {
         send({
           type: 'error',
           message: isProd
-            ? 'The revision timed out. For coupon runs, try a shorter focus note or increase OPENAI_STREAM_TIMEOUT_MS.'
+            ? 'The revision timed out. For owner-token runs, try a shorter focus note or increase OPENAI_STREAM_TIMEOUT_MS.'
             : 'OpenAI request timed out.',
         });
         logEvent('error', 'revise_openai_timeout', { ip: clientIp(req) });
@@ -3613,7 +3981,7 @@ async function runRevisePipeline(req, res) {
 
     const ms = Date.now() - (req._analyzeStartedAt || Date.now());
     logEvent('info', 'revise_success', { ip: clientIp(req), ms });
-    if (!req._promoValid) {
+    if (!req._privilegedAnalyze) {
       noteSuccessfulAnalyzeForCaptcha(clientIp(req));
     }
     if (analyzeUserId) {
@@ -3939,7 +4307,7 @@ function onListen() {
   }
   if (configuredPromoCode()) {
     console.log(
-      'Promo: CLONEAI_PROMO_CODE is set — valid code skips Stripe run quota and uses owner-quality crawl/harvest/output limits (CORS, rate limits, SSRF, and OpenAI cost still apply).'
+      'Promo: CLONEAI_PROMO_CODE is set — valid code skips Stripe run quota while keeping normal paid-plan crawl/harvest caps. Use CLONEAI_OWNER_TOKEN for elevated owner-mode limits.'
     );
   }
 }

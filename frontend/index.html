@@ -524,6 +524,7 @@
           <h2 class="results-title">Report</h2>
           <div class="results-actions">
             <button type="button" class="btn-outline" id="rerun-btn">Re-run</button>
+            <button type="button" class="btn-outline" id="view-extraction-results-btn" hidden>View extracted assets</button>
             <button type="button" class="btn-outline btn-download-zip" id="download-images-btn" hidden>
               Download site assets (ZIP)
             </button>
@@ -533,6 +534,24 @@
             <button type="button" class="btn-filled" id="copy-brief-btn">Copy to Clipboard</button>
           </div>
         </div>
+        <section class="extraction-results" id="extraction-results" hidden>
+          <div class="extraction-results-head">
+            <div>
+              <h3 class="artifact-panel-title">Extraction Results</h3>
+              <p class="artifact-panel-sub" id="extraction-results-sub">
+                Real extracted assets, manifests, and page-to-image mappings from this run.
+              </p>
+            </div>
+            <div class="extraction-results-actions">
+              <button type="button" class="btn-outline" id="download-manifest-btn" hidden>Download manifest.json</button>
+              <button type="button" class="btn-outline" id="download-images-json-btn" hidden>Download images.json</button>
+              <button type="button" class="btn-outline" id="download-pages-json-btn" hidden>Download pages.json</button>
+            </div>
+          </div>
+          <div class="extraction-stats-grid" id="extraction-stats-grid"></div>
+          <p class="extraction-results-note muted" id="extraction-results-note" hidden></p>
+          <div class="extraction-preview-grid" id="extraction-preview-grid"></div>
+        </section>
         <section class="artifact-panel" id="artifact-panel" hidden>
           <div class="artifact-panel-head">
             <h3 class="artifact-panel-title">Extraction artifacts</h3>

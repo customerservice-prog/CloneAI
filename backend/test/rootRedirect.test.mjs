@@ -201,7 +201,7 @@ test('hostInCorsOriginsList parses comma-separated origins', () => {
   assert.equal(
     hostInCorsOriginsList(
       'siteclonerpro.com',
-      'https://siteclonerpro.com,https://www.siteclonerpro.com,https://cloneai-web.onrender.com'
+      'https://siteclonerpro.com,https://www.siteclonerpro.com,https://app.example.com'
     ),
     true
   );
@@ -239,10 +239,36 @@ test('APEX_STATIC_FALLBACK to static host redirects when STATIC_APP_URL unset (m
   assert.equal(r.location, 'https://cloneai-web-xyz.onrender.com/');
 });
 
-test('mergeStaticEnvWithSiteDefaults fills static for siteclonerpro.com', () => {
+test('mergeStaticEnvWithSiteDefaults uses explicit site override for siteclonerpro.com', () => {
+  const prev = process.env.CLONEAI_SITECLONER_STATIC_URL;
+  process.env.CLONEAI_SITECLONER_STATIC_URL = 'https://cloneai-web-xyz.onrender.com';
+  try {
+    const m = mergeStaticEnvWithSiteDefaults('siteclonerpro.com', '', '');
+    assert.equal(m.staticAppUrl, 'https://cloneai-web-xyz.onrender.com');
+    assert.equal(m.apexStaticFallbackUrl, 'https://cloneai-web-xyz.onrender.com');
+  } finally {
+    if (prev == null) delete process.env.CLONEAI_SITECLONER_STATIC_URL;
+    else process.env.CLONEAI_SITECLONER_STATIC_URL = prev;
+  }
+});
+
+test('mergeStaticEnvWithSiteDefaults leaves hosts unchanged when env empty', () => {
   const m = mergeStaticEnvWithSiteDefaults('siteclonerpro.com', '', '');
-  assert.equal(m.staticAppUrl, 'https://cloneai-web.onrender.com');
-  assert.equal(m.apexStaticFallbackUrl, 'https://cloneai-web.onrender.com');
+  assert.equal(m.staticAppUrl, '');
+  assert.equal(m.apexStaticFallbackUrl, '');
+});
+
+test('mergeStaticEnvWithSiteDefaults leaves other hosts unchanged even with site override', () => {
+  const prev = process.env.CLONEAI_SITECLONER_STATIC_URL;
+  process.env.CLONEAI_SITECLONER_STATIC_URL = 'https://cloneai-web-xyz.onrender.com';
+  try {
+    const m = mergeStaticEnvWithSiteDefaults('other.com', '', '');
+    assert.equal(m.staticAppUrl, '');
+    assert.equal(m.apexStaticFallbackUrl, '');
+  } finally {
+    if (prev == null) delete process.env.CLONEAI_SITECLONER_STATIC_URL;
+    else process.env.CLONEAI_SITECLONER_STATIC_URL = prev;
+  }
 });
 
 test('mergeStaticEnvWithSiteDefaults leaves other hosts unchanged when env empty', () => {

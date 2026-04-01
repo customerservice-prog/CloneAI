@@ -7,8 +7,8 @@
 #
 # cloneai-api below uses Native Node from repo root (build embeds SPA + Playwright). If your dashboard
 # still has Root Directory = backend and build = "npm ci && playwright…" only, you get API-only (no public/index.html).
-# Fix: Root Directory = (empty / repo root), Build = npm run render:backend-with-spa, Start = npm start --prefix backend
-# — or keep Root Directory = backend and set Build = cd .. && npm run render:backend-with-spa
+# Fix: Root Directory must be the repository root. In the dashboard leave it blank; do not type the literal
+# text "repo root". This Blueprint also pins it explicitly with `rootDir: .` for cloneai-api.
 #
 # Optional: deploy repo-root Dockerfile instead (Dashboard → Docker, dockerfilePath ./Dockerfile, context .).
 #
@@ -31,6 +31,7 @@ services:
   - type: web
     name: cloneai-api
     runtime: node
+    rootDir: .
     plan: starter
     healthCheckPath: /api/health
     buildCommand: npm run render:backend-with-spa
@@ -68,13 +69,14 @@ services:
         value: "https://siteclonerpro.com,https://www.siteclonerpro.com,https://cloneai-web.onrender.com"
       - key: FRONTEND_URL
         value: "https://siteclonerpro.com"
-      # If apex hits API-only (no public/) or misconfigured build, redirect to static host. When SPA is embedded, usually unused.
+      # If apex hits API-only (no public/) or misconfigured build, set one of these in the dashboard to the real static host.
+      # Leave unset by default: a stale hostname can redirect production traffic to a dead app.
       # GET / also redirects when the request Host appears in CORS_ORIGINS and differs from STATIC_APP_URL (covers FRONTEND_URL typos).
       - key: STATIC_APP_URL
-        value: "https://cloneai-web.onrender.com"
+        sync: false
       # When the apex hostname hits the API but the SPA is on cloneai-web, redirect browsers (backup if STATIC_APP_URL is missing in dashboard).
       - key: APEX_STATIC_FALLBACK_URL
-        value: "https://cloneai-web.onrender.com"
+        sync: false
       - key: OPENAI_API_KEY
         sync: false
       # Baked into the SPA during `render:backend-with-spa` (same-origin /api on apex when DNS points here).
@@ -89,8 +91,9 @@ services:
   - type: web
     name: cloneai-web
     runtime: static
-    buildCommand: cd frontend && npm ci && npm run build
-    staticPublishPath: frontend/dist
+    rootDir: frontend
+    buildCommand: npm ci && npm run build
+    staticPublishPath: dist
     routes:
       - type: rewrite
         source: /*

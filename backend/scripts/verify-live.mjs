@@ -37,6 +37,32 @@ function get(urlStr, headers = {}) {
   });
 }
 
+function normalizeRedirectLocation(baseUrl, locationValue) {
+  const raw = Array.isArray(locationValue) ? locationValue[0] : locationValue;
+  if (!raw) return '';
+  try {
+    return new URL(raw, baseUrl).toString();
+  } catch {
+    return '';
+  }
+}
+
+async function getFollowHtml(urlStr, headers = {}, redirectsLeft = 5) {
+  const resp = await get(urlStr, headers);
+  if ((resp.status === 301 || resp.status === 302) && redirectsLeft > 0) {
+    const nextUrl = normalizeRedirectLocation(urlStr, resp.headers.location);
+    if (!nextUrl) {
+      throw new Error('redirect without Location');
+    }
+    const next = await getFollowHtml(nextUrl, headers, redirectsLeft - 1);
+    return {
+      ...next,
+      redirectChain: [{ status: resp.status, url: nextUrl }, ...(next.redirectChain || [])],
+    };
+  }
+  return { ...resp, redirectChain: [] };
+}
+
 let failed = false;
 
 async function check(name, fn) {
@@ -65,16 +91,15 @@ if (api) {
 
 if (apex) {
   await check('Apex document response', async () => {
-    const { status, headers, body } = await get(`${apex}/`, {
+    const { status, headers, body, redirectChain } = await getFollowHtml(`${apex}/`, {
       Accept: 'text/html,application/xhtml+xml;q=0.9,*/*;q=0.8',
       'User-Agent': 'Mozilla/5.0 (compatible; CloneAI-verify-live/1.0)',
     });
-    const loc = headers.location;
     const ct = String(headers['content-type'] || '').toLowerCase();
-    if (status === 302 || status === 301) {
-      if (!loc) throw new Error('redirect without Location');
-      console.log(`      → ${status} ${Array.isArray(loc) ? loc[0] : loc}`);
-      return;
+    if (redirectChain.length > 0) {
+      for (const step of redirectChain) {
+        console.log(`      → ${step.status} ${step.url}`);
+      }
     }
     if (status === 200 && ct.includes('text/html')) {
       if (
@@ -91,6 +116,9 @@ if (apex) {
       throw new Error(
         'got JSON (API root). Set STATIC_APP_URL on the API or point DNS apex at cloneai-web — see docs/NAMECHEAP_RENDER.md'
       );
+    }
+    if (status === 404) {
+      throw new Error('final browser destination returned 404');
     }
     throw new Error(`unexpected ${status} content-type=${ct || '?'}`);
   });

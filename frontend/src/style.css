@@ -1733,6 +1733,108 @@ label.export-pref-stack {
   gap: 0.55rem;
 }
 
+.extraction-results {
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  padding: 1rem 1.05rem;
+  margin: 0 0 1rem;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.extraction-results-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.9rem;
+}
+
+.extraction-results-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+}
+
+.extraction-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 0.9rem;
+}
+
+.extraction-stat-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.9rem;
+}
+
+.extraction-stat-label {
+  display: block;
+  font-size: 0.72rem;
+  color: var(--muted);
+  margin-bottom: 0.35rem;
+}
+
+.extraction-stat-value {
+  display: block;
+  font-family: 'DM Mono', monospace;
+  font-size: 1rem;
+  color: var(--text);
+}
+
+.extraction-results-note {
+  margin: 0 0 0.9rem;
+  font-size: 0.82rem;
+}
+
+.extraction-preview-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 0.75rem;
+}
+
+.extraction-preview-card {
+  display: grid;
+  gap: 0.65rem;
+  padding: 0.8rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.02);
+  min-width: 0;
+}
+
+.extraction-preview-thumb {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+  border-radius: 10px;
+  background: var(--surface2);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.extraction-preview-file {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text2);
+  overflow-wrap: anywhere;
+}
+
+.extraction-preview-meta {
+  display: grid;
+  gap: 0.25rem;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.extraction-preview-url {
+  font-family: 'DM Mono', monospace;
+  font-size: 0.68rem;
+  color: var(--text3);
+  overflow-wrap: anywhere;
+}
+
 .progress-card {
   background: var(--surface);
   border: 1px solid var(--border2);
@@ -2478,6 +2580,10 @@ button.metric-card-interactive:focus-visible {
   }
 
   .scorecard {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .extraction-stats-grid {
     grid-template-columns: repeat(2, 1fr);
   }
 

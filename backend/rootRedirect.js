@@ -60,15 +60,12 @@ export function normalizePublicAppBase(raw) {
   }
 }
 
-/** Built-in SPA origin when apex hits the API but Render env vars were never synced (override with CLONEAI_SITECLONER_STATIC_URL). */
-const SITECLONER_STATIC_DEFAULT = 'https://cloneai-web.onrender.com';
-const SITECLONER_MARKETING_HOST_TO_STATIC = {
-  'siteclonerpro.com': SITECLONER_STATIC_DEFAULT,
-  'www.siteclonerpro.com': SITECLONER_STATIC_DEFAULT,
-};
+/** Known marketing hosts for CloneAI / Site Cloner Pro. */
+const SITECLONER_MARKETING_HOSTS = new Set(['siteclonerpro.com', 'www.siteclonerpro.com']);
 
 /**
- * Fill STATIC_APP_URL / APEX fallbacks when the dashboard omitted them but the request host is a known marketing domain.
+ * Fill STATIC_APP_URL / APEX fallbacks from explicit env only.
+ * Never invent a static host in production: a stale built-in hostname can redirect browsers to a dead app.
  * @param {string | undefined} reqHost
  * @param {string} staticRaw
  * @param {string} apexRaw
@@ -83,7 +80,7 @@ export function mergeStaticEnvWithSiteDefaults(reqHost, staticRaw, apexRaw) {
   if (!a && envDefault) a = envDefault;
 
   const custom = (process.env.CLONEAI_SITECLONER_STATIC_URL || '').trim();
-  const hostFallback = custom || SITECLONER_MARKETING_HOST_TO_STATIC[h] || '';
+  const hostFallback = SITECLONER_MARKETING_HOSTS.has(h) ? custom : '';
   if (!s && hostFallback) s = hostFallback;
   if (!a && hostFallback) a = hostFallback;
 
@@ -98,7 +95,7 @@ export function redirectKnownMarketingApexToStatic(req, staticAppRaw) {
   const staticBase = normalizePublicAppBase(staticAppRaw);
   if (!staticBase) return null;
   const reqHost = normalizeHostLabel(req.hostname || req.get('host'));
-  if (!SITECLONER_MARKETING_HOST_TO_STATIC[reqHost]) return null;
+  if (!SITECLONER_MARKETING_HOSTS.has(reqHost)) return null;
   const incoming = requestPublicOrigin(req);
   if (incoming && staticBase === incoming) return null;
   return `${staticBase}/`;
