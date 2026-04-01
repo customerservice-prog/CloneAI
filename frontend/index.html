@@ -189,6 +189,13 @@
               placeholder="https://example.com"
               autocomplete="url"
             />
+            <div class="openai-server-notice hidden" id="openai-server-notice" role="status" aria-live="polite">
+              <span class="openai-server-notice-icon" aria-hidden="true">🔒</span>
+              <div class="openai-server-notice-body">
+                <p class="openai-server-notice-title" id="openai-server-notice-title"></p>
+                <p class="openai-server-notice-detail muted" id="openai-server-notice-detail"></p>
+              </div>
+            </div>
             <p class="depth-label">
               Scan depth
               <span class="depth-label-hint">(same-host pages + snapshots + harvested images)</span>

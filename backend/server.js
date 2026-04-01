@@ -332,6 +332,12 @@ const upload = multer({
   },
 });
 
+/** True when OPENAI_API_KEY looks like a real key (matches analyze / revise gates). */
+function isOpenAiConfigured() {
+  const k = (process.env.OPENAI_API_KEY || '').trim();
+  return Boolean(k && k !== 'your_key_here' && !k.startsWith('sk-your'));
+}
+
 function requireIngressKey(req, res, next) {
   const expected = process.env.CLONEAI_INGRESS_KEY?.trim();
   if (!expected) return next();
@@ -823,7 +829,7 @@ if (!serveSpa) {
 }
 
 app.get('/api/health', (_req, res) => {
-  res.json({ status: 'ok' });
+  res.json({ status: 'ok', openaiConfigured: isOpenAiConfigured() });
 });
 
 app.get('/api/billing/status', requireIngressKey, (req, res) => {
@@ -1445,9 +1451,7 @@ function mapOpenAiFailureStatus(status) {
 
 async function runAnalyzePipeline(req, res) {
   const apiKey = process.env.OPENAI_API_KEY;
-  const openAiConfigured = Boolean(
-    apiKey && apiKey !== 'your_key_here' && !apiKey.startsWith('sk-your')
-  );
+  const openAiConfigured = isOpenAiConfigured();
 
   const ipGate = clientIp(req);
   const slotTry = tryAcquireAnalyzeSlot(req.get('x-cloneai-user-id'), ipGate);
@@ -2388,9 +2392,7 @@ async function runAnalyzePipeline(req, res) {
 
 async function runRevisePipeline(req, res) {
   const apiKey = process.env.OPENAI_API_KEY;
-  const openAiConfigured = Boolean(
-    apiKey && apiKey !== 'your_key_here' && !apiKey.startsWith('sk-your')
-  );
+  const openAiConfigured = isOpenAiConfigured();
 
   const ipGate = clientIp(req);
   const slotTry = tryAcquireAnalyzeSlot(req.get('x-cloneai-user-id'), ipGate);

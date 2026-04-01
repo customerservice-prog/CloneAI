@@ -53,6 +53,7 @@ const API_AUTH_LOGIN = apiUrl('/api/auth/login');
 const API_ANALYTICS_TRACK = apiUrl('/api/analytics/track');
 const API_LEADS_DFY = apiUrl('/api/leads/dfy');
 const API_ASSET_PIPELINE_ENHANCE = apiUrl('/api/asset-pipeline/enhance');
+const API_HEALTH = apiUrl('/api/health');
 const PUBLIC_APP_FALLBACK = (import.meta.env.VITE_PUBLIC_APP_URL || '').trim().replace(/\/$/, '');
 const INGRESS_KEY = import.meta.env.VITE_CLONEAI_KEY?.trim();
 const TURNSTILE_SITE_KEY = import.meta.env.VITE_TURNSTILE_SITE_KEY?.trim();
@@ -406,6 +407,44 @@ function updateScanPromoHint() {
   const el = $('#scan-promo-hint');
   if (!el) return;
   el.classList.toggle('hidden', !billingCache.promoUnlocked);
+}
+
+/** Hide the URL-tab notice when GET /api/health reports openaiConfigured (key lives on the server only). */
+async function refreshOpenAiServerNotice() {
+  const wrap = $('#openai-server-notice');
+  const titleEl = $('#openai-server-notice-title');
+  const detailEl = $('#openai-server-notice-detail');
+  if (!wrap || !titleEl || !detailEl) return;
+  if (!API_HEALTH) {
+    wrap.classList.add('hidden');
+    return;
+  }
+  try {
+    const res = await fetch(API_HEALTH);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      titleEl.textContent = 'Could not reach the API';
+      detailEl.textContent =
+        'Start the backend (from the repo root, npm run dev starts API + this app). The OpenAI key is read from backend/.env on the server — not from browser settings.';
+      wrap.classList.remove('hidden');
+      return;
+    }
+    if (data.openaiConfigured) {
+      wrap.classList.add('hidden');
+      titleEl.textContent = '';
+      detailEl.textContent = '';
+      return;
+    }
+    titleEl.textContent = 'OpenAI is not configured on the API server yet';
+    detailEl.textContent =
+      'Set OPENAI_API_KEY in backend/.env on the machine running the API, save the file, then restart the server. This page has no OpenAI “settings” field — analysis always uses the server key.';
+    wrap.classList.remove('hidden');
+  } catch {
+    titleEl.textContent = 'Could not reach the API';
+    detailEl.textContent =
+      'Check that the backend is running and you are using same-origin /api (e.g. npm run dev). OpenAI keys belong in backend/.env only.';
+    wrap.classList.remove('hidden');
+  }
 }
 
 async function refreshBillingStatus() {
@@ -2961,6 +3000,7 @@ function init() {
   handleCheckoutReturnQuery();
   buildTryAnotherChips();
   updatePlanGatedControls();
+  void refreshOpenAiServerNotice();
   refreshBillingStatus();
   updateExportGatedControls();
   updateReportChrome();

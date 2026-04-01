@@ -2735,6 +2735,50 @@ button.metric-card-interactive:focus-visible {
   line-height: 1.4;
 }
 
+.openai-server-notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.65rem;
+  margin: 0.75rem 0 0.35rem;
+  padding: 0.65rem 0.85rem;
+  border-radius: 10px;
+  border: 1px solid rgba(251, 191, 36, 0.35);
+  background: rgba(251, 191, 36, 0.08);
+  font-size: 0.82rem;
+  line-height: 1.45;
+  color: var(--text2);
+}
+
+.openai-server-notice.hidden {
+  display: none;
+}
+
+.openai-server-notice-icon {
+  flex-shrink: 0;
+  font-size: 1.1rem;
+  line-height: 1.2;
+  margin-top: 0.05rem;
+}
+
+.openai-server-notice-title {
+  margin: 0 0 0.25rem;
+  font-weight: 600;
+  color: var(--amber);
+}
+
+.openai-server-notice-detail {
+  margin: 0;
+  font-size: 0.8rem;
+}
+
+.openai-server-notice-body code {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.78em;
+  padding: 0.08rem 0.28rem;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.25);
+}
+
 .tab-pro-badge {
   margin-left: 0.35rem;
   font-size: 0.62rem;
