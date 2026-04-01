@@ -59,7 +59,7 @@ import {
 import { appendLeadRecord } from './leadsStore.js';
 import { promoMatchesRequest, configuredPromoCode } from './promoCode.js';
 import { probeSinkMiddleware } from './probeSink.js';
-import { resolveRootGet, formatRootLandingHtml, mergeStaticEnvWithSiteDefaults } from './rootRedirect.js';
+import { resolveRootGet, mergeStaticEnvWithSiteDefaults } from './rootRedirect.js';
 import {
   analysisReuseEnabled,
   analysisFastReplayEnabled,
@@ -1274,7 +1274,7 @@ function scheduleExtractionJobPump() {
           })
           .finally(() => {
             activeExtractionJobIds.delete(nextJob.id);
-            scheduleExtractionJobPump();
+            requestExtractionJobPump('job_complete');
           });
       }
     } catch (err) {
@@ -1283,6 +1283,15 @@ function scheduleExtractionJobPump() {
       });
     }
   });
+}
+
+function requestExtractionJobPump(reason = 'unspecified') {
+  if (typeof scheduleExtractionJobPump !== 'function') {
+    logEvent('warn', 'job_pump_unavailable', { reason });
+    return false;
+  }
+  scheduleExtractionJobPump();
+  return true;
 }
 
 function authorizeExtractionJobAccess(req, res, job) {
@@ -1365,24 +1374,10 @@ if (!serveSpa) {
       return;
     }
     if (rootGetPrefersHtml(req)) {
-      res.type('html').send(
-        formatRootLandingHtml({
-          hint: r.hint,
-          frontendUrl: front || null,
-          staticAppUrl: staticApp || null,
-          apexStaticFallbackUrl: apexFallback || null,
-          requestHost: req.hostname || req.get('host') || '',
-        })
-      );
+      res.status(404).type('text/plain; charset=utf-8').send('Not found.');
       return;
     }
-    res.type('application/json').send({
-      ok: true,
-      service: 'cloneai-api',
-      docs: 'Use POST /api/analyze, POST /api/analyze-revise (JSON), and GET /api/health — the web app is hosted separately.',
-      health: '/api/health',
-      hint: r.hint,
-    });
+    res.status(404).type('application/json').send({ ok: false, error: 'Not found.' });
   });
 }
 
@@ -3808,7 +3803,7 @@ app.post(
         sourceIp: clientIp(req),
         input: buildExtractionJobInputFromRequest(req),
       });
-      scheduleExtractionJobPump();
+      requestExtractionJobPump('job_created');
       res.status(202).json({
         ok: true,
         jobId: job.id,
@@ -3886,7 +3881,7 @@ app.use((err, _req, res, next) => {
 });
 
 function onListen() {
-  scheduleExtractionJobPump();
+  requestExtractionJobPump('server_listen');
   console.log(`CloneAI backend listening on http://localhost:${listenPort}`);
   if (serveSpa) {
     console.log(`Serving bundled SPA from ${spaRoot} (same origin as API)`);
