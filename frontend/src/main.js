@@ -31,7 +31,15 @@ const API_BASE = (() => {
 /** Dev with no explicit API host: same-origin `/api/...` so Vite proxies to the backend (see vite.config.js). */
 function apiUrl(path) {
   const p = path.startsWith('/') ? path : `/${path}`;
-  if (API_BASE) return `${API_BASE}${p}`;
+  const configured = (API_BASE || '').replace(/\/$/, '');
+  if (typeof window !== 'undefined' && isProd) {
+    const pageOrigin = window.location.origin.replace(/\/$/, '');
+    if (!configured || pageOrigin === configured) {
+      return p;
+    }
+    return `${configured}${p}`;
+  }
+  if (configured) return `${configured}${p}`;
   if (isProd) return '';
   return p;
 }
@@ -437,6 +445,24 @@ async function refreshBillingStatus() {
     if (reqId !== billingStatusRequestId) return;
     const data = await res.json().catch(() => ({}));
     if (reqId !== billingStatusRequestId) return;
+    if (res.status === 403 && data.code === 'INGRESS_FORBIDDEN') {
+      billingCache.enabled = false;
+      billingCache.plan = 'guest';
+      billingCache.promoUnlocked = false;
+      usageWrap.classList.remove('hidden');
+      usageEl.textContent = 'Runs: API key required';
+      showConfigToastOnce(
+        'Server expects X-CloneAI-Key — set VITE_CLONEAI_KEY in the frontend build to match CLONEAI_INGRESS_KEY on the API.',
+        5200
+      );
+      urgentEl?.classList.add('hidden');
+      upBtn.classList.remove('hidden');
+      upBtn.textContent = 'Plans';
+      syncLoginBtn(false);
+      updatePlanGatedControls();
+      updateExportGatedControls();
+      return;
+    }
     if (!res.ok || typeof data.enabled !== 'boolean') {
       billingCache.enabled = false;
       billingCache.plan = 'guest';
@@ -444,7 +470,7 @@ async function refreshBillingStatus() {
       usageWrap.classList.remove('hidden');
       usageEl.textContent = 'Runs: not synced';
       showConfigToastOnce(
-        'Could not load run balance — check API URL, VITE_CLONEAI_KEY, and CORS_ORIGINS.',
+        'Could not load run balance — check API URL (same host as this page when possible), VITE_CLONEAI_KEY, and CORS_ORIGINS.',
         4200
       );
       urgentEl?.classList.add('hidden');
@@ -494,6 +520,7 @@ async function refreshBillingStatus() {
     let suffix = data.plan === 'free' ? 'lifetime' : 'this month';
     if (data.bonusRuns > 0) suffix += ` · +${data.bonusRuns} bonus`;
     if (data.promoUnlocked) suffix += ' · authorized code';
+    if (data.clientIdUnset) suffix += ' · allow storage for accurate count';
     usageEl.innerHTML = `<strong>${used} / ${lim}</strong> runs used · ${escapeHtml(planLabel)} <span style="opacity:.85">(${suffix})</span>`;
 
     const ratio = lim > 0 ? used / lim : 0;
@@ -2078,101 +2105,123 @@ async function parseSseStream(response, { onText, signal } = {}) {
   let buffer = '';
   let completed = false;
 
+  const processEventPayload = async (data) => {
+    if (data.type === 'plan_notice' && Array.isArray(data.messages) && data.messages.length) {
+      const banner = $('#mid-flow-plan-notice');
+      if (banner) {
+        banner.textContent = data.messages.join(' ');
+        banner.hidden = false;
+        clearTimeout(planNoticeAutoHideTimer);
+        planNoticeAutoHideTimer = setTimeout(() => {
+          planNoticeAutoHideTimer = null;
+          banner.hidden = true;
+          banner.textContent = '';
+        }, 4200);
+      }
+    }
+    if (data.type === 'harvest_progress') {
+      const hEl = $('#harvest-live-stats');
+      if (hEl) {
+        hEl.hidden = false;
+        const pc = Number(data.pagesCrawled) || 0;
+        const ql = Number(data.queueLength) || 0;
+        hEl.textContent = `Live: ${pc} page(s) crawled · ${ql} link(s) queued`;
+      }
+    }
+    if (data.type === 'stage') {
+      applyStageEvent(data);
+      if (
+        data.phase === 'done' &&
+        typeof data.index === 'number' &&
+        data.index < REPORT_WRITER_AGENT_INDEX
+      ) {
+        const slow = billingCache.enabled && planOrPromoProOrPower() ? 1 : 1.45;
+        const ms = Math.floor((320 + Math.random() * 220) * slow);
+        await new Promise((r) => setTimeout(r, ms));
+      }
+    }
+    if (data.type === 'meta') {
+      if (data.billing && typeof data.billing === 'object') {
+        lastStreamBilling = {
+          plan: data.billing.plan ?? null,
+          billingEnabled: Boolean(data.billing.billingEnabled),
+          isFreePlan: Boolean(data.billing.isFreePlan),
+          appOrigin: data.billing.appOrigin ? String(data.billing.appOrigin).trim() : null,
+        };
+      }
+      if (data.scraper) {
+        const sc =
+          data.runFocus && typeof data.scraper === 'object'
+            ? { ...data.scraper, runFocus: data.runFocus }
+            : data.scraper;
+        applyMetaScraper(sc);
+      }
+      if (data.assets) applyAssetsMeta(data.assets);
+      const pp = $('#priority-processing-pill');
+      if (pp) pp.classList.toggle('hidden', !data.priorityQueue);
+    }
+    if (data.type === 'warning' && data.message) {
+      fullBriefText += data.message;
+      onText?.();
+    }
+    if (data.type === 'text' && data.content) {
+      fullBriefText += data.content;
+      onText?.();
+    }
+    if (data.type === 'error') {
+      throw new Error(data.message || 'Analysis failed');
+    }
+    if (data.type === 'done') {
+      completed = true;
+      return true;
+    }
+    return false;
+  };
+
+  const processSseBlock = async (block) => {
+    const lines = block.split('\n');
+    for (const line of lines) {
+      const tr = line.trim();
+      if (!tr.startsWith('data:')) continue;
+      const payload = tr.slice(5).trim();
+      if (!payload) continue;
+      let data;
+      try {
+        data = JSON.parse(payload);
+      } catch {
+        continue;
+      }
+      if (await processEventPayload(data)) return true;
+    }
+    return false;
+  };
+
+  const drainBuffer = async () => {
+    let sep;
+    while ((sep = buffer.indexOf('\n\n')) !== -1) {
+      const block = buffer.slice(0, sep);
+      buffer = buffer.slice(sep + 2);
+      if (await processSseBlock(block)) return true;
+    }
+    return false;
+  };
+
   while (true) {
     if (signal?.aborted) {
       throw new Error('Request cancelled.');
     }
     const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let sep;
-    while ((sep = buffer.indexOf('\n\n')) !== -1) {
-      const block = buffer.slice(0, sep);
-      buffer = buffer.slice(sep + 2);
-      const lines = block.split('\n');
-      for (const line of lines) {
-        const tr = line.trim();
-        if (!tr.startsWith('data:')) continue;
-        const payload = tr.slice(5).trim();
-        if (!payload) continue;
-        let data;
-        try {
-          data = JSON.parse(payload);
-        } catch {
-          continue;
-        }
-        if (data.type === 'plan_notice' && Array.isArray(data.messages) && data.messages.length) {
-          const banner = $('#mid-flow-plan-notice');
-          if (banner) {
-            banner.textContent = data.messages.join(' ');
-            banner.hidden = false;
-            clearTimeout(planNoticeAutoHideTimer);
-            planNoticeAutoHideTimer = setTimeout(() => {
-              planNoticeAutoHideTimer = null;
-              banner.hidden = true;
-              banner.textContent = '';
-            }, 4200);
-          }
-        }
-        if (data.type === 'harvest_progress') {
-          const hEl = $('#harvest-live-stats');
-          if (hEl) {
-            hEl.hidden = false;
-            const pc = Number(data.pagesCrawled) || 0;
-            const ql = Number(data.queueLength) || 0;
-            hEl.textContent = `Live: ${pc} page(s) crawled · ${ql} link(s) queued`;
-          }
-        }
-        if (data.type === 'stage') {
-          applyStageEvent(data);
-          if (
-            data.phase === 'done' &&
-            typeof data.index === 'number' &&
-            data.index < REPORT_WRITER_AGENT_INDEX
-          ) {
-            const slow = billingCache.enabled && planOrPromoProOrPower() ? 1 : 1.45;
-            const ms = Math.floor((320 + Math.random() * 220) * slow);
-            await new Promise((r) => setTimeout(r, ms));
-          }
-        }
-        if (data.type === 'meta') {
-          if (data.billing && typeof data.billing === 'object') {
-            lastStreamBilling = {
-              plan: data.billing.plan ?? null,
-              billingEnabled: Boolean(data.billing.billingEnabled),
-              isFreePlan: Boolean(data.billing.isFreePlan),
-              appOrigin: data.billing.appOrigin ? String(data.billing.appOrigin).trim() : null,
-            };
-          }
-          if (data.scraper) {
-            const sc =
-              data.runFocus && typeof data.scraper === 'object'
-                ? { ...data.scraper, runFocus: data.runFocus }
-                : data.scraper;
-            applyMetaScraper(sc);
-          }
-          if (data.assets) applyAssetsMeta(data.assets);
-          const pp = $('#priority-processing-pill');
-          if (pp) pp.classList.toggle('hidden', !data.priorityQueue);
-        }
-        if (data.type === 'warning' && data.message) {
-          fullBriefText += data.message;
-          onText?.();
-        }
-        if (data.type === 'text' && data.content) {
-          fullBriefText += data.content;
-          onText?.();
-        }
-        if (data.type === 'error') {
-          throw new Error(data.message || 'Analysis failed');
-        }
-        if (data.type === 'done') {
-          completed = true;
-          return;
-        }
-      }
+    if (value) buffer += decoder.decode(value, { stream: true });
+    if (done) {
+      buffer += decoder.decode();
+      break;
     }
+    if (await drainBuffer()) return;
   }
+
+  if (await drainBuffer()) return;
+  const tail = buffer.trim();
+  if (tail && (await processSseBlock(tail))) return;
 
   if (signal?.aborted) {
     throw new Error('Request cancelled.');
@@ -2638,17 +2687,25 @@ async function runAnalyze() {
 
     $('#progress-section').hidden = true;
     $('#results-section').hidden = false;
-    await refreshBillingStatus();
+    try {
+      await refreshBillingStatus();
+    } catch {
+      /* refreshBillingStatus already handles errors internally */
+    }
     try {
       localStorage.setItem(LS_BRIEF_OK, '1');
     } catch {
       /* ignore */
     }
-    resetTurnstileAfterRun();
-    void ensureTurnstileMounted();
-    trackClientEvent('run_completed', { depth, tab: activeTab });
-    updatePostResultUpsell();
-    updateReportChrome();
+    try {
+      resetTurnstileAfterRun();
+      void ensureTurnstileMounted();
+      trackClientEvent('run_completed', { depth, tab: activeTab });
+      updatePostResultUpsell();
+      updateReportChrome();
+    } catch (postErr) {
+      console.error(postErr);
+    }
     $('#try-another-section')?.removeAttribute('hidden');
   } catch (e) {
     console.error(e);
@@ -2670,6 +2727,9 @@ async function runAnalyze() {
     if (/failed to fetch|networkerror|load failed/i.test(errMsg)) {
       errMsg =
         'Network error — check your connection, disable VPN/ad-block for this site, and confirm the API URL (VITE_API_URL) is correct.';
+    } else if (/connection closed before the brief finished/i.test(errMsg)) {
+      errMsg =
+        'The response stream ended early (often a proxy or browser timeout during long runs). Try again, use a shallower scan, or run the app via `npm run dev` from the repo root with API + Vite together. If you use only `npm run dev` in `frontend`, extend the Vite proxy timeout or point VITE_API_URL at the API directly.';
     }
     fullBriefText = `## Something went wrong\n\n${escapeHtml(errMsg)}\n\n**Try again** with the same inputs. If failures repeat, **upgrade** for deeper crawls and higher limits — complex sites are often more reliable on **Pro**.\n\nTap **Re-run** or **Upgrade** in the header.`;
     $('#summary-content').innerHTML = renderMarkdown(fullBriefText);

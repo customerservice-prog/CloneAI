@@ -260,7 +260,19 @@ export async function getBillingStatus(req, res) {
 
   const userId = normalizeUserId(req.get('x-cloneai-user-id'));
   if (!userId) {
-    res.status(400).json({ success: false, code: 'MISSING_USER_ID', error: 'MISSING_USER_ID' });
+    res.json({
+      enabled: true,
+      plan: PLANS.FREE,
+      limit: 1,
+      used: 0,
+      remaining: 1,
+      usedThisPeriod: 0,
+      bonusRuns: 0,
+      usageResetAt: null,
+      stripeConfigured: Boolean(process.env.STRIPE_SECRET_KEY?.trim()),
+      promoUnlocked: promoMatchesRequest(req),
+      clientIdUnset: true,
+    });
     return;
   }
 
