@@ -5,6 +5,7 @@ import {
   normalizePublicAppBase,
   redirectTargetWhenFrontendHostHitsApi,
   apexMismatchRedirectTarget,
+  frontendMarketingHostMatches,
   acceptLooksLikeBrowserNavigation,
   browserSafeFrontendRedirectTarget,
 } from '../rootRedirect.js';
@@ -32,6 +33,26 @@ test('acceptLooksLikeBrowserNavigation', () => {
   assert.equal(acceptLooksLikeBrowserNavigation('*/*'), true);
   assert.equal(acceptLooksLikeBrowserNavigation('application/json'), false);
   assert.equal(acceptLooksLikeBrowserNavigation(''), true);
+});
+
+test('frontendMarketingHostMatches: www in FRONTEND_URL matches bare apex request', () => {
+  assert.equal(frontendMarketingHostMatches('siteclonerpro.com', 'https://www.siteclonerpro.com'), true);
+  assert.equal(frontendMarketingHostMatches('www.siteclonerpro.com', 'https://siteclonerpro.com'), true);
+  assert.equal(frontendMarketingHostMatches('other.com', 'https://siteclonerpro.com'), false);
+});
+
+test('STATIC_APP_URL: apex request redirects when FRONTEND_URL uses www', () => {
+  const req = mockReq({
+    protocol: 'https',
+    hostname: 'siteclonerpro.com',
+    accept: 'text/html',
+  });
+  const r = resolveRootGet(req, {
+    frontendUrl: 'https://www.siteclonerpro.com',
+    staticAppUrl: 'https://cloneai-web-abc.onrender.com',
+  });
+  assert.equal(r.kind, 'redirect');
+  assert.equal(r.location, 'https://cloneai-web-abc.onrender.com/');
 });
 
 test('STATIC_APP_URL: same host as FRONTEND_URL redirects to static origin', () => {

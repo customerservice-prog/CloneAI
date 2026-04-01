@@ -5,6 +5,12 @@
 # Services: cloneai-api (Docker), cloneai-web (static Vite app). Recommended stack with
 # Namecheap: DNS only at registrar; no Vercel required.
 #
+# If your Render service uses Native Node + "npm start" (backend/) instead of Docker, set:
+#   Root Directory = (repo root, empty)
+#   Build Command  = npm run render:backend-with-spa
+#   Start Command  = npm start --prefix backend
+# That copies the built SPA into backend/public so siteclonerpro.com serves the app + API.
+#
 # First deploy: set OPENAI_API_KEY in the dashboard (sync: false).
 # CORS_ORIGINS must list every browser origin (apex + www). FRONTEND_URL = canonical site (Stripe redirects).
 # Billing: BILLING_ENABLED=true requires Stripe secrets + price IDs in the dashboard; without them checkout returns 503.
@@ -46,12 +52,13 @@ services:
       - key: BILLING_ENABLED
         value: "true"
       - key: CORS_ORIGINS
-        value: "https://siteclonerpro.com,https://www.siteclonerpro.com"
+        value: "https://siteclonerpro.com,https://www.siteclonerpro.com,https://cloneai-web.onrender.com"
       - key: FRONTEND_URL
         value: "https://siteclonerpro.com"
-      # Copy from Render → cloneai-web → your static site URL (https://…onrender.com). Unblocks apex→API DNS mistakes.
+      # If apex DNS hits this service but the image is API-only (no public/), redirect browsers to the static service.
+      # Monolith image (repo-root Dockerfile) includes the SPA — then this redirect is unused. Override if your static URL differs.
       - key: STATIC_APP_URL
-        sync: false
+        value: "https://cloneai-web.onrender.com"
       # If apex hits the API but www (or another host) serves the SPA, set this so GET / redirects browsers there.
       # Example: https://www.siteclonerpro.com after adding www on cloneai-web in Render.
       - key: APEX_STATIC_FALLBACK_URL

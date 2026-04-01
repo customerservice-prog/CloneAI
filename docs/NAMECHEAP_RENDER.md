@@ -91,7 +91,9 @@ That means **DNS for `siteclonerpro.com` is pointing at the API service**, not *
 2. Render → **`cloneai-api`** → **Environment** → add **`STATIC_APP_URL`** = that URL (no trailing slash).
 3. Redeploy **`cloneai-api`**. Visiting **`https://siteclonerpro.com`** will **302** to the static host so the app loads.
 
-`render.yaml` includes **`STATIC_APP_URL`** with `sync: false` so new Blueprint installs are prompted; existing services can add it manually.
+**Alternative:** If you already added **`www`** on **`cloneai-web`** in Render and DNS for **`www`** is correct, set **`APEX_STATIC_FALLBACK_URL`** = `https://www.siteclonerpro.com` on **`cloneai-api`**. Browsers that hit the apex (API) will be redirected to **`www`**, where the SPA loads.
+
+`render.yaml` includes **`STATIC_APP_URL`** and **`APEX_STATIC_FALLBACK_URL`** with `sync: false` so you set one of them in the dashboard; existing services can add either manually.
 
 ---
 

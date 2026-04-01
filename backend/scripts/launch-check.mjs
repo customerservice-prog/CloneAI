@@ -99,9 +99,10 @@ if (relaxBillingLocal && billingOn) {
 if (wantProd) {
   console.log('(production rules: CORS + billing bundle verified)');
   const staticApp = (process.env.STATIC_APP_URL || process.env.WEB_APP_PUBLIC_URL || '').trim();
-  if (!staticApp) {
+  const apexFb = (process.env.APEX_STATIC_FALLBACK_URL || '').trim();
+  if (!staticApp && !apexFb) {
     console.warn(
-      '[optional] STATIC_APP_URL unset — if apex DNS points at this API, set it to your static SPA URL (docs/NAMECHEAP_RENDER.md).'
+      '[optional] STATIC_APP_URL / APEX_STATIC_FALLBACK_URL unset — if apex DNS points at this API, set one of them (docs/NAMECHEAP_RENDER.md).'
     );
   }
 } else {

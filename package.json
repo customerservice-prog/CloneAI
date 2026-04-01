@@ -4,11 +4,13 @@
   "type": "module",
   "scripts": {
     "dev": "node scripts/dev.mjs",
+    "dev:web": "npm run dev --prefix frontend",
     "test": "npm test --prefix backend",
     "smoke": "npm run smoke --prefix backend",
     "adversarial": "npm run adversarial --prefix backend",
     "image-pipeline": "npm run image-pipeline --prefix backend",
     "build": "npm run build --prefix frontend",
+    "render:backend-with-spa": "node scripts/publish-spa-to-backend.mjs && npm ci --prefix backend --omit=dev",
     "verify": "npm test --prefix backend && npm run build --prefix frontend",
     "verify-live": "npm run verify-live --prefix backend",
     "preflight": "npm run verify && npm run launch-check:dev",

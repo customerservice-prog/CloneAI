@@ -72,6 +72,21 @@ export function frontendHostnameFromEnv(frontRaw) {
 }
 
 /**
+ * True when the request host is the FRONTEND_URL host or its www / bare apex pair
+ * (e.g. FRONTEND_URL=https://www.example.com and request Host is example.com).
+ */
+export function frontendMarketingHostMatches(reqHost, frontRaw) {
+  const frontHost = frontendHostnameFromEnv(frontRaw);
+  if (!frontHost || !reqHost) return false;
+  if (reqHost === frontHost) return true;
+  if (frontHost.startsWith('www.')) {
+    const bare = frontHost.slice(4);
+    return reqHost === bare;
+  }
+  return reqHost === `www.${frontHost}`;
+}
+
+/**
  * @param {import('express').Request} req
  * @param {string} frontRaw
  * @param {string} staticAppRaw STATIC_APP_URL or WEB_APP_PUBLIC_URL
@@ -79,9 +94,8 @@ export function frontendHostnameFromEnv(frontRaw) {
 export function redirectTargetWhenFrontendHostHitsApi(req, frontRaw, staticAppRaw) {
   const staticBase = normalizePublicAppBase(staticAppRaw);
   if (!staticBase) return null;
-  const frontHost = frontendHostnameFromEnv(frontRaw);
   const reqHost = normalizeHostLabel(req.hostname || req.get('host'));
-  if (!frontHost || !reqHost || frontHost !== reqHost) return null;
+  if (!frontendMarketingHostMatches(reqHost, frontRaw)) return null;
   const incoming = requestPublicOrigin(req);
   if (incoming && staticBase === incoming) return null;
   return `${staticBase}/`;
@@ -94,9 +108,8 @@ export function redirectTargetWhenFrontendHostHitsApi(req, frontRaw, staticAppRa
 export function apexMismatchRedirectTarget(req, frontRaw, apexFallbackRaw) {
   const apexBase = normalizePublicAppBase(apexFallbackRaw);
   if (!apexBase) return null;
-  const frontHost = frontendHostnameFromEnv(frontRaw);
   const reqHost = normalizeHostLabel(req.hostname || req.get('host'));
-  if (!frontHost || !reqHost || frontHost !== reqHost) return null;
+  if (!frontendMarketingHostMatches(reqHost, frontRaw)) return null;
   let fallbackHost;
   try {
     fallbackHost = normalizeHostLabel(new URL(apexBase).hostname);
@@ -132,15 +145,21 @@ function escapeHtml(s) {
 /**
  * Browser-friendly page when GET / hits the API (avoids raw JSON for humans at a misconfigured apex).
  */
-export function formatRootLandingHtml({ hint, frontendUrl }) {
+export function formatRootLandingHtml({ hint, frontendUrl, staticAppUrl }) {
   const hintHtml = hint ? `<p class="hint">${escapeHtml(hint)}</p>` : '';
   const front = String(frontendUrl || '').trim().replace(/\/$/, '');
+  const staticBase = normalizePublicAppBase(String(staticAppUrl || '').trim());
+  const staticBtn = staticBase
+    ? `<p><a class="btn" href="${escapeHtml(staticBase)}/">Open the CloneAI web app (${escapeHtml(staticBase.replace(/^https?:\/\//, ''))})</a></p>`
+    : '';
   const tryLink =
-    front && !hint
-      ? `<p><a class="btn" href="${escapeHtml(front)}/">Open the CloneAI app</a></p>`
-      : hint
-        ? '<p><strong>Note:</strong> A link to your marketing URL would just reload this page until DNS or <code>STATIC_APP_URL</code> / <code>APEX_STATIC_FALLBACK_URL</code> is fixed.</p>'
-        : '';
+    front && !hint && !staticBase
+      ? `<p><a class="btn" href="${escapeHtml(front)}/">Open marketing URL</a></p>`
+      : '';
+  const note =
+    hint && !staticBase
+      ? '<p><strong>Note:</strong> Set <code>STATIC_APP_URL</code> on this API service to your static app URL (e.g. <code>https://cloneai-web.onrender.com</code>), save, redeploy, then reload — or use the repo-root Dockerfile so this service serves the SPA.</p>'
+      : '';
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -156,8 +175,10 @@ export function formatRootLandingHtml({ hint, frontendUrl }) {
 </head>
 <body>
   <h1>CloneAI</h1>
-  <p>This URL is the <strong>API</strong>. The web app is a separate host on Render (<code>cloneai-web</code>) or your static provider.</p>
+  <p>This URL is the <strong>API</strong>. The web app is usually on Render <code>cloneai-web</code>, bundled with the API (monolith image), or another static host.</p>
+  ${staticBtn}
   ${tryLink}
+  ${note}
   ${hintHtml}
   <p>API health: <a href="/api/health"><code>/api/health</code></a> · JSON metadata: same URL with <code>Accept: application/json</code> (or add <code>?format=json</code>).</p>
 </body>

@@ -11,12 +11,25 @@ export default defineConfig(({ mode, command }) => {
   const escapedForMeta = apiOrigin
     .replace(/&/g, '&amp;')
     .replace(/"/g, '&quot;');
+  const devProxyTarget = (env.VITE_DEV_API_PROXY || 'http://127.0.0.1:3001').replace(/\/$/, '');
 
   return {
     root,
     server: {
+      // Listen on all local interfaces so http://localhost:5173 works on Windows (::1 vs 127.0.0.1).
+      host: true,
       port: 5173,
-      strictPort: false,
+      strictPort: true,
+      open: true,
+      proxy: {
+        '/api': {
+          target: devProxyTarget,
+          changeOrigin: true,
+          // Analyze streams can exceed default proxy/socket timeouts (crawl + OpenAI).
+          timeout: 1_800_000,
+          proxyTimeout: 1_800_000,
+        },
+      },
     },
     plugins: [
       {

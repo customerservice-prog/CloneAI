@@ -161,8 +161,10 @@ const LISTEN_PORT_TRIES = 50;
 const DEFAULT_DEV_ORIGINS = [
   'http://localhost:5173',
   'http://127.0.0.1:5173',
+  'http://[::1]:5173',
   'http://localhost:4173',
   'http://127.0.0.1:4173',
+  'http://[::1]:4173',
 ];
 
 function isLocalDevBrowserOrigin(origin) {
@@ -170,7 +172,9 @@ function isLocalDevBrowserOrigin(origin) {
     const u = new URL(origin);
     return (
       u.protocol === 'http:' &&
-      (u.hostname === 'localhost' || u.hostname === '127.0.0.1')
+      (u.hostname === 'localhost' ||
+        u.hostname === '127.0.0.1' ||
+        u.hostname === '::1')
     );
   } catch {
     return false;
@@ -799,7 +803,13 @@ if (!serveSpa) {
       return;
     }
     if (rootGetPrefersHtml(req)) {
-      res.type('html').send(formatRootLandingHtml({ hint: r.hint, frontendUrl: front || null }));
+      res.type('html').send(
+        formatRootLandingHtml({
+          hint: r.hint,
+          frontendUrl: front || null,
+          staticAppUrl: staticApp || null,
+        })
+      );
       return;
     }
     res.type('application/json').send({

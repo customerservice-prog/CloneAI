@@ -27,11 +27,13 @@ function findFreePort(preferred, maxAttempts = 50) {
 }
 
 const apiPort = await findFreePort(3001);
-const webPort = await findFreePort(5173);
+const webPort = 5173;
 
-console.log(`CloneAI dev — picking free ports (avoiding anything already in use).`);
+console.log(`CloneAI dev — API picks a free port; app is fixed on ${webPort} (open http://localhost:${webPort}/).`);
 console.log(`  API → http://127.0.0.1:${apiPort}`);
-console.log(`  App → http://127.0.0.1:${webPort}\n`);
+console.log(
+  `  App → http://127.0.0.1:${webPort} (same-origin /api/* proxied here — avoids CORS vs a production-only CORS_ORIGINS on the API)\n`
+);
 
 const backend = spawn(process.execPath, ['server.js'], {
   cwd: path.join(root, 'backend'),
@@ -40,12 +42,15 @@ const backend = spawn(process.execPath, ['server.js'], {
 });
 
 const viteCli = path.join(root, 'frontend', 'node_modules', 'vite', 'bin', 'vite.js');
+const feEnv = { ...process.env };
+delete feEnv.VITE_API_URL;
+feEnv.VITE_DEV_API_PROXY = `http://127.0.0.1:${apiPort}`;
 const frontend = spawn(
   process.execPath,
-  [viteCli, 'dev', '--port', String(webPort)],
+  [viteCli, 'dev', '--port', String(webPort), '--strictPort'],
   {
     cwd: path.join(root, 'frontend'),
-    env: { ...process.env, VITE_API_URL: `http://127.0.0.1:${apiPort}` },
+    env: feEnv,
     stdio: 'inherit',
   }
 );
