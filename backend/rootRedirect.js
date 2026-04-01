@@ -132,7 +132,7 @@ export function acceptLooksLikeBrowserNavigation(accept) {
 }
 
 const JSON_HINT =
-  'FRONTEND_URL hostname matches this request Host — point DNS apex at your static site (cloneai-web), or set STATIC_APP_URL on this service to your SPA’s public URL (e.g. https://cloneai-web.onrender.com) until DNS is fixed.';
+  'This hostname matches FRONTEND_URL, but this response is from the API (no embedded web app here). Set STATIC_APP_URL on this service, move DNS, or use the monolith Dockerfile — see steps below.';
 
 function escapeHtml(s) {
   return String(s || '')
@@ -146,7 +146,6 @@ function escapeHtml(s) {
  * Browser-friendly page when GET / hits the API (avoids raw JSON for humans at a misconfigured apex).
  */
 export function formatRootLandingHtml({ hint, frontendUrl, staticAppUrl }) {
-  const hintHtml = hint ? `<p class="hint">${escapeHtml(hint)}</p>` : '';
   const front = String(frontendUrl || '').trim().replace(/\/$/, '');
   const staticBase = normalizePublicAppBase(String(staticAppUrl || '').trim());
   const staticBtn = staticBase
@@ -156,9 +155,17 @@ export function formatRootLandingHtml({ hint, frontendUrl, staticAppUrl }) {
     front && !hint && !staticBase
       ? `<p><a class="btn" href="${escapeHtml(front)}/">Open marketing URL</a></p>`
       : '';
-  const note =
+  const deployHelp =
     hint && !staticBase
-      ? '<p><strong>Note:</strong> Set <code>STATIC_APP_URL</code> on this API service to your static app URL (e.g. <code>https://cloneai-web.onrender.com</code>), save, redeploy, then reload — or use the repo-root Dockerfile so this service serves the SPA.</p>'
+      ? `<div class="deploy-help">
+  <p class="hint">${escapeHtml(hint)}</p>
+  <p class="fix-lead"><strong>Do one of the following:</strong></p>
+  <ol class="fix-steps">
+    <li><strong>Render (fastest):</strong> Dashboard → <code>cloneai-api</code> → Environment → set <code>STATIC_APP_URL</code> to your static site (e.g. <code>https://cloneai-web.onrender.com</code>) → Save → <strong>Manual Deploy</strong>. Reloading this URL should redirect to the app.</li>
+    <li><strong>DNS:</strong> Point the apex (or this hostname) at your <strong>static</strong> service (<code>cloneai-web</code>) instead of the API, if visitors should load the SPA directly.</li>
+    <li><strong>Monolith:</strong> Deploy the repo-root <code>Dockerfile</code> so the image includes <code>public/index.html</code>; one service can serve both API and SPA.</li>
+  </ol>
+</div>`
       : '';
   return `<!DOCTYPE html>
 <html lang="en">
@@ -167,8 +174,12 @@ export function formatRootLandingHtml({ hint, frontendUrl, staticAppUrl }) {
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>CloneAI API</title>
   <style>
-    body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; color: #111; }
-    .hint { background: #f4f4f5; padding: 1rem; border-radius: 8px; font-size: 0.95rem; }
+    body { font-family: system-ui, sans-serif; max-width: 42rem; margin: 2rem auto; padding: 0 1rem; line-height: 1.55; color: #111; }
+    .hint { background: #f4f4f5; padding: 1rem; border-radius: 8px; font-size: 0.95rem; margin: 0 0 1rem; }
+    .deploy-help { margin: 1rem 0 1.25rem; }
+    .fix-lead { margin: 0 0 0.35rem; font-size: 0.95rem; }
+    .fix-steps { margin: 0; padding-left: 1.25rem; font-size: 0.92rem; }
+    .fix-steps li { margin: 0.5rem 0; }
     .btn { display: inline-block; margin-top: 0.5rem; padding: 0.6rem 1.2rem; background: #111; color: #fff; text-decoration: none; border-radius: 8px; font-weight: 600; }
     code { font-size: 0.9em; }
   </style>
@@ -178,9 +189,8 @@ export function formatRootLandingHtml({ hint, frontendUrl, staticAppUrl }) {
   <p>This URL is the <strong>API</strong>. The web app is usually on Render <code>cloneai-web</code>, bundled with the API (monolith image), or another static host.</p>
   ${staticBtn}
   ${tryLink}
-  ${note}
-  ${hintHtml}
-  <p>API health: <a href="/api/health"><code>/api/health</code></a> · JSON metadata: same URL with <code>Accept: application/json</code> (or add <code>?format=json</code>).</p>
+  ${deployHelp}
+  <p>API health: <a href="/api/health"><code>/api/health</code></a> — JSON fields include <code>status</code> and <code>openaiConfigured</code>. For JSON on <strong>this</strong> URL instead of HTML, use <code>Accept: application/json</code> or <code>?format=json</code>.</p>
 </body>
 </html>`;
 }
@@ -195,7 +205,8 @@ export function resolveRootGet(req, opts = {}) {
   const staticRaw = String(opts.staticAppUrl || '').trim();
   const apexFallbackRaw = String(opts.apexStaticFallbackUrl || '').trim();
   const accept = String(req.get('accept') || '');
-  const wantsBrowserDoc = acceptLooksLikeBrowserNavigation(accept);
+  const formatJson = String(req.query?.format || '').toLowerCase() === 'json';
+  const wantsBrowserDoc = !formatJson && acceptLooksLikeBrowserNavigation(accept);
 
   const staticFallback = redirectTargetWhenFrontendHostHitsApi(req, front, staticRaw);
   if (staticFallback && wantsBrowserDoc) {
