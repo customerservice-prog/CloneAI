@@ -6,6 +6,7 @@ import axios from 'axios';
 import net from 'node:net';
 import fs from 'node:fs';
 import path from 'node:path';
+import { EventEmitter } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import rateLimit from 'express-rate-limit';
@@ -57,9 +58,9 @@ import {
   postAuthLogin,
 } from './billingHttp.js';
 import { appendLeadRecord } from './leadsStore.js';
-import { promoMatchesRequest, configuredPromoCode } from './promoCode.js';
+import { promoMatchesRequest, privilegedAnalyzeBypass, configuredPromoCode } from './promoCode.js';
 import { probeSinkMiddleware } from './probeSink.js';
-import { resolveRootGet, formatRootLandingHtml } from './rootRedirect.js';
+import { resolveRootGet, formatRootLandingHtml, mergeStaticEnvWithSiteDefaults } from './rootRedirect.js';
 import {
   analysisReuseEnabled,
   analysisFastReplayEnabled,
@@ -72,6 +73,26 @@ import {
   replayAnalysisFromArchive,
 } from './analysisArchive.js';
 import { processSiteAssetZipBuffer } from './processAssetZip.js';
+import {
+  SITE_ASSET_TTL_MS,
+  rememberSiteAssetDownload,
+  getSiteAssetDownload,
+  createSiteAssetDownload,
+  startSiteAssetDownloadJanitor,
+} from './siteAssetDownloads.js';
+import {
+  getExtractionJobsBaseDir,
+  createExtractionJob,
+  loadExtractionJob,
+  loadExtractionJobInput,
+  updateExtractionJob,
+  appendExtractionJobEvent,
+  readExtractionJobEventsSlice,
+  saveExtractionJobArtifact,
+  getExtractionJobArtifactPath,
+  listExtractionJobs,
+  listExtractionJobsForUser,
+} from './extractionJobs.js';
 
 dotenv.config();
 
@@ -522,18 +543,7 @@ const INTERACTION_EXTRA_URL_CAP = Math.min(
   Math.max(10, Number(process.env.INTERACTION_EXTRA_URL_CAP) || 120)
 );
 
-const SITE_ASSET_TTL_MS = Math.min(
-  2 * 60 * 60 * 1000,
-  Math.max(5 * 60 * 1000, Number(process.env.SITE_ASSET_TTL_MS) || 30 * 60 * 1000)
-);
 const MAX_REDIRECTS = Math.min(5, Math.max(0, Number(process.env.HTML_FETCH_MAX_REDIRECTS) || 2));
-
-/** Short-lived ZIP blobs for GET /api/site-images/:token (not logged). */
-const siteAssetDownloads = new Map();
-const MAX_SITE_ASSET_DOWNLOADS = Math.min(
-  20_000,
-  Math.max(200, Number(process.env.MAX_SITE_ASSET_DOWNLOADS) || 2500)
-);
 
 const ENABLE_ASSET_PIPELINE_API =
   String(process.env.ENABLE_ASSET_PIPELINE_API || 'true').toLowerCase() !== 'false';
@@ -545,29 +555,7 @@ const ASSET_PIPELINE_MAX_RASTER = Math.min(
   2000,
   Math.max(10, Number(process.env.ASSET_PIPELINE_MAX_RASTER) || 500)
 );
-
-function rememberSiteAssetDownload(token, rec) {
-  while (siteAssetDownloads.size >= MAX_SITE_ASSET_DOWNLOADS) {
-    let oldestKey = null;
-    let oldestExp = Infinity;
-    for (const [k, v] of siteAssetDownloads) {
-      if (v.expires < oldestExp) {
-        oldestExp = v.expires;
-        oldestKey = k;
-      }
-    }
-    if (oldestKey != null) siteAssetDownloads.delete(oldestKey);
-    else break;
-  }
-  siteAssetDownloads.set(token, rec);
-}
-
-setInterval(() => {
-  const now = Date.now();
-  for (const [k, v] of siteAssetDownloads) {
-    if (v.expires < now) siteAssetDownloads.delete(k);
-  }
-}, 5 * 60 * 1000).unref?.();
+startSiteAssetDownloadJanitor();
 
 function clientIp(req) {
   return req.ip || req.socket?.remoteAddress || 'unknown';
@@ -645,7 +633,8 @@ async function validateAnalyzeRequest(req, res, next) {
 
     const ipGate = clientIp(req);
     req._promoValid = promoMatchesRequest(req);
-    if (!req._promoValid && captchaRequiredForAnalyze(ipGate)) {
+    req._privilegedAnalyze = privilegedAnalyzeBypass(req);
+    if (!req._privilegedAnalyze && captchaRequiredForAnalyze(ipGate)) {
       const token = String(
         req.body.cf_turnstile_response || req.body['cf-turnstile-response'] || ''
       ).trim();
@@ -712,6 +701,12 @@ async function validateAnalyzeRequest(req, res, next) {
     }
     req.body._options = options;
 
+    const exProf = String(req.body.extractionProfile || req.body.extraction_profile || 'standard')
+      .trim()
+      .toLowerCase();
+    const allowedEx = new Set(['quick_brief', 'standard', 'full_harvest', 'quality_first']);
+    req._extractionProfile = allowedEx.has(exProf) ? exProf : 'standard';
+
     req._removeImageBackground = ['1', 'true', 'yes', 'on'].includes(
       String(req.body.removeImageBackground || '').trim().toLowerCase()
     );
@@ -721,6 +716,23 @@ async function validateAnalyzeRequest(req, res, next) {
     );
     req._assetHarvestMode =
       harvestFromBody || (req._scanMode === 'images' && Boolean((req.body.url || '').trim()));
+    if (
+      ['full_harvest', 'quality_first'].includes(req._extractionProfile) &&
+      (req.body.url || '').trim() &&
+      req._scanMode !== 'screenshots'
+    ) {
+      req._assetHarvestMode = true;
+    }
+
+    if (
+      req._privilegedAnalyze &&
+      req._extractionProfile === 'standard' &&
+      (req.body.url || '').trim() &&
+      req._scanMode !== 'screenshots'
+    ) {
+      req._extractionProfile = 'quality_first';
+      req._assetHarvestMode = true;
+    }
 
     const files = req.files || [];
     if (!req.body.url && !files.length) {
@@ -777,13 +789,19 @@ function analyzeRequestLogger(req, res, next) {
     ip: clientIp(req),
     scanMode: req._scanMode || 'elite',
     promo: Boolean(req._promoValid),
+    privileged: Boolean(req._privilegedAnalyze),
+    extractionProfile: req._extractionProfile || 'standard',
   });
   next();
 }
 
 function reviseRequestLogger(req, res, next) {
   req._analyzeStartedAt = Date.now();
-  logEvent('info', 'revise_request', { ip: clientIp(req), promo: Boolean(req._promoValid) });
+  logEvent('info', 'revise_request', {
+    ip: clientIp(req),
+    promo: Boolean(req._promoValid),
+    privileged: Boolean(req._privilegedAnalyze),
+  });
   next();
 }
 
@@ -813,8 +831,15 @@ if (!serveSpa) {
 
   app.get('/', (req, res) => {
     const front = (process.env.FRONTEND_URL || process.env.PUBLIC_APP_URL || '').trim();
-    const staticApp = (process.env.STATIC_APP_URL || process.env.WEB_APP_PUBLIC_URL || '').trim();
-    const apexFallback = (process.env.APEX_STATIC_FALLBACK_URL || '').trim();
+    const staticExplicit = (process.env.STATIC_APP_URL || process.env.WEB_APP_PUBLIC_URL || '').trim();
+    const apexExplicit = (process.env.APEX_STATIC_FALLBACK_URL || '').trim();
+    const merged = mergeStaticEnvWithSiteDefaults(
+      req.hostname || req.get('host') || '',
+      staticExplicit,
+      apexExplicit
+    );
+    const staticApp = merged.staticAppUrl;
+    const apexFallback = merged.apexStaticFallbackUrl;
     const r = resolveRootGet(req, {
       frontendUrl: front,
       staticAppUrl: staticApp,
@@ -1544,8 +1569,9 @@ async function validateReviseRequest(req, res, next) {
     }
 
     req._promoValid = promoMatchesRequest(req);
+    req._privilegedAnalyze = privilegedAnalyzeBypass(req);
     const ipGate = clientIp(req);
-    if (!req._promoValid && captchaRequiredForAnalyze(ipGate)) {
+    if (!req._privilegedAnalyze && captchaRequiredForAnalyze(ipGate)) {
       const token = String(
         req.body?.cf_turnstile_response || req.body?.['cf-turnstile-response'] || ''
       ).trim();
@@ -1615,7 +1641,7 @@ async function runAnalyzePipeline(req, res) {
   let analyzePlan = null;
   let analyzeUserId = normalizeUserId(req.get('x-cloneai-user-id'));
 
-  const promoBypass = Boolean(req._promoValid);
+  const promoBypass = Boolean(req._privilegedAnalyze);
 
   if (isBillingEnabled()) {
     const billingUserId = normalizeUserId(req.get('x-cloneai-user-id'));
@@ -1826,7 +1852,7 @@ async function runAnalyzePipeline(req, res) {
           ms,
           host: archiveCtx.hostSlug,
         });
-        if (!req._promoValid) {
+        if (!req._privilegedAnalyze) {
           noteSuccessfulAnalyzeForCaptcha(clientIp(req));
         }
         if (analyzeUserId) {
@@ -1888,9 +1914,18 @@ async function runAnalyzePipeline(req, res) {
       depth,
       promoOwner: Boolean(promoBypass),
     });
-    const crawlWallMs = promoBypass
-      ? Math.min(1_800_000, Math.max(CRAWL_MAX_WALL_CLOCK_MS * 4, 600_000))
-      : CRAWL_MAX_WALL_CLOCK_MS;
+    const extractionProfile = req._extractionProfile || 'standard';
+    let crawlWallMs;
+    if (promoBypass) {
+      const basePriv = Math.min(7_200_000, Math.max(CRAWL_MAX_WALL_CLOCK_MS * 4, 600_000));
+      const profMul =
+        extractionProfile === 'quality_first' ? 1.5 : extractionProfile === 'full_harvest' ? 1.25 : 1;
+      crawlWallMs = Math.min(7_200_000, Math.floor(basePriv * profMul));
+    } else {
+      const profMul =
+        extractionProfile === 'quality_first' ? 3 : extractionProfile === 'full_harvest' ? 2 : 1;
+      crawlWallMs = Math.min(1_800_000, Math.floor(CRAWL_MAX_WALL_CLOCK_MS * profMul));
+    }
 
     let crawlStopReason = null;
     let crawlQueueRemaining = 0;
@@ -1907,15 +1942,34 @@ async function runAnalyzePipeline(req, res) {
       if (now - harvestProgressLastMs >= harvestProgressThrottleMs) {
         harvestProgressLastMs = now;
         harvestProgressPending = null;
-        send({ type: 'harvest_progress', pagesCrawled: p.pagesCrawled, queueLength: p.queueLength });
+        send({
+          type: 'harvest_progress',
+          phase: p.phase || 'crawl',
+          pagesCrawled: p.pagesCrawled,
+          queueLength: p.queueLength,
+          pagesDiscovered: p.pagesDiscovered,
+          imagesFound: p.imagesFound,
+          imagesDownloaded: p.imagesDownloaded,
+          imagesFailed: p.imagesFailed,
+          zipBytesSoFar: p.zipBytesSoFar,
+          elapsedMs: p.elapsedMs,
+        });
       }
     };
     const flushHarvestProgress = () => {
       if (harvestProgressPending != null) {
+        const p = harvestProgressPending;
         send({
           type: 'harvest_progress',
-          pagesCrawled: harvestProgressPending.pagesCrawled,
-          queueLength: harvestProgressPending.queueLength,
+          phase: p.phase || 'crawl',
+          pagesCrawled: p.pagesCrawled,
+          queueLength: p.queueLength,
+          pagesDiscovered: p.pagesDiscovered,
+          imagesFound: p.imagesFound,
+          imagesDownloaded: p.imagesDownloaded,
+          imagesFailed: p.imagesFailed,
+          zipBytesSoFar: p.zipBytesSoFar,
+          elapsedMs: p.elapsedMs,
         });
         harvestProgressPending = null;
         harvestProgressLastMs = Date.now();
@@ -1930,6 +1984,7 @@ async function runAnalyzePipeline(req, res) {
         crawlStopReason = 'exhausted';
         crawlQueueRemaining = 0;
       } else {
+        const crawlStartedAt = Date.now();
         const out = await crawlFromSeed(url, rawHtml, {
           maxPages: mp,
           fetchConcurrency: CRAWL_FETCH_CONCURRENCY,
@@ -1938,7 +1993,14 @@ async function runAnalyzePipeline(req, res) {
           maxContentLength: HTML_FETCH_MAX_CONTENT_LENGTH,
           maxRedirects: MAX_REDIRECTS,
           maxCrawlWallClockMs: crawlWallMs,
-          onProgress: pushHarvestProgress,
+          onProgress: (p) =>
+            pushHarvestProgress({
+              phase: 'crawl',
+              pagesCrawled: p.pagesCrawled,
+              queueLength: p.queueLength,
+              pagesDiscovered: p.pagesCrawled + p.queueLength,
+              elapsedMs: Date.now() - crawlStartedAt,
+            }),
         });
         crawledPages = out.results;
         crawlStopReason = out.stopReason;
@@ -1978,7 +2040,7 @@ async function runAnalyzePipeline(req, res) {
       try {
         const baseCap = pageCapForCrawl;
         const maxCrawlTotal = promoBypass
-          ? Math.min(400, baseCap + Math.min(INTERACTION_EXTRA_URL_CAP * 2, 120))
+          ? Math.min(5000, baseCap + Math.min(INTERACTION_EXTRA_URL_CAP * 4, 400))
           : Math.min(160, baseCap + Math.min(INTERACTION_EXTRA_URL_CAP, 40));
         const hubUrls = crawledPages.slice(0, INTERACTION_HUB_PAGES).map((p) => p.url);
         let commerceUrl = null;
@@ -2165,11 +2227,39 @@ async function runAnalyzePipeline(req, res) {
         scraperMeta.imagesDiscoveredCount = allImageUrls.length;
         assetsPayload.discoveredUrlCount = allImageUrls.length;
         assetsPayload.cssSheetsProcessed = Number(scraperMeta.cssSheetsProcessed) || 0;
+
+        pushHarvestProgress({
+          phase: 'discover_images',
+          pagesCrawled: crawledPages.length,
+          queueLength: crawlQueueRemaining,
+          pagesDiscovered: crawledPages.length + crawlQueueRemaining,
+          imagesFound: allImageUrls.length,
+          elapsedMs: Date.now() - (req._analyzeStartedAt || Date.now()),
+        });
+        flushHarvestProgress();
+
+        const imgDlT0 = Date.now();
+        let lastImgProgMs = 0;
         const fetched = await fetchHarvestedImages(allImageUrls, {
           maxImages: harvestImageCap,
           maxBytesPerImage: IMAGE_HARVEST_MAX_BYTES,
           maxTotalBytes: harvestZipCap,
           concurrency: IMAGE_HARVEST_CONCURRENCY,
+          onProgress: (ev) => {
+            const now = Date.now();
+            if (now - lastImgProgMs < harvestProgressThrottleMs) return;
+            lastImgProgMs = now;
+            pushHarvestProgress({
+              phase: 'images',
+              pagesCrawled: crawledPages.length,
+              queueLength: crawlQueueRemaining,
+              pagesDiscovered: crawledPages.length + crawlQueueRemaining,
+              imagesFound: allImageUrls.length,
+              imagesDownloaded: ev.imagesInZip ?? ev.fetchCompleted,
+              zipBytesSoFar: ev.bytesSoFar,
+              elapsedMs: now - imgDlT0,
+            });
+          },
         });
         scraperMeta.harvestContentDuplicatesSkipped = fetched.contentDuplicatesSkipped || 0;
         const crawlHtmlExtras = buildCrawlHtmlExtractEntries(pagesForImageHarvest);
@@ -2187,7 +2277,79 @@ async function runAnalyzePipeline(req, res) {
             ),
           });
         }
-        const zipBuf = await zipImageEntries(fetched.entries, snapshotEntries, crawlHtmlExtras);
+        const manifestExtras = [
+          {
+            name: 'manifests/pages.json',
+            buffer: Buffer.from(
+              JSON.stringify(pagesForImageHarvest.map((p) => ({ url: p.url })), null, 2),
+              'utf8'
+            ),
+          },
+          {
+            name: 'manifests/images.json',
+            buffer: Buffer.from(
+              JSON.stringify(
+                fetched.entries.map((e) => ({ file: e.name, sourceUrl: e.sourceUrl || '' })),
+                null,
+                2
+              ),
+              'utf8'
+            ),
+          },
+          {
+            name: 'manifests/manifest.json',
+            buffer: Buffer.from(
+              JSON.stringify(
+                {
+                  generatedAt: new Date().toISOString(),
+                  extractionProfile: req._extractionProfile || 'standard',
+                  crawlPages: crawledPages.length,
+                  crawlQueueRemaining,
+                  imagesDiscovered: allImageUrls.length,
+                  imagesInArchive: fetched.entries.length,
+                  snapshots: snapshotEntries.length,
+                  contentDuplicatesSkipped: fetched.contentDuplicatesSkipped || 0,
+                  skippedByCap: fetched.skipped,
+                  fetchErrorsReported: (fetched.errors || []).length,
+                },
+                null,
+                2
+              ),
+              'utf8'
+            ),
+          },
+          {
+            name: 'manifests/images.csv',
+            buffer: Buffer.from(
+              [
+                'file,source_url',
+                ...fetched.entries.map((e) => {
+                  const esc = (s) => `"${String(s).replace(/"/g, '""')}"`;
+                  return `${esc(e.name)},${esc(e.sourceUrl || '')}`;
+                }),
+              ].join('\n'),
+              'utf8'
+            ),
+          },
+        ];
+        flushHarvestProgress();
+        pushHarvestProgress({
+          phase: 'images_done',
+          pagesCrawled: crawledPages.length,
+          queueLength: crawlQueueRemaining,
+          pagesDiscovered: crawledPages.length + crawlQueueRemaining,
+          imagesFound: allImageUrls.length,
+          imagesDownloaded: fetched.entries.length,
+          imagesFailed: (fetched.errors || []).length,
+          zipBytesSoFar: fetched.entries.reduce((a, e) => a + (e.buffer?.length || 0), 0),
+          elapsedMs: Date.now() - imgDlT0,
+        });
+        flushHarvestProgress();
+
+        const zipBuf = await zipImageEntries(fetched.entries, snapshotEntries, [
+          ...crawlHtmlExtras,
+          ...manifestExtras,
+        ]);
         if (zipBuf?.length) {
           const token = randomBytes(24).toString('hex');
           rememberSiteAssetDownload(token, {
@@ -2200,7 +2362,10 @@ async function runAnalyzePipeline(req, res) {
           assetsPayload.imageCount = fetched.entries.length;
           assetsPayload.snapshotCount = snapshotEntries.length;
           assetsPayload.count =
-            fetched.entries.length + snapshotEntries.length + crawlHtmlExtras.length;
+            fetched.entries.length +
+            snapshotEntries.length +
+            crawlHtmlExtras.length +
+            manifestExtras.length;
           assetsPayload.token = token;
           assetsPayload.skipped = fetched.skipped;
           logEvent('info', 'asset_bundle_ok', {
@@ -2217,6 +2382,7 @@ async function runAnalyzePipeline(req, res) {
     }
 
     send({ type: 'stage', index: 0, phase: 'done' });
+    scraperMeta.extractionProfile = req._extractionProfile || 'standard';
     const billingMeta =
       isBillingEnabled() && req._billingPlan
         ? {
@@ -2312,16 +2478,16 @@ async function runAnalyzePipeline(req, res) {
       clientDelivery: Boolean(req._clientDelivery),
       servicePackage: req._servicePackage || '',
       scanMode: req._scanMode || 'elite',
-      promoAuthorized: Boolean(req._promoValid),
+      promoAuthorized: Boolean(req._privilegedAnalyze),
     });
 
     const systemContent =
       SYSTEM_PROMPT_BASE +
-      buildPromoOwnerQualityAddon(Boolean(req._promoValid)) +
+      buildPromoOwnerQualityAddon(Boolean(req._privilegedAnalyze)) +
       buildAnalyzerDeliveryAddons(Boolean(req._clientDelivery), req._servicePackage || '') +
-      buildScanModeSystemAddon(req._scanMode || 'elite', Boolean(req._promoValid));
+      buildScanModeSystemAddon(req._scanMode || 'elite', Boolean(req._privilegedAnalyze));
 
-    const reportMaxTokens = req._promoValid
+    const reportMaxTokens = req._privilegedAnalyze
       ? Math.min(
           16384,
           Math.max(MAX_OUTPUT_TOKENS, Number(process.env.OPENAI_MAX_TOKENS_PROMO_OWNER) || 12000)
@@ -2359,7 +2525,7 @@ async function runAnalyzePipeline(req, res) {
       return;
     }
 
-    const streamBudgetMs = req._promoValid
+    const streamBudgetMs = req._privilegedAnalyze
       ? Math.min(3_600_000, OPENAI_STREAM_MS * 4 + crawledPages.length * 40000)
       : Math.min(900000, OPENAI_STREAM_MS + crawledPages.length * 25000);
     const ac = new AbortController();
@@ -2479,7 +2645,7 @@ async function runAnalyzePipeline(req, res) {
       send({
         type: 'warning',
         code: 'truncated',
-        message: req._promoValid
+        message: req._privilegedAnalyze
           ? '\n\n---\n\n> **Output limit reached.** Raise `OPENAI_MAX_TOKENS_PROMO_OWNER` (cap 16384) or use a model with a higher completion limit, then re-run.\n'
           : '\n\n---\n\n> **Output limit reached.** The brief was truncated at the model token ceiling. Re-run with fewer images, shallower depth, or fewer analysis toggles for a complete report.\n',
       });
@@ -2495,7 +2661,7 @@ async function runAnalyzePipeline(req, res) {
 
     const ms = Date.now() - (req._analyzeStartedAt || Date.now());
     logEvent('info', 'analyze_success', { ip: clientIp(req), ms });
-    if (!req._promoValid) {
+    if (!req._privilegedAnalyze) {
       noteSuccessfulAnalyzeForCaptcha(clientIp(req));
     }
     if (analyzeUserId) {
@@ -2512,6 +2678,7 @@ async function runAnalyzePipeline(req, res) {
         htmlContextChars: htmlContext.length,
         crawlPages: crawledPages.length,
         promo: Boolean(req._promoValid),
+        privileged: Boolean(req._privilegedAnalyze),
       });
     }
 
@@ -2592,7 +2759,7 @@ async function runRevisePipeline(req, res) {
 
   let analyzePlan = null;
   let analyzeUserId = normalizeUserId(req.get('x-cloneai-user-id'));
-  const promoBypass = Boolean(req._promoValid);
+  const promoBypass = Boolean(req._privilegedAnalyze);
 
   if (isBillingEnabled()) {
     const billingUserId = normalizeUserId(req.get('x-cloneai-user-id'));
@@ -2879,7 +3046,7 @@ async function runRevisePipeline(req, res) {
 
     const ms = Date.now() - (req._analyzeStartedAt || Date.now());
     logEvent('info', 'revise_success', { ip: clientIp(req), ms });
-    if (!req._promoValid) {
+    if (!req._privilegedAnalyze) {
       noteSuccessfulAnalyzeForCaptcha(clientIp(req));
     }
     if (analyzeUserId) {
@@ -2893,7 +3060,8 @@ async function runRevisePipeline(req, res) {
         completionTokens: ct,
         totalTokens: streamUsage?.total_tokens,
         estUsd: Number(estUsd.toFixed(6)),
-        promo: Boolean(promoBypass),
+        promo: Boolean(req._promoValid),
+        privileged: Boolean(req._privilegedAnalyze),
         revise: true,
       });
     }
@@ -3111,7 +3279,7 @@ function onListen() {
   }
   if (configuredPromoCode()) {
     console.log(
-      'Promo: CLONEAI_PROMO_CODE is set — valid code skips Stripe run quota and uses owner-quality crawl/harvest/output limits (CORS, rate limits, SSRF, and OpenAI cost still apply).'
+      'Promo / owner: CLONEAI_PROMO_CODE or X-CloneAI-Owner-Token (CLONEAI_OWNER_TOKEN) skips Stripe run quota and uses owner-quality crawl/harvest/output limits (CORS, rate limits, SSRF, and OpenAI cost still apply).'
     );
   }
 }

@@ -60,6 +60,50 @@ export function normalizePublicAppBase(raw) {
   }
 }
 
+/** Built-in SPA origin when apex hits the API but Render env vars were never synced (override with CLONEAI_SITECLONER_STATIC_URL). */
+const SITECLONER_STATIC_DEFAULT = 'https://cloneai-web.onrender.com';
+const SITECLONER_MARKETING_HOST_TO_STATIC = {
+  'siteclonerpro.com': SITECLONER_STATIC_DEFAULT,
+  'www.siteclonerpro.com': SITECLONER_STATIC_DEFAULT,
+};
+
+/**
+ * Fill STATIC_APP_URL / APEX fallbacks when the dashboard omitted them but the request host is a known marketing domain.
+ * @param {string | undefined} reqHost
+ * @param {string} staticRaw
+ * @param {string} apexRaw
+ * @returns {{ staticAppUrl: string, apexStaticFallbackUrl: string }}
+ */
+export function mergeStaticEnvWithSiteDefaults(reqHost, staticRaw, apexRaw) {
+  let s = String(staticRaw || '').trim();
+  let a = String(apexRaw || '').trim();
+  const h = normalizeHostLabel(reqHost || '');
+  const envDefault = (process.env.CLONEAI_DEFAULT_STATIC_APP_URL || '').trim();
+  if (!s && envDefault) s = envDefault;
+  if (!a && envDefault) a = envDefault;
+
+  const custom = (process.env.CLONEAI_SITECLONER_STATIC_URL || '').trim();
+  const hostFallback = custom || SITECLONER_MARKETING_HOST_TO_STATIC[h] || '';
+  if (!s && hostFallback) s = hostFallback;
+  if (!a && hostFallback) a = hostFallback;
+
+  return { staticAppUrl: s, apexStaticFallbackUrl: a };
+}
+
+/**
+ * Redirect browsers on known Site Cloner Pro marketing hosts to the static SPA when a static base is known
+ * (even if FRONTEND_URL is unset — common Render dashboard drift).
+ */
+export function redirectKnownMarketingApexToStatic(req, staticAppRaw) {
+  const staticBase = normalizePublicAppBase(staticAppRaw);
+  if (!staticBase) return null;
+  const reqHost = normalizeHostLabel(req.hostname || req.get('host'));
+  if (!SITECLONER_MARKETING_HOST_TO_STATIC[reqHost]) return null;
+  const incoming = requestPublicOrigin(req);
+  if (incoming && staticBase === incoming) return null;
+  return `${staticBase}/`;
+}
+
 export function frontendHostnameFromEnv(frontRaw) {
   const trimmed = String(frontRaw || '').trim().replace(/\/$/, '');
   if (!trimmed) return '';
@@ -304,6 +348,11 @@ export function resolveRootGet(req, opts = {}) {
   const formatJson = String(req.query?.format || '').toLowerCase() === 'json';
   const wantsBrowserDoc = !formatJson && acceptLooksLikeBrowserNavigation(accept);
 
+  const knownApex = redirectKnownMarketingApexToStatic(req, staticRaw);
+  if (knownApex && wantsBrowserDoc) {
+    return { kind: 'redirect', status: 302, location: knownApex };
+  }
+
   const staticFallback = redirectTargetWhenFrontendHostHitsApi(req, front, staticRaw);
   if (staticFallback && wantsBrowserDoc) {
     return { kind: 'redirect', status: 302, location: staticFallback };
@@ -325,6 +374,7 @@ export function resolveRootGet(req, opts = {}) {
   }
 
   const hint =
+    !knownApex &&
     !staticFallback &&
     !corsStaticFallback &&
     !target &&
