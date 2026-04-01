@@ -59,3 +59,20 @@ export function maxCrawlPagesForRun(plan, depth) {
 
   return 1;
 }
+
+/**
+ * When a valid owner promo / coupon is used, crawl caps can exceed POWER (env-tunable).
+ * @param {{ plan: string | null, depth: string, promoOwner: boolean }} opts
+ */
+export function crawlPageCapForRequest({ plan, depth, promoOwner }) {
+  const d = String(depth || 'homepage').trim();
+  const base = maxCrawlPagesForRun(plan, d);
+  if (!promoOwner) return base;
+  if (d === 'homepage') return 1;
+  const raw = Number(process.env.CRAWL_PROMO_OWNER_MAX_PAGES);
+  if (Number.isFinite(raw) && raw > 0) {
+    return Math.min(2000, Math.max(1, Math.floor(raw)));
+  }
+  const powerDeep = maxCrawlPagesForRun(PLANS.POWER, d);
+  return Math.min(1200, Math.max(powerDeep, Math.floor(powerCrawlPageCap() * 1.2)));
+}

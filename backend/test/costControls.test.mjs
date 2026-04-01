@@ -2,7 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { cleanHtmlForModel } from '../htmlCleanForModel.js';
 import { isSkippableCrawlPath } from '../crawlSite.js';
-import { maxCrawlPagesForRun, crawlMaxPagesEnvCap, powerCrawlPageCap } from '../crawlLimits.js';
+import {
+  maxCrawlPagesForRun,
+  crawlMaxPagesEnvCap,
+  powerCrawlPageCap,
+  crawlPageCapForRequest,
+} from '../crawlLimits.js';
 import { PLANS } from '../billingService.js';
 import { estimateOpenAiUsd } from '../aiCostEstimate.js';
 
@@ -43,6 +48,21 @@ test('maxCrawlPagesForRun enforces plan caps', () => {
   assert.equal(maxCrawlPagesForRun(PLANS.POWER, 'deep'), powerCrawlPageCap());
   assert.ok(crawlMaxPagesEnvCap() <= 500);
   assert.ok(powerCrawlPageCap() <= 600);
+});
+
+test('crawlPageCapForRequest: promo owner >= power deep', () => {
+  const powerDeep = maxCrawlPagesForRun(PLANS.POWER, 'deep');
+  const promoDeep = crawlPageCapForRequest({
+    plan: PLANS.POWER,
+    depth: 'deep',
+    promoOwner: true,
+  });
+  assert.ok(promoDeep >= powerDeep);
+  assert.ok(promoDeep <= 1200);
+  assert.equal(
+    crawlPageCapForRequest({ plan: PLANS.FREE, depth: 'homepage', promoOwner: true }),
+    1
+  );
 });
 
 test('estimateOpenAiUsd is non-negative', () => {

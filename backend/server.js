@@ -19,6 +19,9 @@ import { optimizeImageForModel } from './imageOptimize.js';
 import { assertUrlSafeForServerFetch, isUnsafeIpLiteral } from './ssrf.js';
 import {
   collectImageUrls,
+  collectStylesheetHrefs,
+  extractImageUrlsFromCss,
+  extractImportUrlsFromCss,
   fetchHarvestedImages,
   zipImageEntries,
   buildImageManifestForPrompt,
@@ -26,7 +29,7 @@ import {
 } from './imageHarvest.js';
 import { effectiveHarvestImageCap, effectiveHarvestZipCap } from './harvestBudget.js';
 import { crawlFromSeed, normalizeUrlKey, fetchCrawlPageHtml } from './crawlSite.js';
-import { crawlMaxPagesEnvCap, maxCrawlPagesForRun } from './crawlLimits.js';
+import { crawlMaxPagesEnvCap, maxCrawlPagesForRun, crawlPageCapForRequest } from './crawlLimits.js';
 import { cleanHtmlForModel } from './htmlCleanForModel.js';
 import { tryAcquireAnalyzeSlot, releaseAnalyzeSlot } from './analyzeSlots.js';
 import { estimateOpenAiUsd } from './aiCostEstimate.js';
@@ -408,6 +411,19 @@ const IMAGE_HARVEST_ZIP_CAP = parseUnlimitedPositiveInt(process.env.IMAGE_HARVES
 const IMAGE_HARVEST_CONCURRENCY = Math.min(
   32,
   Math.max(2, Number(process.env.IMAGE_HARVEST_CONCURRENCY) || 12)
+);
+
+const HARVEST_CSS_MAX_SHEETS = Math.max(
+  8,
+  Math.min(150, Number(process.env.HARVEST_CSS_MAX_SHEETS) || 80)
+);
+const HARVEST_CSS_MAX_BYTES = Math.max(
+  80_000,
+  Math.min(6 * 1024 * 1024, Number(process.env.HARVEST_CSS_MAX_BYTES) || 2 * 1024 * 1024)
+);
+const HARVEST_CSS_FETCH_CONCURRENCY = Math.min(
+  16,
+  Math.max(2, Number(process.env.HARVEST_CSS_FETCH_CONCURRENCY) || 8)
 );
 
 const HTML_MODEL_MAX_CHARS_PER_PAGE = Math.min(
@@ -1053,6 +1069,22 @@ Hard requirements:
 
 **Efficiency (cost / latency):** Prefer dense bullets over narrative prose. Do not repeat the user prompt or quote large chunks of HTML. Honor "not requested" sections with minimal text.`;
 
+/** Owner coupon: quality-first instructions and in-brief QA (no extra model round-trip). */
+function buildPromoOwnerQualityAddon(promoAuthorized) {
+  if (!promoAuthorized) return '';
+  return `
+
+OWNER COUPON MODE (operator’s key — billing caps waived, quality prioritized):
+- **Ignore** the global "Efficiency (cost / latency)" block for this run: prefer **exhaustive** coverage over terse summaries. Longer output is expected.
+- Treat every specialist area as **must be deep** where the HTML, crawl list, harvest manifest, or screenshots support it.
+- Before the **Scorecard** inside ## 13, add a subsection **### Independent QA audit** written as a **second reviewer** who did not draft sections 1–12:
+  - Per-section line: **§N — Complete / Partial / Missing** vs available evidence.
+  - **Contradictions or thin claims** in the draft (cite section).
+  - **Send-back list:** numbered imperatives (“Expand §7 with …”, “Re-check §9 against image-042…”) as if routing work back to specialists.
+  - **Underused evidence:** concrete facts still visible in inputs that deserve more ink.
+`;
+}
+
 function buildScanModeSystemAddon(scanMode, promoAuthorized) {
   const sm = scanMode === 'images' ? 'images' : scanMode === 'screenshots' ? 'screenshots' : 'elite';
   let s = '';
@@ -1068,7 +1100,7 @@ function buildScanModeSystemAddon(scanMode, promoAuthorized) {
   }
   if (promoAuthorized) {
     s +=
-      '\nAUTHORIZED PROMO CONTEXT:\nThis session uses a **promotion focused on image harvesting and ZIP/asset extraction**. Elevate image discovery, `image-NNN.*` mapping, hotlinked vs bundled assets, and practical download guidance in Section 9 — in addition to the selected scan mode rules above.\n';
+      '\nAUTHORIZED PROMO CONTEXT:\nThis session uses the **owner coupon**: treat **full-site extraction** (crawl coverage, ZIP, snapshots, CSS-linked assets) as top priority alongside the selected scan mode. Map every `image-NNN.*`, hotlink vs bundled asset, and CDN URL that matters for a pixel-faithful clone.\n';
   }
   return s;
 }
@@ -1083,7 +1115,7 @@ function buildScanModeUserBlock(scanMode, promoAuthorized) {
       : '\n---\nRUN FOCUS (operator UI): **ELITE SCAN** — full-spectrum developer specification.\n';
   if (promoAuthorized) {
     t +=
-      '- **Promo / coupon active:** bias the team toward **image pipeline** (harvest manifest, ZIP contents, CDN URLs) while honoring the scan mode.\n';
+      '- **Owner coupon active:** maximize **crawl + harvest + snapshot** usefulness; brief must reflect everything the pipeline captured.\n';
   }
   return t;
 }
@@ -1355,6 +1387,7 @@ function buildCrawlHtmlExtractEntries(pages) {
         '',
         'html/: HTML body captured per page (used for image URL discovery and analysis).',
         'urls.txt: crawled URLs in order.',
+        '_discovered_image_urls.txt: every unique image-related URL found (HTML + linked CSS), even if not all were downloaded.',
         '',
         'Large pages may be truncated per-file or by total budget; truncated files include "-truncated" in the name.',
       ].join('\n'),
@@ -1388,6 +1421,106 @@ function buildCrawlHtmlExtractEntries(pages) {
     extras.push({ name, buffer: raw });
   }
   return extras;
+}
+
+/**
+ * Fetch linked stylesheets (and shallow @import chain) and collect url(...) targets.
+ * @param {{ url: string, html: string }[]} pages
+ * @returns {Promise<{ imageUrls: string[], sheetsProcessed: number }>}
+ */
+async function harvestLinkedStylesheetImageUrls(pages) {
+  const list = Array.isArray(pages) ? pages.filter((p) => (p.html || '').length > 0) : [];
+  if (!list.length) {
+    return { imageUrls: [], sheetsProcessed: 0 };
+  }
+
+  const sheetKey = (u) => normalizeHarvestUrlKey(u) || u;
+  const pending = [];
+  const pendingKeys = new Set();
+  const processedKeys = new Set();
+
+  for (const p of list) {
+    for (const href of collectStylesheetHrefs(p.html, p.url)) {
+      const k = sheetKey(href);
+      if (processedKeys.has(k) || pendingKeys.has(k)) continue;
+      pendingKeys.add(k);
+      pending.push(href);
+    }
+  }
+
+  const imageUrls = [];
+  const imgKeys = new Set();
+
+  async function fetchOneStylesheet(sheetUrl) {
+    const safe = await assertUrlSafeForServerFetch(sheetUrl);
+    if (!safe.ok) return '';
+    try {
+      const res = await axios.get(sheetUrl, {
+        responseType: 'text',
+        timeout: 18_000,
+        maxContentLength: HARVEST_CSS_MAX_BYTES,
+        maxRedirects: 5,
+        validateStatus: (s) => s >= 200 && s < 300,
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 CloneAI/1.0',
+          Accept: 'text/css,*/*;q=0.8',
+        },
+      });
+      const ct = String(res.headers['content-type'] || '').toLowerCase();
+      if (
+        ct &&
+        !ct.includes('text/css') &&
+        !ct.includes('text/plain') &&
+        !ct.includes('application/octet-stream')
+      ) {
+        return '';
+      }
+      return String(res.data || '');
+    } catch {
+      return '';
+    }
+  }
+
+  while (pending.length && processedKeys.size < HARVEST_CSS_MAX_SHEETS) {
+    const batch = [];
+    while (
+      batch.length < HARVEST_CSS_FETCH_CONCURRENCY &&
+      pending.length &&
+      processedKeys.size + batch.length < HARVEST_CSS_MAX_SHEETS
+    ) {
+      const href = pending.shift();
+      const k = sheetKey(href);
+      pendingKeys.delete(k);
+      if (processedKeys.has(k)) continue;
+      processedKeys.add(k);
+      batch.push(href);
+    }
+    if (!batch.length) break;
+
+    const cssTexts = await Promise.all(batch.map((u) => fetchOneStylesheet(u)));
+    for (let i = 0; i < batch.length; i += 1) {
+      const sheetUrl = batch[i];
+      const css = cssTexts[i];
+      if (!css) continue;
+      for (const iu of extractImageUrlsFromCss(css, sheetUrl)) {
+        const ik = normalizeHarvestUrlKey(iu);
+        if (!ik || imgKeys.has(ik)) continue;
+        imgKeys.add(ik);
+        imageUrls.push(iu);
+      }
+      if (processedKeys.size >= HARVEST_CSS_MAX_SHEETS) break;
+      for (const imp of extractImportUrlsFromCss(css, sheetUrl)) {
+        const sk = sheetKey(imp);
+        if (processedKeys.has(sk) || pendingKeys.has(sk)) continue;
+        if (processedKeys.size + pendingKeys.size >= HARVEST_CSS_MAX_SHEETS) break;
+        pendingKeys.add(sk);
+        pending.push(imp);
+      }
+    }
+  }
+
+  return { imageUrls, sheetsProcessed: processedKeys.size };
 }
 
 const SYSTEM_PROMPT_REVISE = `${SYSTEM_PROMPT_BASE}
@@ -1499,27 +1632,12 @@ async function runAnalyzePipeline(req, res) {
 
     if (promoBypass) {
       logEvent('info', 'analyze_promo_run', { ip: clientIp(req), userId: billingUserId });
-      analyzePlan = PLANS.PRO;
+      analyzePlan = PLANS.POWER;
       req._planGateNotes = [];
       req._billingUserId = billingUserId;
       req._billingReservation = null;
-      req._billingPlan = PLANS.PRO;
-      const promoFeatureGate = evaluateAnalyzeFeatureGate(PLANS.PRO, {
-        hasUrl: Boolean(urlForBilling),
-        imageCount: filesForGate.length,
-        depth: req.body.depth,
-      });
-      if (!promoFeatureGate.ok) {
-        releaseSlotOnce();
-        res.status(403).json({
-          success: false,
-          code: promoFeatureGate.code,
-          error: promoFeatureGate.code,
-          message: promoFeatureGate.message,
-          feature: promoFeatureGate.feature,
-        });
-        return;
-      }
+      req._billingPlan = PLANS.POWER;
+      /* Owner coupon: no usage reservation, no feature gate (same limits as POWER+ for crawl/harvest; see crawlPageCapForRequest / harvest caps). */
     } else {
       const usageSnap = await getUsageSnapshot(billingUserId);
       analyzePlan = usageSnap.plan || PLANS.FREE;
@@ -1650,7 +1768,8 @@ async function runAnalyzePipeline(req, res) {
     },
     planTier: isBillingEnabled() ? analyzePlan : null,
     priorityQueue:
-      isBillingEnabled() && (analyzePlan === PLANS.PRO || analyzePlan === PLANS.POWER),
+      isBillingEnabled() &&
+      (analyzePlan === PLANS.PRO || analyzePlan === PLANS.POWER || promoBypass),
   });
 
   const gateNotes = Array.isArray(req._planGateNotes) ? req._planGateNotes : [];
@@ -1755,13 +1874,23 @@ async function runAnalyzePipeline(req, res) {
     const harvestImageCap = effectiveHarvestImageCap(
       isBillingEnabled() ? analyzePlan : null,
       assetHarvestMode,
-      IMAGE_HARVEST_MAX
+      IMAGE_HARVEST_MAX,
+      Boolean(promoBypass)
     );
     const harvestZipCap = effectiveHarvestZipCap(
       isBillingEnabled() ? analyzePlan : null,
       assetHarvestMode,
-      IMAGE_HARVEST_ZIP_CAP
+      IMAGE_HARVEST_ZIP_CAP,
+      Boolean(promoBypass)
     );
+    const pageCapForCrawl = crawlPageCapForRequest({
+      plan: analyzePlan,
+      depth,
+      promoOwner: Boolean(promoBypass),
+    });
+    const crawlWallMs = promoBypass
+      ? Math.min(1_800_000, Math.max(CRAWL_MAX_WALL_CLOCK_MS * 4, 600_000))
+      : CRAWL_MAX_WALL_CLOCK_MS;
 
     let crawlStopReason = null;
     let crawlQueueRemaining = 0;
@@ -1794,7 +1923,7 @@ async function runAnalyzePipeline(req, res) {
     };
 
     if (canCrawl) {
-      const mp = maxCrawlPagesForRun(analyzePlan, depth);
+      const mp = pageCapForCrawl;
       if (mp <= 1) {
         const u0 = normalizeUrlKey(url.startsWith('http') ? url : `https://${url}`);
         crawledPages = u0 ? [{ url: u0, html: rawHtml }] : [];
@@ -1808,7 +1937,7 @@ async function runAnalyzePipeline(req, res) {
           maxHtmlBytes: MAX_HTML_BYTES,
           maxContentLength: HTML_FETCH_MAX_CONTENT_LENGTH,
           maxRedirects: MAX_REDIRECTS,
-          maxCrawlWallClockMs: CRAWL_MAX_WALL_CLOCK_MS,
+          maxCrawlWallClockMs: crawlWallMs,
           onProgress: pushHarvestProgress,
         });
         crawledPages = out.results;
@@ -1847,8 +1976,10 @@ async function runAnalyzePipeline(req, res) {
 
     if (canInteraction) {
       try {
-        const baseCap = maxCrawlPagesForRun(analyzePlan, depth);
-        const maxCrawlTotal = Math.min(160, baseCap + Math.min(INTERACTION_EXTRA_URL_CAP, 40));
+        const baseCap = pageCapForCrawl;
+        const maxCrawlTotal = promoBypass
+          ? Math.min(400, baseCap + Math.min(INTERACTION_EXTRA_URL_CAP * 2, 120))
+          : Math.min(160, baseCap + Math.min(INTERACTION_EXTRA_URL_CAP, 40));
         const hubUrls = crawledPages.slice(0, INTERACTION_HUB_PAGES).map((p) => p.url);
         let commerceUrl = null;
         for (const p of crawledPages) {
@@ -1916,7 +2047,7 @@ async function runAnalyzePipeline(req, res) {
     }
 
     scraperMeta.crawlPageCount = crawledPages.length;
-    scraperMeta.crawlMaxPagesRequested = maxCrawlPagesForRun(analyzePlan, depth);
+    scraperMeta.crawlMaxPagesRequested = pageCapForCrawl;
 
     let firstHtml;
     let htmlContext;
@@ -1961,12 +2092,15 @@ async function runAnalyzePipeline(req, res) {
       token: null,
       filename: 'site-assets.zip',
       skipped: 0,
+      discoveredUrlCount: 0,
+      cssSheetsProcessed: 0,
     };
 
     const canHarvest =
       Boolean(url) &&
       crawledPages.length > 0 &&
-      (screenshotSweep || crawledPages.some((p) => p.html.length > 200)) &&
+      (screenshotSweep ||
+        pagesForImageHarvest.some((p) => (p.html || '').length > 200)) &&
       !harvestBlockedHints.has(scraperMeta.hint || '');
 
     const snapshotEntries = [];
@@ -2017,7 +2151,20 @@ async function runAnalyzePipeline(req, res) {
             allImageUrls.push(u);
           }
         }
+        if (pagesForImageHarvest.length > 0) {
+          const { imageUrls: cssImageUrls, sheetsProcessed } =
+            await harvestLinkedStylesheetImageUrls(pagesForImageHarvest);
+          scraperMeta.cssSheetsProcessed = sheetsProcessed;
+          for (const u of cssImageUrls) {
+            const k = normalizeHarvestUrlKey(u);
+            if (!k || imgSeen.has(k)) continue;
+            imgSeen.add(k);
+            allImageUrls.push(u);
+          }
+        }
         scraperMeta.imagesDiscoveredCount = allImageUrls.length;
+        assetsPayload.discoveredUrlCount = allImageUrls.length;
+        assetsPayload.cssSheetsProcessed = Number(scraperMeta.cssSheetsProcessed) || 0;
         const fetched = await fetchHarvestedImages(allImageUrls, {
           maxImages: harvestImageCap,
           maxBytesPerImage: IMAGE_HARVEST_MAX_BYTES,
@@ -2026,6 +2173,20 @@ async function runAnalyzePipeline(req, res) {
         });
         scraperMeta.harvestContentDuplicatesSkipped = fetched.contentDuplicatesSkipped || 0;
         const crawlHtmlExtras = buildCrawlHtmlExtractEntries(pagesForImageHarvest);
+        if (allImageUrls.length > 0) {
+          crawlHtmlExtras.push({
+            name: 'extract/_discovered_image_urls.txt',
+            buffer: Buffer.from(
+              [
+                '# Unique image-related URLs discovered from HTML + linked CSS (one per line).',
+                '# Fetching may skip some URLs (plan caps, SSRF rules, non-image responses, size limits).',
+                '',
+                ...allImageUrls,
+              ].join('\n'),
+              'utf8'
+            ),
+          });
+        }
         const zipBuf = await zipImageEntries(fetched.entries, snapshotEntries, crawlHtmlExtras);
         if (zipBuf?.length) {
           const token = randomBytes(24).toString('hex');
@@ -2156,12 +2317,20 @@ async function runAnalyzePipeline(req, res) {
 
     const systemContent =
       SYSTEM_PROMPT_BASE +
+      buildPromoOwnerQualityAddon(Boolean(req._promoValid)) +
       buildAnalyzerDeliveryAddons(Boolean(req._clientDelivery), req._servicePackage || '') +
       buildScanModeSystemAddon(req._scanMode || 'elite', Boolean(req._promoValid));
 
+    const reportMaxTokens = req._promoValid
+      ? Math.min(
+          16384,
+          Math.max(MAX_OUTPUT_TOKENS, Number(process.env.OPENAI_MAX_TOKENS_PROMO_OWNER) || 12000)
+        )
+      : MAX_OUTPUT_TOKENS;
+
     const body = {
       model: OPENAI_MODEL,
-      max_tokens: MAX_OUTPUT_TOKENS,
+      max_tokens: reportMaxTokens,
       stream: true,
       ...(OPENAI_STREAM_INCLUDE_USAGE ? { stream_options: { include_usage: true } } : {}),
       messages: [
@@ -2190,7 +2359,9 @@ async function runAnalyzePipeline(req, res) {
       return;
     }
 
-    const streamBudgetMs = Math.min(900000, OPENAI_STREAM_MS + crawledPages.length * 25000);
+    const streamBudgetMs = req._promoValid
+      ? Math.min(3_600_000, OPENAI_STREAM_MS * 4 + crawledPages.length * 40000)
+      : Math.min(900000, OPENAI_STREAM_MS + crawledPages.length * 25000);
     const ac = new AbortController();
     const streamTimer = setTimeout(() => ac.abort(), streamBudgetMs);
 
@@ -2308,8 +2479,9 @@ async function runAnalyzePipeline(req, res) {
       send({
         type: 'warning',
         code: 'truncated',
-        message:
-          '\n\n---\n\n> **Output limit reached.** The brief was truncated at the model token ceiling. Re-run with fewer images, shallower depth, or fewer analysis toggles for a complete report.\n',
+        message: req._promoValid
+          ? '\n\n---\n\n> **Output limit reached.** Raise `OPENAI_MAX_TOKENS_PROMO_OWNER` (cap 16384) or use a model with a higher completion limit, then re-run.\n'
+          : '\n\n---\n\n> **Output limit reached.** The brief was truncated at the model token ceiling. Re-run with fewer images, shallower depth, or fewer analysis toggles for a complete report.\n',
       });
     }
 
@@ -2437,10 +2609,10 @@ async function runRevisePipeline(req, res) {
 
     if (promoBypass) {
       logEvent('info', 'revise_promo_run', { ip: clientIp(req), userId: billingUserId });
-      analyzePlan = PLANS.PRO;
+      analyzePlan = PLANS.POWER;
       req._billingUserId = billingUserId;
       req._billingReservation = null;
-      req._billingPlan = PLANS.PRO;
+      req._billingPlan = PLANS.POWER;
     } else {
       const billingReservation = await tryBeginRun(billingUserId);
       if (!billingReservation.ok) {
@@ -2515,7 +2687,8 @@ async function runRevisePipeline(req, res) {
       promoRun: Boolean(isBillingEnabled() && promoBypass),
     },
     planTier: isBillingEnabled() ? analyzePlan : null,
-    priorityQueue: isBillingEnabled() && (analyzePlan === PLANS.PRO || analyzePlan === PLANS.POWER),
+    priorityQueue:
+      isBillingEnabled() && (analyzePlan === PLANS.PRO || analyzePlan === PLANS.POWER || promoBypass),
     assets: { count: 0, token: null, filename: 'site-assets.zip', skipped: 0 },
   });
 
@@ -2530,9 +2703,15 @@ async function runRevisePipeline(req, res) {
 
   try {
     const userMsg = buildReviseUserMessage(prior, fixNote);
+    const reviseMaxTokens = promoBypass
+      ? Math.min(
+          16384,
+          Math.max(MAX_OUTPUT_TOKENS, Number(process.env.OPENAI_MAX_TOKENS_PROMO_OWNER) || 12000)
+        )
+      : MAX_OUTPUT_TOKENS;
     const body = {
       model: OPENAI_MODEL,
-      max_tokens: MAX_OUTPUT_TOKENS,
+      max_tokens: reviseMaxTokens,
       stream: true,
       ...(OPENAI_STREAM_INCLUDE_USAGE ? { stream_options: { include_usage: true } } : {}),
       messages: [
@@ -2563,9 +2742,11 @@ async function runRevisePipeline(req, res) {
       label: 'Report writer (AI revise)',
     });
 
-    const streamBudgetMs = OPENAI_STREAM_MS;
+    const reviseStreamBudgetMs = promoBypass
+      ? Math.min(3_600_000, OPENAI_STREAM_MS * 4)
+      : OPENAI_STREAM_MS;
     const ac = new AbortController();
-    const streamTimer = setTimeout(() => ac.abort(), streamBudgetMs);
+    const streamTimer = setTimeout(() => ac.abort(), reviseStreamBudgetMs);
 
     let response;
     try {
@@ -2581,7 +2762,9 @@ async function runRevisePipeline(req, res) {
         send({ type: 'stage', index: REPORT_WRITER_STAGE_INDEX, phase: 'error' });
         send({
           type: 'error',
-          message: isProd ? 'The revision timed out. Try again with a shorter focus note.' : 'OpenAI request timed out.',
+          message: isProd
+            ? 'The revision timed out. For coupon runs, try a shorter focus note or increase OPENAI_STREAM_TIMEOUT_MS.'
+            : 'OpenAI request timed out.',
         });
         logEvent('error', 'revise_openai_timeout', { ip: clientIp(req) });
         await abortBillingIfNeeded(req);
@@ -2928,7 +3111,7 @@ function onListen() {
   }
   if (configuredPromoCode()) {
     console.log(
-      'Promo: CLONEAI_PROMO_CODE is set — valid code skips usage quota (CORS, rate limits, SSRF, and API cost still apply).'
+      'Promo: CLONEAI_PROMO_CODE is set — valid code skips Stripe run quota and uses owner-quality crawl/harvest/output limits (CORS, rate limits, SSRF, and OpenAI cost still apply).'
     );
   }
 }
