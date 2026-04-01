@@ -59,7 +59,7 @@ import {
 import { appendLeadRecord } from './leadsStore.js';
 import { promoMatchesRequest, configuredPromoCode } from './promoCode.js';
 import { probeSinkMiddleware } from './probeSink.js';
-import { resolveRootGet, mergeStaticEnvWithSiteDefaults } from './rootRedirect.js';
+import { resolveRootGet, formatRootLandingHtml, mergeStaticEnvWithSiteDefaults } from './rootRedirect.js';
 import {
   analysisReuseEnabled,
   analysisFastReplayEnabled,
@@ -1374,10 +1374,24 @@ if (!serveSpa) {
       return;
     }
     if (rootGetPrefersHtml(req)) {
-      res.status(404).type('text/plain; charset=utf-8').send('Not found.');
+      res.type('html').send(
+        formatRootLandingHtml({
+          hint: r.hint,
+          frontendUrl: front || null,
+          staticAppUrl: staticApp || null,
+          apexStaticFallbackUrl: apexFallback || null,
+          requestHost: req.hostname || req.get('host') || '',
+        })
+      );
       return;
     }
-    res.status(404).type('application/json').send({ ok: false, error: 'Not found.' });
+    res.type('application/json').send({
+      ok: true,
+      service: 'cloneai-api',
+      docs: 'Use POST /api/analyze, POST /api/analyze-revise (JSON), and GET /api/health — the web app is hosted separately.',
+      health: '/api/health',
+      hint: r.hint,
+    });
   });
 }
 
