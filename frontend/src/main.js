@@ -1302,6 +1302,7 @@ let analyzeAbort = null;
 let activeExtractionJobId = '';
 let lastCompletedJobArtifacts = [];
 let lastCompletedJobId = '';
+let extractionJobsSupported = Boolean(API_EXTRACTION_JOBS);
 const selectedOptions = new Set(
   OPTION_DEFS.filter((o) => o.defaultOn).map((o) => o.id)
 );
@@ -2836,6 +2837,63 @@ async function connectToExtractionJob(jobId, { signal, fastStages = true } = {})
   });
 }
 
+async function runAnalyzeLegacy(form, { signal, headers } = {}) {
+  if (!API_ANALYZE) throw new Error('Analysis API is unavailable.');
+  const res = await fetch(API_ANALYZE, {
+    method: 'POST',
+    headers,
+    body: form,
+    signal,
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    if (res.status === 403 && (body.error === 'LIMIT_REACHED' || isFeatureLockedPayload(body))) {
+      streamActive = false;
+      stopTypewriter();
+      $('#progress-section').hidden = true;
+      if (body.error === 'LIMIT_REACHED') void refreshBillingStatus();
+      openPaywallModal(body);
+      return true;
+    }
+    if (res.status === 400 && body.error === 'MISSING_USER_ID') {
+      streamActive = false;
+      stopTypewriter();
+      $('#progress-section').hidden = true;
+      showToast('Session issue — refresh the page and try again.', { variant: 'warning', duration: 3800 });
+      return true;
+    }
+    if (res.status === 400 && /verification|Human verification|Verification required/i.test(String(body.error || ''))) {
+      streamActive = false;
+      stopTypewriter();
+      $('#progress-section').hidden = true;
+      try {
+        localStorage.setItem(LS_BRIEF_OK, '1');
+      } catch {
+        /* ignore */
+      }
+      void ensureTurnstileMounted();
+      showToast(String(body.error || 'Verification required.'), { variant: 'warning', duration: 3400 });
+      return true;
+    }
+    throw new Error(humanizeError(res.status, body.error, body));
+  }
+  const ct = res.headers.get('content-type') || '';
+  if (!ct.includes('text/event-stream')) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(humanizeError(res.status, body.error, body));
+  }
+  startTypewriter();
+  await parseSseStream(res, {
+    signal,
+    onText: () => {
+      bumpStreamProgress();
+      scrollSummaryIfNeeded();
+    },
+  });
+  await finalizeAnalyzeSuccess();
+  return true;
+}
+
 function jobStatusTone(status) {
   if (status === 'completed') return 'Completed';
   if (status === 'failed') return 'Failed';
@@ -2889,10 +2947,15 @@ function renderExtractionJobHistory(jobs) {
 
 async function refreshExtractionJobHistory() {
   const section = $('#job-history-section');
-  if (!section || !API_EXTRACTION_JOBS) return;
+  if (!section || !API_EXTRACTION_JOBS || !extractionJobsSupported) return;
   try {
     const res = await fetch(`${API_EXTRACTION_JOBS}?limit=12`, { headers: analyzeFetchHeaders() });
     const data = await res.json().catch(() => ({}));
+    if (res.status === 404) {
+      extractionJobsSupported = false;
+      renderExtractionJobHistory([]);
+      return;
+    }
     if (!res.ok) throw new Error(data.error || `Jobs failed (${res.status})`);
     renderExtractionJobHistory(Array.isArray(data.jobs) ? data.jobs : []);
   } catch (err) {
@@ -3004,7 +3067,7 @@ async function resumePersistedExtractionJob() {
 }
 
 async function runAnalyze() {
-  if (!API_EXTRACTION_JOBS) {
+  if (!API_EXTRACTION_JOBS && !API_ANALYZE) {
     showConfigToastOnce('Set VITE_API_URL to your API base URL in the host env and redeploy.', 4500);
     return;
   }
@@ -3101,8 +3164,17 @@ async function runAnalyze() {
   const headers = analyzeFetchHeaders();
 
   try {
+    if (!extractionJobsSupported) {
+      await runAnalyzeLegacy(form, { signal, headers });
+      return;
+    }
     const res = await fetch(API_EXTRACTION_JOBS, { method: 'POST', headers, body: form, signal });
     const body = await res.json().catch(() => ({}));
+    if (res.status === 404) {
+      extractionJobsSupported = false;
+      await runAnalyzeLegacy(form, { signal, headers });
+      return;
+    }
     if (!res.ok) {
       if (res.status === 403 && (body.error === 'LIMIT_REACHED' || isFeatureLockedPayload(body))) {
         streamActive = false;
