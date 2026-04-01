@@ -63,7 +63,7 @@ import {
   postAuthLogin,
 } from './billingHttp.js';
 import { appendLeadRecord } from './leadsStore.js';
-import { promoMatchesRequest, ownerTokenMatchesRequest, configuredPromoCode } from './promoCode.js';
+import { promoMatchesRequest, privilegedAnalyzeBypass, configuredPromoCode } from './promoCode.js';
 import { probeSinkMiddleware } from './probeSink.js';
 import { resolveRootGet, formatRootLandingHtml, mergeStaticEnvWithSiteDefaults } from './rootRedirect.js';
 import {
@@ -74,9 +74,7 @@ import {
   buildArchiveLookupContext,
   loadLatestSnapshot,
   isSnapshotFresh,
-  scraperMetaAllowsArchive,
   saveAnalysisSnapshot,
-  snapshotAllowsReplay,
   replayAnalysisFromArchive,
 } from './analysisArchive.js';
 import { processSiteAssetZipBuffer } from './processAssetZip.js';
@@ -646,7 +644,7 @@ async function validateAnalyzeRequest(req, res, next) {
 
     const ipGate = clientIp(req);
     req._promoValid = promoMatchesRequest(req);
-    req._privilegedAnalyze = ownerTokenMatchesRequest(req);
+    req._privilegedAnalyze = privilegedAnalyzeBypass(req);
     if (!req._privilegedAnalyze && captchaRequiredForAnalyze(ipGate)) {
       const token = String(
         req.body.cf_turnstile_response || req.body['cf-turnstile-response'] || ''
@@ -1231,13 +1229,7 @@ function updateExtractionJobSummaryFromEvent(job, event) {
       applyJobStageStatuses(job, { crawl: 'completed', assetDiscovery: 'running' });
     }
     if (event.phase === 'capture_screenshots') {
-      const screenshotStatus =
-        Number(event.screenshotPagesPlanned) === 0 &&
-        Number(event.screenshotPagesCaptured) === 0 &&
-        /skip/i.test(String(event.phaseLabel || ''))
-          ? 'skipped'
-          : 'running';
-      applyJobStageStatuses(job, { screenshots: screenshotStatus });
+      applyJobStageStatuses(job, { screenshots: 'running' });
     }
     if (event.phase === 'download_images') {
       applyJobStageStatuses(job, { assetDiscovery: 'completed', download: 'running' });
@@ -2201,23 +2193,6 @@ function ssePublicError() {
   return 'We could not complete this analysis. Please try again.';
 }
 
-function fetchFailurePublicMessage(scraperMeta) {
-  const hint = String(scraperMeta?.hint || '').trim().toLowerCase();
-  if (hint === 'challenge_or_waf') {
-    return 'This site appears to block automated access. Try screenshots or another URL.';
-  }
-  if (hint === 'http_error') {
-    return `The URL returned HTTP ${scraperMeta?.statusCode ?? 'error'}. Try another page or use screenshots.`;
-  }
-  if (hint === 'fetch_timeout') {
-    return 'Fetching that URL timed out. Try again, use a lighter page, or upload screenshots.';
-  }
-  if (hint === 'redirect_blocked') {
-    return 'That URL redirected in a way we block for security. Try the final URL directly.';
-  }
-  return 'The server could not reach that URL (network, DNS, or TLS). Check the address and try again.';
-}
-
 const MAX_REVISE_PRIOR_CHARS = Math.min(
   900_000,
   Math.max(80_000, Number(process.env.MAX_REVISE_PRIOR_CHARS) || 480_000)
@@ -2430,7 +2405,7 @@ async function validateReviseRequest(req, res, next) {
     }
 
     req._promoValid = promoMatchesRequest(req);
-    req._privilegedAnalyze = ownerTokenMatchesRequest(req);
+    req._privilegedAnalyze = privilegedAnalyzeBypass(req);
     const ipGate = clientIp(req);
     if (!req._privilegedAnalyze && captchaRequiredForAnalyze(ipGate)) {
       const token = String(
@@ -2698,7 +2673,8 @@ async function runAnalyzePipeline(req, res) {
       if (
         snap &&
         isSnapshotFresh(snap, analysisCacheMaxAgeMs()) &&
-        snapshotAllowsReplay(snap)
+        typeof snap.fullText === 'string' &&
+        snap.fullText.length > 80
       ) {
         const billingMetaThin =
           isBillingEnabled() && req._billingPlan
@@ -2761,21 +2737,6 @@ async function runAnalyzePipeline(req, res) {
       scraperMeta.ok &&
       !scraperMeta.blocked &&
       !harvestBlockedHints.has(scraperMeta.hint || '');
-    const hasUploadedFiles = Array.isArray(req.files) && req.files.length > 0;
-    const fatalUrlOnlyFetchFailure =
-      Boolean(url) &&
-      !hasUploadedFiles &&
-      rawHtml.length < 200 &&
-      (!scraperMeta.ok || scraperMeta.blocked || harvestBlockedHints.has(scraperMeta.hint || ''));
-
-    if (fatalUrlOnlyFetchFailure) {
-      send({ type: 'meta', scraper: scraperMeta });
-      send({ type: 'stage', index: 0, phase: 'error', label: 'Multi-page crawl & assets' });
-      send({ type: 'error', message: fetchFailurePublicMessage(scraperMeta) });
-      await abortBillingIfNeeded(req);
-      res.end();
-      return;
-    }
 
     const assetHarvestMode = Boolean(req._assetHarvestMode);
     scraperMeta.assetHarvestMode = assetHarvestMode;
@@ -3793,7 +3754,7 @@ async function runAnalyzePipeline(req, res) {
     }
 
     const archSave = buildArchiveLookupContext(req, { openaiModel: OPENAI_MODEL });
-    if (archSave.eligible && streamedReportText.length > 80 && scraperMetaAllowsArchive(scraperMeta)) {
+    if (archSave.eligible && streamedReportText.length > 80) {
       let metaJson;
       let assetsJson;
       try {
