@@ -3,7 +3,9 @@ import archiver from 'archiver';
 import { createHash } from 'node:crypto';
 import { assertUrlSafeForServerFetch } from './ssrf.js';
 
-const IMG_ATTR_RE = /<(img|source|video|link|meta|picture)\b([^>]*?)>/gis;
+const IMG_ATTR_RE =
+  /<(img|source|video|link|meta|picture|object|embed|image)\b([^>]*?)>/gis;
+const LINK_TAG_RE = /<link\b([^>]*?)>/gis;
 const STYLE_BLOCK_RE = /<style\b[^>]*>([\s\S]*?)<\/style>/gi;
 
 function attrVal(tag, name) {
@@ -184,7 +186,15 @@ export function collectImageUrls(html, pageUrl) {
 
     if (tagName === 'link') {
       const rel = (attrVal(inner, 'rel') || '').toLowerCase();
-      if (!/icon|apple-touch|preload|image_src/i.test(rel)) continue;
+      const asAttr = (attrVal(inner, 'as') || '').toLowerCase();
+      const isImagePreload =
+        asAttr === 'image' && /\bpreload\b|\bprefetch\b/i.test(rel);
+      if (
+        !/icon|apple-touch|preload|image_src|prefetch/i.test(rel) &&
+        !isImagePreload
+      ) {
+        continue;
+      }
       const href = attrVal(inner, 'href');
       if (href) {
         const u = resolveHref(href, baseHref);
@@ -210,6 +220,32 @@ export function collectImageUrls(html, pageUrl) {
 
     if (tagName === 'picture') {
       for (const a of ['src', 'data-src', 'href']) {
+        const v = attrVal(inner, a);
+        if (v) {
+          const u = resolveHref(v, baseHref);
+          if (u) push(u);
+        }
+      }
+    }
+
+    if (tagName === 'object') {
+      const data = attrVal(inner, 'data');
+      if (data) {
+        const u = resolveHref(data, baseHref);
+        if (u) push(u);
+      }
+    }
+
+    if (tagName === 'embed') {
+      const src = attrVal(inner, 'src');
+      if (src) {
+        const u = resolveHref(src, baseHref);
+        if (u) push(u);
+      }
+    }
+
+    if (tagName === 'image') {
+      for (const a of ['href', 'xlink:href', 'src']) {
         const v = attrVal(inner, a);
         if (v) {
           const u = resolveHref(v, baseHref);
@@ -272,6 +308,114 @@ export function collectImageUrls(html, pageUrl) {
   return ordered;
 }
 
+const CSS_URL_FUNC_RE = /url\(\s*["']?([^"')]+)["']?\s*\)/gi;
+
+/**
+ * Stylesheet URLs from `<link rel=stylesheet>` (and alternate stylesheets).
+ * @param {string} html
+ * @param {string} pageUrl
+ * @returns {string[]}
+ */
+export function collectStylesheetHrefs(html, pageUrl) {
+  if (!html || !pageUrl) return [];
+  let baseHref = pageUrl;
+  try {
+    baseHref = new URL(pageUrl).href;
+  } catch {
+    return [];
+  }
+  const out = [];
+  const seen = new Set();
+  LINK_TAG_RE.lastIndex = 0;
+  let m;
+  while ((m = LINK_TAG_RE.exec(html)) !== null) {
+    const inner = m[1] || '';
+    const rel = (attrVal(inner, 'rel') || '').toLowerCase();
+    if (!/\bstylesheet\b/i.test(rel)) continue;
+    const href = attrVal(inner, 'href');
+    if (!href) continue;
+    const u = resolveHref(href, baseHref);
+    const k = u ? normalizeHarvestUrlKey(u) : null;
+    if (!u || !k || seen.has(k)) continue;
+    seen.add(k);
+    out.push(u);
+  }
+  return out;
+}
+
+/**
+ * Resolve `url(...)` references in CSS text (backgrounds, masks, fonts filtered at fetch time).
+ * @param {string} cssText
+ * @param {string} sheetUrl Absolute URL of the stylesheet (for relative paths).
+ * @returns {string[]}
+ */
+export function extractImageUrlsFromCss(cssText, sheetUrl) {
+  if (!cssText || !sheetUrl) return [];
+  let baseHref = sheetUrl;
+  try {
+    baseHref = new URL(sheetUrl).href;
+  } catch {
+    return [];
+  }
+  const out = [];
+  const seen = new Set();
+  CSS_URL_FUNC_RE.lastIndex = 0;
+  let um;
+  while ((um = CSS_URL_FUNC_RE.exec(cssText)) !== null) {
+    const raw = (um[1] || '').trim();
+    if (!raw || /^#/i.test(raw)) continue;
+    const u = resolveHref(raw, baseHref);
+    const k = u ? normalizeHarvestUrlKey(u) : null;
+    if (!u || !k || seen.has(k)) continue;
+    seen.add(k);
+    out.push(u);
+  }
+  return out;
+}
+
+/**
+ * `@import` targets (typically other `.css` files) for chained harvesting.
+ * @param {string} cssText
+ * @param {string} sheetUrl
+ * @returns {string[]}
+ */
+export function extractImportUrlsFromCss(cssText, sheetUrl) {
+  if (!cssText || !sheetUrl) return [];
+  let baseHref = sheetUrl;
+  try {
+    baseHref = new URL(sheetUrl).href;
+  } catch {
+    return [];
+  }
+  const out = [];
+  const seen = new Set();
+
+  const pushImportTarget = (chunk) => {
+    let raw = String(chunk || '').trim();
+    if (!raw) return;
+    raw = raw.replace(/\s+layer\s*$/i, '').trim();
+    if (!raw || /^(screen|print|all|speech|only|not)\b/i.test(raw)) return;
+    const u = resolveHref(raw, baseHref);
+    const k = u ? normalizeHarvestUrlKey(u) : null;
+    if (!u || !k || seen.has(k)) return;
+    seen.add(k);
+    out.push(u);
+  };
+
+  const urlForm = /@import\s+url\s*\(\s*["']?([^'")]+)["']?\s*\)/gi;
+  const quotedForm = /@import\s+["']([^'"\n;]+)["']\s*(?:;|$)/gi;
+  let im;
+  urlForm.lastIndex = 0;
+  while ((im = urlForm.exec(cssText)) !== null) {
+    pushImportTarget(im[1]);
+  }
+  quotedForm.lastIndex = 0;
+  while ((im = quotedForm.exec(cssText)) !== null) {
+    pushImportTarget(im[1]);
+  }
+  return out;
+}
+
 function extFromContentType(ct) {
   const s = (ct || '').toLowerCase();
   if (s.includes('png')) return 'png';
@@ -326,6 +470,8 @@ export async function fetchHarvestedImages(urls, {
   const errors = [];
   let total = 0;
   const entries = [];
+  const seenContent = new Set();
+  let contentDuplicatesSkipped = 0;
 
   const results = await poolMap(slice, concurrency, async (imageUrl) => {
     const safe = await assertUrlSafeForServerFetch(imageUrl);
