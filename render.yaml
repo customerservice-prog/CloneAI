@@ -59,7 +59,7 @@ services:
       - key: OPENAI_API_KEY
         sync: false
 
-  # Static Vite SPA (production frontend on Render).
+  # Optional second static site — skip or delete on Render if cloneai-api serves the SPA (repo-root Dockerfile).
   - type: web
     name: cloneai-web
     runtime: static
