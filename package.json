@@ -10,6 +10,7 @@
     "image-pipeline": "npm run image-pipeline --prefix backend",
     "build": "npm run build --prefix frontend",
     "verify": "npm test --prefix backend && npm run build --prefix frontend",
+    "verify-live": "npm run verify-live --prefix backend",
     "preflight": "npm run verify && npm run launch-check:dev",
     "launch-check": "npm run launch-check --prefix backend",
     "launch-check:dev": "npm run launch-check:dev --prefix backend",

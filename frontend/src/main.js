@@ -21,20 +21,30 @@ const API_BASE = (() => {
       raw = window.location.origin.replace(/\/$/, '');
     }
     if (isProd && !raw) return '';
-    return (raw || 'http://localhost:3001').replace(/\/$/, '');
+    if (!raw && !isProd) return '';
+    return raw.replace(/\/$/, '');
   } catch {
-    return isProd ? '' : 'http://localhost:3001';
+    return '';
   }
 })();
-const API_ANALYZE = API_BASE ? `${API_BASE}/api/analyze` : '';
-const API_ANALYZE_REVISE = API_BASE ? `${API_BASE}/api/analyze-revise` : '';
-const API_BILLING_STATUS = API_BASE ? `${API_BASE}/api/billing/status` : '';
-const API_BILLING_CHECKOUT = API_BASE ? `${API_BASE}/api/billing/checkout` : '';
-const API_BILLING_CLAIM = API_BASE ? `${API_BASE}/api/billing/claim-account` : '';
-const API_AUTH_LOGIN = API_BASE ? `${API_BASE}/api/auth/login` : '';
-const API_ANALYTICS_TRACK = API_BASE ? `${API_BASE}/api/analytics/track` : '';
-const API_LEADS_DFY = API_BASE ? `${API_BASE}/api/leads/dfy` : '';
-const API_ASSET_PIPELINE_ENHANCE = API_BASE ? `${API_BASE}/api/asset-pipeline/enhance` : '';
+
+/** Dev with no explicit API host: same-origin `/api/...` so Vite proxies to the backend (see vite.config.js). */
+function apiUrl(path) {
+  const p = path.startsWith('/') ? path : `/${path}`;
+  if (API_BASE) return `${API_BASE}${p}`;
+  if (isProd) return '';
+  return p;
+}
+
+const API_ANALYZE = apiUrl('/api/analyze');
+const API_ANALYZE_REVISE = apiUrl('/api/analyze-revise');
+const API_BILLING_STATUS = apiUrl('/api/billing/status');
+const API_BILLING_CHECKOUT = apiUrl('/api/billing/checkout');
+const API_BILLING_CLAIM = apiUrl('/api/billing/claim-account');
+const API_AUTH_LOGIN = apiUrl('/api/auth/login');
+const API_ANALYTICS_TRACK = apiUrl('/api/analytics/track');
+const API_LEADS_DFY = apiUrl('/api/leads/dfy');
+const API_ASSET_PIPELINE_ENHANCE = apiUrl('/api/asset-pipeline/enhance');
 const PUBLIC_APP_FALLBACK = (import.meta.env.VITE_PUBLIC_APP_URL || '').trim().replace(/\/$/, '');
 const INGRESS_KEY = import.meta.env.VITE_CLONEAI_KEY?.trim();
 const TURNSTILE_SITE_KEY = import.meta.env.VITE_TURNSTILE_SITE_KEY?.trim();
@@ -616,33 +626,9 @@ function updateExportGatedControls() {
     el.title = locked ? title || 'Upgrade to unlock' : '';
   };
 
-  if (!billingCache.enabled || billingCache.plan === 'guest') {
-    setLocked($('#download-txt-btn'), false, '');
-    setLocked($('#download-pdf-btn'), false, '');
-    setLocked($('#copy-cursor-prompt-btn'), false, '');
-    updateStickyUpgradeVisibility();
-    return;
-  }
-
-  const p = billingCache.plan;
-  const proExports = planOrPromoProOrPower();
-  if (proExports) {
-    setLocked($('#download-txt-btn'), false, '');
-    setLocked($('#download-pdf-btn'), false, '');
-    setLocked($('#copy-cursor-prompt-btn'), false, '');
-  } else if (p === 'free') {
-    setLocked($('#download-txt-btn'), true, 'Starter includes .txt download.');
-    setLocked($('#download-pdf-btn'), true, 'PDF export is included with Pro or Power.');
-    setLocked($('#copy-cursor-prompt-btn'), true, 'Cursor handoff is included with Pro or Power.');
-  } else if (p === 'starter') {
-    setLocked($('#download-txt-btn'), false, '');
-    setLocked($('#download-pdf-btn'), true, 'PDF export is included with Pro or Power.');
-    setLocked($('#copy-cursor-prompt-btn'), true, 'Cursor handoff is included with Pro or Power.');
-  } else {
-    setLocked($('#download-txt-btn'), false, '');
-    setLocked($('#download-pdf-btn'), false, '');
-    setLocked($('#copy-cursor-prompt-btn'), false, '');
-  }
+  setLocked($('#download-txt-btn'), false, '');
+  setLocked($('#download-pdf-btn'), false, '');
+  setLocked($('#copy-cursor-prompt-btn'), false, '');
   updateStickyUpgradeVisibility();
 }
 
@@ -1836,11 +1822,11 @@ async function downloadSiteImagesZip() {
   const main = $('#download-images-btn');
   const sticky = $('#sticky-download-zip-btn');
   const token = main?.dataset?.token || sticky?.dataset?.token;
-  if (!token || !API_BASE) {
+  const url = apiUrl(`/api/site-images/${token}`);
+  if (!token || !url) {
     showToast('No asset bundle for this run');
     return;
   }
-  const url = `${API_BASE}/api/site-images/${token}`;
   const headers = analyzeFetchHeaders();
   try {
     if (main) main.disabled = true;
@@ -2008,11 +1994,6 @@ async function shareReport() {
 }
 
 async function copyCursorPrompt() {
-  if (billingCache.enabled && billingCache.plan !== 'guest' && !planOrPromoProOrPower()) {
-    showToast('Cursor handoff is included with Pro or Power.', { variant: 'warning', duration: 3200 });
-    openPricingModal('export_cursor');
-    return;
-  }
   trackClientEvent('export_clicked', { format: 'cursor_prompt' });
   const text = buildCursorPrompt();
   if (!fullBriefText.trim()) {
@@ -2024,16 +2005,6 @@ async function copyCursorPrompt() {
 }
 
 function downloadBriefTxt() {
-  if (
-    billingCache.enabled &&
-    billingCache.plan !== 'guest' &&
-    billingCache.plan === 'free' &&
-    !billingCache.promoUnlocked
-  ) {
-    showToast('Upgrade to Starter to download .txt.', { variant: 'warning', duration: 3200 });
-    openPricingModal('export_txt');
-    return;
-  }
   trackClientEvent('export_clicked', { format: 'txt' });
   const text = fullBriefText.trim();
   if (!text) {
@@ -2053,11 +2024,6 @@ function downloadBriefTxt() {
 }
 
 function printBriefPdf() {
-  if (billingCache.enabled && billingCache.plan !== 'guest' && !planOrPromoProOrPower()) {
-    showToast('PDF export is included with Pro or Power.', { variant: 'warning', duration: 3200 });
-    openPricingModal('export_pdf');
-    return;
-  }
   trackClientEvent('export_clicked', { format: 'pdf' });
   const text = fullBriefText.trim();
   if (!text) {
