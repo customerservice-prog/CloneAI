@@ -63,7 +63,7 @@ import {
   postAuthLogin,
 } from './billingHttp.js';
 import { appendLeadRecord } from './leadsStore.js';
-import { promoMatchesRequest, ownerTokenMatchesRequest, configuredPromoCode } from './promoCode.js';
+import { promoMatchesRequest, privilegedAnalyzeBypass, configuredPromoCode } from './promoCode.js';
 import { probeSinkMiddleware } from './probeSink.js';
 import { resolveRootGet, formatRootLandingHtml, mergeStaticEnvWithSiteDefaults } from './rootRedirect.js';
 import {
@@ -646,7 +646,7 @@ async function validateAnalyzeRequest(req, res, next) {
 
     const ipGate = clientIp(req);
     req._promoValid = promoMatchesRequest(req);
-    req._privilegedAnalyze = ownerTokenMatchesRequest(req);
+    req._privilegedAnalyze = privilegedAnalyzeBypass(req);
     if (!req._privilegedAnalyze && captchaRequiredForAnalyze(ipGate)) {
       const token = String(
         req.body.cf_turnstile_response || req.body['cf-turnstile-response'] || ''
@@ -2454,7 +2454,7 @@ async function validateReviseRequest(req, res, next) {
     }
 
     req._promoValid = promoMatchesRequest(req);
-    req._privilegedAnalyze = ownerTokenMatchesRequest(req);
+    req._privilegedAnalyze = privilegedAnalyzeBypass(req);
     const ipGate = clientIp(req);
     if (!req._privilegedAnalyze && captchaRequiredForAnalyze(ipGate)) {
       const token = String(

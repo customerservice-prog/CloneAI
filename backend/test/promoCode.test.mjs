@@ -79,3 +79,16 @@ test('owner token header enables privileged bypass without promo body', () => {
   if (prevT !== undefined) process.env.CLONEAI_OWNER_TOKEN = prevT;
   else delete process.env.CLONEAI_OWNER_TOKEN;
 });
+
+test('promo code also enables privileged bypass', () => {
+  const prevP = process.env.CLONEAI_PROMO_CODE;
+  const prevT = process.env.CLONEAI_OWNER_TOKEN;
+  process.env.CLONEAI_PROMO_CODE = 'PromoPrivileged123';
+  delete process.env.CLONEAI_OWNER_TOKEN;
+  const req = mockReq({ header: { 'x-cloneai-promo-code': 'PromoPrivileged123' }, body: {} });
+  assert.equal(promoMatchesRequest(req), true);
+  assert.equal(privilegedAnalyzeBypass(req), true);
+  if (prevP !== undefined) process.env.CLONEAI_PROMO_CODE = prevP;
+  else delete process.env.CLONEAI_PROMO_CODE;
+  if (prevT !== undefined) process.env.CLONEAI_OWNER_TOKEN = prevT;
+});
