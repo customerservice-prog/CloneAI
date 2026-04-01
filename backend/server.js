@@ -63,7 +63,7 @@ import {
   postAuthLogin,
 } from './billingHttp.js';
 import { appendLeadRecord } from './leadsStore.js';
-import { promoMatchesRequest, privilegedAnalyzeBypass, configuredPromoCode } from './promoCode.js';
+import { promoMatchesRequest, ownerTokenMatchesRequest, configuredPromoCode } from './promoCode.js';
 import { probeSinkMiddleware } from './probeSink.js';
 import { resolveRootGet, formatRootLandingHtml, mergeStaticEnvWithSiteDefaults } from './rootRedirect.js';
 import {
@@ -74,7 +74,9 @@ import {
   buildArchiveLookupContext,
   loadLatestSnapshot,
   isSnapshotFresh,
+  scraperMetaAllowsArchive,
   saveAnalysisSnapshot,
+  snapshotAllowsReplay,
   replayAnalysisFromArchive,
 } from './analysisArchive.js';
 import { processSiteAssetZipBuffer } from './processAssetZip.js';
@@ -644,7 +646,7 @@ async function validateAnalyzeRequest(req, res, next) {
 
     const ipGate = clientIp(req);
     req._promoValid = promoMatchesRequest(req);
-    req._privilegedAnalyze = privilegedAnalyzeBypass(req);
+    req._privilegedAnalyze = ownerTokenMatchesRequest(req);
     if (!req._privilegedAnalyze && captchaRequiredForAnalyze(ipGate)) {
       const token = String(
         req.body.cf_turnstile_response || req.body['cf-turnstile-response'] || ''
@@ -879,11 +881,34 @@ function durableAssetsSatisfyExtraction(summary, assets) {
   const manifestStatus = String(assets.manifestStatus || assets.manifest_status || '').trim().toLowerCase();
   const downloadStatus = String(assets.downloadStatus || assets.download_status || '').trim().toLowerCase();
   const hasArchiveLink = Boolean(assets.artifactUrl || assets.zipUrl || assets.zip_url);
-  if (!hasArchiveLink) return false;
-  if (!['completed', 'locked'].includes(archiveStatus)) return false;
   if (manifestStatus !== 'completed') return false;
   if (downloadStatus === 'failed') return false;
+  if (archiveStatus === 'locked') return true;
+  if (!hasArchiveLink) return false;
+  if (archiveStatus !== 'completed') return false;
   return true;
+}
+
+function normalizeExtractionJobForResponse(job) {
+  if (!job || typeof job !== 'object') return job;
+  if (job.status !== 'failed') return job;
+  if (!durableAssetsSatisfyExtraction(job.summary, job.assets)) return job;
+  const next = structuredClone(job);
+  next.status = 'completed';
+  next.error = null;
+  ensureJobStageStatuses(next);
+  next.progress = {
+    ...(next.progress || {}),
+    phase: 'done',
+    label: 'Completed',
+  };
+  next.progress.stageStatuses = {
+    ...next.progress.stageStatuses,
+    archive: next.progress.stageStatuses.archive === 'failed' ? 'locked' : next.progress.stageStatuses.archive,
+    manifest: 'completed',
+    report: 'completed',
+  };
+  return next;
 }
 
 function extractionJobArtifactUrl(jobId, artifactName) {
@@ -1229,7 +1254,13 @@ function updateExtractionJobSummaryFromEvent(job, event) {
       applyJobStageStatuses(job, { crawl: 'completed', assetDiscovery: 'running' });
     }
     if (event.phase === 'capture_screenshots') {
-      applyJobStageStatuses(job, { screenshots: 'running' });
+      const screenshotStatus =
+        Number(event.screenshotPagesPlanned) === 0 &&
+        Number(event.screenshotPagesCaptured) === 0 &&
+        /skip/i.test(String(event.phaseLabel || ''))
+          ? 'skipped'
+          : 'running';
+      applyJobStageStatuses(job, { screenshots: screenshotStatus });
     }
     if (event.phase === 'download_images') {
       applyJobStageStatuses(job, { assetDiscovery: 'completed', download: 'running' });
@@ -1590,9 +1621,10 @@ function streamExtractionJobEvents(req, res, job) {
   const flush = () => {
     const slice = readExtractionJobEventsSlice(extractionJobsBaseDir, job.id, offset);
     offset = slice.nextOffset;
-    const latest = loadExtractionJob(extractionJobsBaseDir, job.id);
+    const latest = normalizeExtractionJobForResponse(loadExtractionJob(extractionJobsBaseDir, job.id));
     const holdDoneUntilTerminal = !latest || !isTerminalExtractionJobStatus(latest.status);
     for (const event of slice.events) {
+      if (latest?.status === 'completed' && event?.type === 'error') continue;
       if (event?.type === 'done' && holdDoneUntilTerminal) continue;
       sseWrite(res, event);
     }
@@ -2193,6 +2225,23 @@ function ssePublicError() {
   return 'We could not complete this analysis. Please try again.';
 }
 
+function fetchFailurePublicMessage(scraperMeta) {
+  const hint = String(scraperMeta?.hint || '').trim().toLowerCase();
+  if (hint === 'challenge_or_waf') {
+    return 'This site appears to block automated access. Try screenshots or another URL.';
+  }
+  if (hint === 'http_error') {
+    return `The URL returned HTTP ${scraperMeta?.statusCode ?? 'error'}. Try another page or use screenshots.`;
+  }
+  if (hint === 'fetch_timeout') {
+    return 'Fetching that URL timed out. Try again, use a lighter page, or upload screenshots.';
+  }
+  if (hint === 'redirect_blocked') {
+    return 'That URL redirected in a way we block for security. Try the final URL directly.';
+  }
+  return 'The server could not reach that URL (network, DNS, or TLS). Check the address and try again.';
+}
+
 const MAX_REVISE_PRIOR_CHARS = Math.min(
   900_000,
   Math.max(80_000, Number(process.env.MAX_REVISE_PRIOR_CHARS) || 480_000)
@@ -2405,7 +2454,7 @@ async function validateReviseRequest(req, res, next) {
     }
 
     req._promoValid = promoMatchesRequest(req);
-    req._privilegedAnalyze = privilegedAnalyzeBypass(req);
+    req._privilegedAnalyze = ownerTokenMatchesRequest(req);
     const ipGate = clientIp(req);
     if (!req._privilegedAnalyze && captchaRequiredForAnalyze(ipGate)) {
       const token = String(
@@ -2673,8 +2722,7 @@ async function runAnalyzePipeline(req, res) {
       if (
         snap &&
         isSnapshotFresh(snap, analysisCacheMaxAgeMs()) &&
-        typeof snap.fullText === 'string' &&
-        snap.fullText.length > 80
+        snapshotAllowsReplay(snap)
       ) {
         const billingMetaThin =
           isBillingEnabled() && req._billingPlan
@@ -2737,6 +2785,21 @@ async function runAnalyzePipeline(req, res) {
       scraperMeta.ok &&
       !scraperMeta.blocked &&
       !harvestBlockedHints.has(scraperMeta.hint || '');
+    const hasUploadedFiles = Array.isArray(req.files) && req.files.length > 0;
+    const fatalUrlOnlyFetchFailure =
+      Boolean(url) &&
+      !hasUploadedFiles &&
+      rawHtml.length < 200 &&
+      (!scraperMeta.ok || scraperMeta.blocked || harvestBlockedHints.has(scraperMeta.hint || ''));
+
+    if (fatalUrlOnlyFetchFailure) {
+      send({ type: 'meta', scraper: scraperMeta });
+      send({ type: 'stage', index: 0, phase: 'error', label: 'Multi-page crawl & assets' });
+      send({ type: 'error', message: fetchFailurePublicMessage(scraperMeta) });
+      await abortBillingIfNeeded(req);
+      res.end();
+      return;
+    }
 
     const assetHarvestMode = Boolean(req._assetHarvestMode);
     scraperMeta.assetHarvestMode = assetHarvestMode;
@@ -3754,7 +3817,7 @@ async function runAnalyzePipeline(req, res) {
     }
 
     const archSave = buildArchiveLookupContext(req, { openaiModel: OPENAI_MODEL });
-    if (archSave.eligible && streamedReportText.length > 80) {
+    if (archSave.eligible && streamedReportText.length > 80 && scraperMetaAllowsArchive(scraperMeta)) {
       let metaJson;
       let assetsJson;
       try {
@@ -4256,7 +4319,7 @@ app.get('/api/extraction-jobs', requireIngressKey, (req, res) => {
   }
   const jobs = listExtractionJobsForUser(extractionJobsBaseDir, userId, {
     limit: Math.max(1, Math.min(50, Number(req.query?.limit) || 20)),
-  });
+  }).map((job) => normalizeExtractionJobForResponse(job));
   res.json({
     jobs: jobs.map((job) => ({
       id: job.id,
@@ -4276,13 +4339,13 @@ app.get('/api/extraction-jobs', requireIngressKey, (req, res) => {
 });
 
 app.get('/api/extraction-jobs/:id', requireIngressKey, (req, res) => {
-  const job = loadExtractionJob(extractionJobsBaseDir, String(req.params.id || '').trim());
+  const job = normalizeExtractionJobForResponse(loadExtractionJob(extractionJobsBaseDir, String(req.params.id || '').trim()));
   if (!authorizeExtractionJobAccess(req, res, job)) return;
   res.json(job);
 });
 
 app.get('/api/extraction-jobs/:id/events', requireIngressKey, (req, res) => {
-  const job = loadExtractionJob(extractionJobsBaseDir, String(req.params.id || '').trim());
+  const job = normalizeExtractionJobForResponse(loadExtractionJob(extractionJobsBaseDir, String(req.params.id || '').trim()));
   if (!authorizeExtractionJobAccess(req, res, job)) return;
   streamExtractionJobEvents(req, res, job);
 });

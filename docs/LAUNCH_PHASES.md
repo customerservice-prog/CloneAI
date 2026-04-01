@@ -81,7 +81,7 @@ The API still **301-redirects** HTML requests on `/` to **`FRONTEND_URL`** when 
 
 When you are ready to charge:
 
-1. **Stripe (Live)** — Products/prices: Starter, Pro, one-time extra run. Copy **`price_...`** IDs.
+1. **Stripe (Live)** — Products/prices: Starter, Pro, Power, one-time extra run, and deep extraction. Copy **`price_...`** IDs.
 2. **Webhook** — `https://<api-host>/api/billing/webhook`  
    Events: `checkout.session.completed`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.payment_failed`.  
    Or run: `cd backend && npm run stripe-webhook:create -- https://<api-host>/api/billing/webhook`
@@ -93,7 +93,9 @@ When you are ready to charge:
 | `STRIPE_SECRET_KEY` |
 | `STRIPE_WEBHOOK_SECRET` |
 | `STRIPE_PRICE_STARTER` / `STRIPE_PRICE_PRO` / `STRIPE_PRICE_EXTRA_RUN` |
+| `STRIPE_PRICE_POWER` / `STRIPE_PRICE_DEEP_EXTRACT` *(if enabled in UI)* |
 | `FRONTEND_URL` = **`https://`…** (must match checkout return URL) |
+| `BILLING_DATA_PATH` / `ANALYSIS_ARCHIVE_DIR` / `EXTRACTION_JOBS_DIR` on persistent storage |
 
 4. **`CORS_ORIGINS`** must include every browser **`Origin`** (e.g. `www` **and** apex if both serve the app).
 

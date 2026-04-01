@@ -510,22 +510,6 @@ async function refreshOpenAiServerNotice() {
   }
 }
 
-function isCompactHeaderViewport() {
-  return typeof window !== 'undefined' && window.matchMedia('(max-width: 640px)').matches;
-}
-
-function compactHeaderSuffix(parts) {
-  return parts
-    .map((part) => {
-      if (part === 'lifetime') return 'life';
-      if (part === 'this month') return 'month';
-      if (part === 'authorized code') return 'code';
-      if (part === 'allow storage for accurate count') return 'enable storage';
-      return part;
-    })
-    .join(' · ');
-}
-
 async function refreshBillingStatus() {
   const usageWrap = $('#header-usage-wrap');
   const usageEl = $('#header-usage');
@@ -645,16 +629,11 @@ async function refreshBillingStatus() {
               : data.plan;
     const used = Number(data.used) || 0;
     const lim = Number(data.limit) || 1;
-    const suffixParts = [data.plan === 'free' ? 'lifetime' : 'this month'];
-    if (data.bonusRuns > 0) suffixParts.push(`+${data.bonusRuns} bonus`);
-    if (data.promoUnlocked) suffixParts.push('authorized code');
-    if (data.clientIdUnset) suffixParts.push('allow storage for accurate count');
-    const suffix = suffixParts.join(' · ');
-    const compact = isCompactHeaderViewport();
-    const compactSuffix = compactHeaderSuffix(suffixParts);
-    usageEl.innerHTML = compact
-      ? `<strong>${used}/${lim}</strong> · ${escapeHtml(planLabel)} <span style="opacity:.85">· ${escapeHtml(compactSuffix)}</span>`
-      : `<strong>${used} / ${lim}</strong> runs used · ${escapeHtml(planLabel)} <span style="opacity:.85">(${escapeHtml(suffix)})</span>`;
+    let suffix = data.plan === 'free' ? 'lifetime' : 'this month';
+    if (data.bonusRuns > 0) suffix += ` · +${data.bonusRuns} bonus`;
+    if (data.promoUnlocked) suffix += ' · authorized code';
+    if (data.clientIdUnset) suffix += ' · allow storage for accurate count';
+    usageEl.innerHTML = `<strong>${used} / ${lim}</strong> runs used · ${escapeHtml(planLabel)} <span style="opacity:.85">(${suffix})</span>`;
 
     const ratio = lim > 0 ? used / lim : 0;
     if (urgentEl) {
@@ -663,7 +642,7 @@ async function refreshBillingStatus() {
     }
 
     upBtn.textContent = data.plan === 'pro' ? 'Plans' : 'Upgrade';
-    syncOwnerPill(Boolean(data.promoUnlocked), data.promoUnlocked ? (compact ? 'Owner unlocked' : 'Owner / quality-first unlocked') : '');
+    syncOwnerPill(Boolean(data.promoUnlocked), data.promoUnlocked ? 'Owner / quality-first unlocked' : '');
     enforceDepthForPlan();
     updatePlanGatedControls();
     updateExportGatedControls();
@@ -1337,6 +1316,16 @@ const selectedOptions = new Set(
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
+
+function showDownloadAppPage(open) {
+  const banner = $('#download-app-banner');
+  const page = $('#download-app-page');
+  const main = $('#main-app-content');
+  if (banner) banner.classList.toggle('hidden', Boolean(open));
+  if (page) page.classList.toggle('hidden', !open);
+  if (main) main.classList.toggle('hidden', Boolean(open));
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
 
 function formatHarvestBytes(b) {
   const n = Number(b) || 0;
@@ -3569,6 +3558,8 @@ function init() {
   $('#job-history-refresh-btn')?.addEventListener('click', () => void refreshExtractionJobHistory());
   $('#sticky-upgrade-btn')?.addEventListener('click', () => startBillingCheckout('pro', 'sticky_bar'));
   $('#header-plans-btn')?.addEventListener('click', () => openPricingModal('header_plans'));
+  $('#download-app-banner-btn')?.addEventListener('click', () => showDownloadAppPage(true));
+  $('#download-app-back-btn')?.addEventListener('click', () => showDownloadAppPage(false));
   $('#download-images-btn')?.addEventListener('click', () => downloadSiteImagesZip());
   $('#download-manifest-btn')?.addEventListener('click', () => downloadExtractionManifest('manifest'));
   $('#download-images-json-btn')?.addEventListener('click', () => downloadExtractionManifest('images'));
@@ -3831,6 +3822,7 @@ function init() {
     }
   });
 
+  showDownloadAppPage(false);
   setTab('url');
   updateDepthEstimate();
   updateFlowWizard();
