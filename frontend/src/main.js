@@ -1317,16 +1317,6 @@ const selectedOptions = new Set(
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 
-function showDownloadAppPage(open) {
-  const banner = $('#download-app-banner');
-  const page = $('#download-app-page');
-  const main = $('#main-app-content');
-  if (banner) banner.classList.toggle('hidden', Boolean(open));
-  if (page) page.classList.toggle('hidden', !open);
-  if (main) main.classList.toggle('hidden', Boolean(open));
-  window.scrollTo({ top: 0, behavior: 'smooth' });
-}
-
 function formatHarvestBytes(b) {
   const n = Number(b) || 0;
   if (n < 1024) return `${n} B`;
@@ -3558,8 +3548,6 @@ function init() {
   $('#job-history-refresh-btn')?.addEventListener('click', () => void refreshExtractionJobHistory());
   $('#sticky-upgrade-btn')?.addEventListener('click', () => startBillingCheckout('pro', 'sticky_bar'));
   $('#header-plans-btn')?.addEventListener('click', () => openPricingModal('header_plans'));
-  $('#download-app-banner-btn')?.addEventListener('click', () => showDownloadAppPage(true));
-  $('#download-app-back-btn')?.addEventListener('click', () => showDownloadAppPage(false));
   $('#download-images-btn')?.addEventListener('click', () => downloadSiteImagesZip());
   $('#download-manifest-btn')?.addEventListener('click', () => downloadExtractionManifest('manifest'));
   $('#download-images-json-btn')?.addEventListener('click', () => downloadExtractionManifest('images'));
@@ -3822,7 +3810,6 @@ function init() {
     }
   });
 
-  showDownloadAppPage(false);
   setTab('url');
   updateDepthEstimate();
   updateFlowWizard();
