@@ -72,6 +72,24 @@ import {
   replayAnalysisFromArchive,
 } from './analysisArchive.js';
 import { processSiteAssetZipBuffer } from './processAssetZip.js';
+import {
+  getSiteAssetDownload,
+  createSiteAssetDownload,
+  startSiteAssetDownloadJanitor,
+} from './siteAssetDownloads.js';
+import {
+  getExtractionJobsBaseDir,
+  createExtractionJob,
+  loadExtractionJob,
+  loadExtractionJobInput,
+  updateExtractionJob,
+  appendExtractionJobEvent,
+  readExtractionJobEventsSlice,
+  saveExtractionJobArtifact,
+  getExtractionJobArtifactPath,
+  listExtractionJobs,
+  listExtractionJobsForUser,
+} from './extractionJobs.js';
 
 dotenv.config();
 
