@@ -76,7 +76,17 @@ if (apex) {
       console.log(`      → ${status} ${Array.isArray(loc) ? loc[0] : loc}`);
       return;
     }
-    if (status === 200 && ct.includes('text/html')) return;
+    if (status === 200 && ct.includes('text/html')) {
+      if (
+        body.includes('<title>CloneAI API</title>') ||
+        body.includes('This URL is the <strong>API</strong>')
+      ) {
+        throw new Error(
+          'apex returned API landing HTML (not the SPA). Use repo-root build (backend/public/index.html), set STATIC_APP_URL + CORS on the API, or fix DNS — see render.yaml and docs/NAMECHEAP_RENDER.md'
+        );
+      }
+      return;
+    }
     if (status === 200 && ct.includes('application/json')) {
       throw new Error(
         'got JSON (API root). Set STATIC_APP_URL on the API or point DNS apex at cloneai-web — see docs/NAMECHEAP_RENDER.md'
