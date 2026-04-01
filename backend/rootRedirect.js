@@ -102,6 +102,47 @@ export function redirectTargetWhenFrontendHostHitsApi(req, frontRaw, staticAppRa
 }
 
 /**
+ * True when `reqHost` matches any origin in CORS_ORIGINS (comma-separated URLs or hostnames).
+ * Used so GET / can redirect custom domains listed for browser API access even if FRONTEND_URL is wrong or unset.
+ */
+export function hostInCorsOriginsList(reqHost, corsOriginsRaw) {
+  const h = normalizeHostLabel(reqHost);
+  if (!h || !corsOriginsRaw) return false;
+  for (const part of String(corsOriginsRaw).split(',')) {
+    const t = part.trim();
+    if (!t) continue;
+    try {
+      const u = new URL(t.includes('://') ? t : `https://${t}`);
+      if (normalizeHostLabel(u.hostname) === h) return true;
+    } catch {
+      /* skip invalid entry */
+    }
+  }
+  return false;
+}
+
+/**
+ * Redirect browsers to STATIC_APP_URL when the request Host is an allowed CORS browser origin
+ * but not already the static app host (covers production if FRONTEND_URL does not match the apex).
+ */
+export function redirectTargetWhenCorsHostHitsStatic(req, staticAppRaw, corsOriginsRaw) {
+  const staticBase = normalizePublicAppBase(staticAppRaw);
+  if (!staticBase) return null;
+  let staticHost = '';
+  try {
+    staticHost = normalizeHostLabel(new URL(staticBase).hostname);
+  } catch {
+    return null;
+  }
+  const reqHost = normalizeHostLabel(req.hostname || req.get('host'));
+  if (!reqHost || reqHost === staticHost) return null;
+  if (!hostInCorsOriginsList(reqHost, corsOriginsRaw)) return null;
+  const incoming = requestPublicOrigin(req);
+  if (incoming && staticBase === incoming) return null;
+  return `${staticBase}/`;
+}
+
+/**
  * When apex DNS points at the API but `www` (or another host) points at the static SPA, redirect there.
  * Set APEX_STATIC_FALLBACK_URL e.g. to https://www.siteclonerpro.com on the API service.
  */
@@ -251,13 +292,14 @@ export function formatRootLandingHtml({
 
 /**
  * @param {import('express').Request} req
- * @param {{ frontendUrl?: string, staticAppUrl?: string, apexStaticFallbackUrl?: string }} opts
+ * @param {{ frontendUrl?: string, staticAppUrl?: string, apexStaticFallbackUrl?: string, corsOrigins?: string }} opts
  * @returns {{ kind: 'redirect'; status: number; location: string } | { kind: 'json'; hint?: string }}
  */
 export function resolveRootGet(req, opts = {}) {
   const front = String(opts.frontendUrl || '').trim();
   const staticRaw = String(opts.staticAppUrl || '').trim();
   const apexFallbackRaw = String(opts.apexStaticFallbackUrl || '').trim();
+  const corsOrigins = String(opts.corsOrigins || '').trim();
   const accept = String(req.get('accept') || '');
   const formatJson = String(req.query?.format || '').toLowerCase() === 'json';
   const wantsBrowserDoc = !formatJson && acceptLooksLikeBrowserNavigation(accept);
@@ -265,6 +307,11 @@ export function resolveRootGet(req, opts = {}) {
   const staticFallback = redirectTargetWhenFrontendHostHitsApi(req, front, staticRaw);
   if (staticFallback && wantsBrowserDoc) {
     return { kind: 'redirect', status: 302, location: staticFallback };
+  }
+
+  const corsStaticFallback = redirectTargetWhenCorsHostHitsStatic(req, staticRaw, corsOrigins);
+  if (corsStaticFallback && wantsBrowserDoc) {
+    return { kind: 'redirect', status: 302, location: corsStaticFallback };
   }
 
   const apexRedir = apexMismatchRedirectTarget(req, front, apexFallbackRaw);
@@ -279,6 +326,7 @@ export function resolveRootGet(req, opts = {}) {
 
   const hint =
     !staticFallback &&
+    !corsStaticFallback &&
     !target &&
     front &&
     wantsBrowserDoc &&

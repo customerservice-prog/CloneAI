@@ -803,6 +803,7 @@ if (!serveSpa) {
       frontendUrl: front,
       staticAppUrl: staticApp,
       apexStaticFallbackUrl: apexFallback,
+      corsOrigins: (process.env.CORS_ORIGINS || '').trim(),
     });
     if (r.kind === 'redirect') {
       res.redirect(r.status, r.location);

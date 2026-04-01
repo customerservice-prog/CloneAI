@@ -10,6 +10,7 @@ import {
   browserSafeFrontendRedirectTarget,
   bareApexWwwTryUrl,
   formatRootLandingHtml,
+  hostInCorsOriginsList,
 } from '../rootRedirect.js';
 
 function mockReq({
@@ -192,4 +193,46 @@ test('formatRootLandingHtml: misconfigured apex includes www try and /?format=js
   });
   assert.match(html, /https:\/\/www\.siteclonerpro\.com\//);
   assert.match(html, /\?format=json/);
+});
+
+test('hostInCorsOriginsList parses comma-separated origins', () => {
+  assert.equal(
+    hostInCorsOriginsList(
+      'siteclonerpro.com',
+      'https://siteclonerpro.com,https://www.siteclonerpro.com,https://cloneai-web.onrender.com'
+    ),
+    true
+  );
+  assert.equal(hostInCorsOriginsList('evil.com', 'https://siteclonerpro.com'), false);
+});
+
+test('CORS + STATIC_APP_URL: redirect apex when FRONTEND_URL does not match host', () => {
+  const req = mockReq({
+    hostname: 'siteclonerpro.com',
+    accept: 'text/html',
+  });
+  const r = resolveRootGet(req, {
+    frontendUrl: 'https://wrong-example.com',
+    staticAppUrl: 'https://cloneai-web-abc.onrender.com',
+    apexStaticFallbackUrl: '',
+    corsOrigins: 'https://siteclonerpro.com,https://www.siteclonerpro.com',
+  });
+  assert.equal(r.kind, 'redirect');
+  assert.equal(r.location, 'https://cloneai-web-abc.onrender.com/');
+});
+
+test('APEX_STATIC_FALLBACK to static host redirects when STATIC_APP_URL unset (marketing match)', () => {
+  const req = mockReq({
+    hostname: 'siteclonerpro.com',
+    accept: 'text/html',
+  });
+  const r = resolveRootGet(req, {
+    frontendUrl: 'https://siteclonerpro.com',
+    staticAppUrl: '',
+    apexStaticFallbackUrl: 'https://cloneai-web-xyz.onrender.com',
+    corsOrigins: '',
+  });
+  assert.equal(r.kind, 'redirect');
+  assert.equal(r.status, 302);
+  assert.equal(r.location, 'https://cloneai-web-xyz.onrender.com/');
 });
