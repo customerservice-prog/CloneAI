@@ -61,6 +61,7 @@ import {
   getBillingAnalytics,
   postBillingClaimAccount,
   postAuthLogin,
+  postAdminBillingLoginEmail,
 } from './billingHttp.js';
 import { appendLeadRecord } from './leadsStore.js';
 import { promoMatchesRequest, privilegedAnalyzeBypass, configuredPromoCode } from './promoCode.js';
@@ -1850,6 +1851,13 @@ app.get('/api/admin/ops-summary', (req, res) => {
     billingAnalytics: getAnalyticsSnapshotSync(),
     crawlMaxPagesEnvCap: crawlMaxPagesEnvCap(),
     env: process.env.NODE_ENV || null,
+  });
+});
+
+app.post('/api/admin/billing-login-email', (req, res) => {
+  postAdminBillingLoginEmail(req, res).catch((e) => {
+    console.error(e);
+    if (!res.headersSent) res.status(500).json({ success: false, error: 'Admin billing update failed.' });
   });
 });
 

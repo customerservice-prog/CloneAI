@@ -10,6 +10,7 @@ import {
   recordWebhookFailure,
   getAnalyticsSnapshotSync,
   recordProductEvent,
+  adminRewriteLoginEmail,
 } from './billingService.js';
 import { claimSubscriptionAccount, loginWithEmailPassword } from './billingAccounts.js';
 import { promoMatchesRequest } from './promoCode.js';
@@ -242,6 +243,58 @@ export async function postAuthLogin(req, res) {
   } catch (e) {
     console.error('[auth] login error', e?.message || e);
     res.status(500).json({ success: false, error: 'Login failed.' });
+  }
+}
+
+/**
+ * POST /api/admin/billing-login-email
+ * Header: x-cloneai-admin-key = ADMIN_OPS_KEY
+ * body: { to: "new@email.com", from?: "oldLoginOrEmail", userId?: "uuid" }
+ */
+export async function postAdminBillingLoginEmail(req, res) {
+  const key = process.env.ADMIN_OPS_KEY?.trim();
+  if (!key || req.get('x-cloneai-admin-key') !== key) {
+    res.status(404).json({ error: 'Not found.' });
+    return;
+  }
+
+  const fromRaw = String(req.body?.from || '').trim();
+  const toRaw = String(req.body?.to || '').trim();
+  const userIdRaw = String(req.body?.userId || req.body?.user_id || '').trim();
+
+  if (!toRaw) {
+    res.status(400).json({ success: false, error: 'Body must include `to` (new email).' });
+    return;
+  }
+  if (!fromRaw && !userIdRaw) {
+    res.status(400).json({
+      success: false,
+      error: 'Provide `from` (current loginEmail) or `userId` (billing UUID).',
+    });
+    return;
+  }
+
+  try {
+    const out = await adminRewriteLoginEmail({ fromRaw, toRaw, userIdRaw });
+    if (!out.ok) {
+      const status =
+        out.code === 'EMAIL_IN_USE'
+          ? 409
+          : out.code === 'NOT_FOUND' || out.code === 'NO_USER'
+            ? 404
+            : 400;
+      res.status(status).json({ success: false, code: out.code, error: out.error });
+      return;
+    }
+    res.json({
+      success: true,
+      userId: out.userId,
+      loginEmail: out.newEmail,
+      previousLoginEmail: out.previous || null,
+    });
+  } catch (e) {
+    console.error('[admin] billing-login-email', e?.message || e);
+    res.status(500).json({ success: false, error: 'Failed to update billing store.' });
   }
 }
 

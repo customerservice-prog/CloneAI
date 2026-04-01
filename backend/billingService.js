@@ -46,6 +46,70 @@ export function findConflictingLoginEmailOwner(state, email, excludeUserId) {
   return null;
 }
 
+/**
+ * Fix invalid/non-email login identifiers (e.g. legacy username) so /api/auth/login accepts the address.
+ * @param {object} state
+ * @param {{ fromRaw?: string, toRaw: string, userIdRaw?: string }} opts
+ * @returns {{ ok: true, userId: string, previous: string, newEmail: string } | { ok: false, code: string, error: string }}
+ */
+export function applyLoginEmailRewriteSync(state, opts) {
+  const toRaw = String(opts?.toRaw || '').trim();
+  const newEmail = normalizeAccountEmail(toRaw);
+  if (!newEmail) {
+    return { ok: false, code: 'INVALID_EMAIL', error: 'Target must be a valid email address.' };
+  }
+
+  const fromRaw = String(opts?.fromRaw || '').trim();
+  const userIdRaw = String(opts?.userIdRaw || '').trim();
+  let targetId = null;
+  let prevLogin = '';
+
+  if (userIdRaw) {
+    const uid = normalizeUserId(userIdRaw);
+    if (!uid || !state.users?.[uid]) {
+      return { ok: false, code: 'NO_USER', error: 'No billing row for that user id.' };
+    }
+    targetId = uid;
+    prevLogin = state.users[uid].loginEmail || '';
+  } else if (fromRaw) {
+    const fromLc = fromRaw.toLowerCase();
+    for (const [id, u] of Object.entries(state.users || {})) {
+      if ((u.loginEmail || '').toLowerCase() === fromLc) {
+        targetId = id;
+        prevLogin = u.loginEmail || '';
+        break;
+      }
+    }
+    if (!targetId) {
+      return {
+        ok: false,
+        code: 'NOT_FOUND',
+        error: 'No user with that loginEmail. Pass userId if loginEmail was never set.',
+      };
+    }
+  } else {
+    return { ok: false, code: 'BAD_REQUEST', error: 'Provide from (current loginEmail) or userId.' };
+  }
+
+  const other = findConflictingLoginEmailOwner(state, newEmail, targetId);
+  if (other) {
+    return { ok: false, code: 'EMAIL_IN_USE', error: `That email is already linked to account ${other}.` };
+  }
+
+  state.users[targetId].loginEmail = newEmail;
+  state.users[targetId].updatedAt = new Date().toISOString();
+  return { ok: true, userId: targetId, previous: prevLogin, newEmail };
+}
+
+export async function adminRewriteLoginEmail(opts) {
+  return withBillingLock(() => {
+    const state = loadState();
+    const out = applyLoginEmailRewriteSync(state, opts);
+    if (out.ok) saveState(state);
+    return out;
+  });
+}
+
 export function ensureBillingUser(state, userId) {
   return ensureUser(state, userId);
 }
