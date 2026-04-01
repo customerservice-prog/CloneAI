@@ -27,13 +27,27 @@ function run(cmd, args, cwd) {
   if (r.status !== 0) process.exit(r.status ?? 1);
 }
 
+function installFrontendDeps({ refresh = false } = {}) {
+  const installArgs = ['ci', '--include=dev'];
+  if (refresh) {
+    console.log('[publish-spa-to-backend] frontend/node_modules exists but is incomplete; refreshing dependencies');
+  } else {
+    console.log('[publish-spa-to-backend] Installing frontend dependencies (including dev tools for Vite build)');
+  }
+  run('npm', installArgs, fe);
+}
+
 if (existsSync(viteCli)) {
   console.log('[publish-spa-to-backend] Reusing existing frontend/node_modules');
 } else if (existsSync(frontendNodeModules)) {
-  console.log('[publish-spa-to-backend] frontend/node_modules exists but is incomplete; refreshing dependencies');
-  run('npm', ['install'], fe);
+  installFrontendDeps({ refresh: true });
 } else {
-  run('npm', ['ci'], fe);
+  installFrontendDeps();
+}
+
+if (!existsSync(viteCli)) {
+  console.error('[publish-spa-to-backend] Missing frontend/node_modules/vite/bin/vite.js after dependency install.');
+  process.exit(1);
 }
 run('npm', ['run', 'build'], fe);
 
