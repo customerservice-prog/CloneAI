@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   DEFAULT_DEV_ORIGINS,
+  deriveProductionCorsOriginsFromEnv,
   isLocalDevBrowserOrigin,
   isServedFromSameOrigin,
   parseCorsOrigins,
@@ -67,4 +68,22 @@ test('shouldAllowBrowserOrigin rejects mismatched origins in production when not
     reqLike: mockReq(),
   });
   assert.equal(allowed, false);
+});
+
+test('deriveProductionCorsOriginsFromEnv adds apex + www from FRONTEND_URL', () => {
+  const prev = { ...process.env };
+  try {
+    delete process.env.FRONTEND_URL;
+    delete process.env.VITE_PUBLIC_APP_URL;
+    delete process.env.VITE_API_URL;
+    process.env.FRONTEND_URL = 'https://www.example.com';
+    const list = deriveProductionCorsOriginsFromEnv();
+    assert.ok(list.includes('https://www.example.com'));
+    assert.ok(list.includes('https://example.com'));
+  } finally {
+    for (const k of ['FRONTEND_URL', 'VITE_PUBLIC_APP_URL', 'VITE_API_URL']) {
+      if (prev[k] === undefined) delete process.env[k];
+      else process.env[k] = prev[k];
+    }
+  }
 });

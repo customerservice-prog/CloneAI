@@ -50,6 +50,37 @@ export function parseCorsOrigins(rawValue, { isProd = false } = {}) {
     .filter((origin) => origin !== '*');
 }
 
+/**
+ * If CORS_ORIGINS is empty in production, build an allowlist from canonical URL env (Stripe / Vite bake).
+ * Adds apex + www for each host so dashboard drift on CORS alone does not break browsers.
+ * @returns {string[]}
+ */
+export function deriveProductionCorsOriginsFromEnv() {
+  const keys = ['FRONTEND_URL', 'PUBLIC_APP_URL', 'VITE_PUBLIC_APP_URL', 'VITE_API_URL'];
+  const origins = new Set();
+  for (const k of keys) {
+    const raw = String(process.env[k] || '').trim();
+    if (!raw) continue;
+    try {
+      const u = new URL(raw.includes('://') ? raw : `https://${raw}`);
+      if (u.protocol !== 'https:' && u.protocol !== 'http:') continue;
+      const proto = u.protocol;
+      const host = u.hostname.toLowerCase();
+      if (!host) continue;
+      origins.add(`${proto}//${host}`);
+      if (host.startsWith('www.')) {
+        const bare = host.slice(4);
+        if (bare) origins.add(`${proto}//${bare}`);
+      } else {
+        origins.add(`${proto}//www.${host}`);
+      }
+    } catch {
+      /* skip */
+    }
+  }
+  return [...origins].sort();
+}
+
 export function shouldAllowBrowserOrigin({
   isProd = false,
   relaxOriginCheck = false,

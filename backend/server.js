@@ -19,6 +19,7 @@ import {
   DEFAULT_DEV_ORIGINS,
   isLocalDevBrowserOrigin,
   parseCorsOrigins,
+  deriveProductionCorsOriginsFromEnv,
   shouldAllowBrowserOrigin,
 } from './originPolicy.js';
 import { optimizeImageForModel } from './imageOptimize.js';
@@ -242,7 +243,13 @@ const basePort = hasExplicitPort ? Number(envPortRaw) : 3001;
 let listenPort = basePort;
 const LISTEN_PORT_TRIES = 50;
 
-const corsOrigins = parseCorsOrigins(process.env.CORS_ORIGINS, { isProd });
+let corsOrigins = parseCorsOrigins(process.env.CORS_ORIGINS, { isProd });
+if (isProd && corsOrigins.length === 0) {
+  const derived = deriveProductionCorsOriginsFromEnv();
+  if (derived.length) {
+    corsOrigins = derived;
+  }
+}
 
 app.use(
   cors({
@@ -253,7 +260,7 @@ app.use(
       }
       if (corsOrigins.length === 0) {
         if (isProd) {
-          console.warn('CORS: set CORS_ORIGINS to your frontend URL(s).');
+          console.warn('CORS: set CORS_ORIGINS or FRONTEND_URL / VITE_PUBLIC_APP_URL.');
           return callback(null, false);
         }
         return callback(null, DEFAULT_DEV_ORIGINS.includes(origin));
