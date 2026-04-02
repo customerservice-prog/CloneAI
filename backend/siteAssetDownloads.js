@@ -5,12 +5,22 @@ export const SITE_ASSET_TTL_MS = Math.min(
   Math.max(5 * 60 * 1000, Number(process.env.SITE_ASSET_TTL_MS) || 30 * 60 * 1000)
 );
 
+const LOW_MEMORY_HOST =
+  String(process.env.RENDER || '').toLowerCase() === 'true' ||
+  String(process.env.CLONEAI_LOW_MEMORY || '').toLowerCase() === 'true';
+
+function readMaxSiteAssetDownloads() {
+  const raw = process.env.MAX_SITE_ASSET_DOWNLOADS;
+  if (raw !== undefined && String(raw).trim() !== '') {
+    const n = Number(raw);
+    if (Number.isFinite(n)) return Math.min(20_000, Math.max(200, Math.floor(n)));
+  }
+  return LOW_MEMORY_HOST ? 40 : 2500;
+}
+
 /** Short-lived ZIP blobs for GET /api/site-images/:token (not logged). */
 const siteAssetDownloads = new Map();
-const MAX_SITE_ASSET_DOWNLOADS = Math.min(
-  20_000,
-  Math.max(200, Number(process.env.MAX_SITE_ASSET_DOWNLOADS) || 2500)
-);
+const MAX_SITE_ASSET_DOWNLOADS = readMaxSiteAssetDownloads();
 
 export function rememberSiteAssetDownload(token, rec) {
   while (siteAssetDownloads.size >= MAX_SITE_ASSET_DOWNLOADS) {

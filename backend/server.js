@@ -106,6 +106,16 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenv.config({ path: path.join(__dirname, '.env') });
 
 const isProd = process.env.NODE_ENV === 'production';
+const IS_RENDER_HOST = String(process.env.RENDER || '').toLowerCase() === 'true';
+const LOW_MEMORY_HOST =
+  IS_RENDER_HOST || String(process.env.CLONEAI_LOW_MEMORY || '').toLowerCase() === 'true';
+
+function readEnvInt(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined || String(raw).trim() === '') return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) ? Math.trunc(n) : fallback;
+}
 
 const spaRoot = path.join(__dirname, 'public');
 const spaIndex = path.join(spaRoot, 'index.html');
@@ -407,10 +417,13 @@ const HTML_FETCH_TIMEOUT_MS = Math.min(
   20000,
   Math.max(8000, Number(process.env.HTML_FETCH_TIMEOUT_MS) || 15000)
 );
-/** HTML kept for URL discovery (images, links). Default 8MB; cap 25MB. */
+/** HTML kept for URL discovery (images, links). Default 8MB (2MB on Render); cap 25MB. */
 const MAX_HTML_BYTES = Math.min(
   25 * 1024 * 1024,
-  Math.max(100_000, Number(process.env.MAX_HTML_BYTES) || 8 * 1024 * 1024)
+  Math.max(
+    100_000,
+    readEnvInt('MAX_HTML_BYTES', LOW_MEMORY_HOST ? 2 * 1024 * 1024 : 8 * 1024 * 1024)
+  )
 );
 const HTML_FETCH_MAX_CONTENT_LENGTH = Math.min(
   50 * 1024 * 1024,
@@ -431,16 +444,32 @@ function parseUnlimitedPositiveInt(envVal) {
   return Math.floor(n);
 }
 
-const IMAGE_HARVEST_MAX = parseUnlimitedPositiveInt(process.env.IMAGE_HARVEST_MAX);
+const IMAGE_HARVEST_MAX = (() => {
+  const raw = process.env.IMAGE_HARVEST_MAX;
+  if (raw === undefined || raw === null || String(raw).trim() === '') {
+    return LOW_MEMORY_HOST ? 160 : Number.MAX_SAFE_INTEGER;
+  }
+  return parseUnlimitedPositiveInt(process.env.IMAGE_HARVEST_MAX);
+})();
 const _rawPerImage = Number(process.env.IMAGE_HARVEST_MAX_BYTES);
 const IMAGE_HARVEST_MAX_BYTES = Math.max(
   512 * 1024,
-  Number.isFinite(_rawPerImage) && _rawPerImage > 0 ? _rawPerImage : 50 * 1024 * 1024
+  Number.isFinite(_rawPerImage) && _rawPerImage > 0
+    ? _rawPerImage
+    : LOW_MEMORY_HOST
+      ? 8 * 1024 * 1024
+      : 50 * 1024 * 1024
 );
-const IMAGE_HARVEST_ZIP_CAP = parseUnlimitedPositiveInt(process.env.IMAGE_HARVEST_ZIP_CAP);
+const IMAGE_HARVEST_ZIP_CAP = (() => {
+  const raw = process.env.IMAGE_HARVEST_ZIP_CAP;
+  if (raw === undefined || raw === null || String(raw).trim() === '') {
+    return LOW_MEMORY_HOST ? 72 * 1024 * 1024 : Number.MAX_SAFE_INTEGER;
+  }
+  return parseUnlimitedPositiveInt(process.env.IMAGE_HARVEST_ZIP_CAP);
+})();
 const IMAGE_HARVEST_CONCURRENCY = Math.min(
   32,
-  Math.max(2, Number(process.env.IMAGE_HARVEST_CONCURRENCY) || 12)
+  Math.max(2, readEnvInt('IMAGE_HARVEST_CONCURRENCY', LOW_MEMORY_HOST ? 4 : 12))
 );
 
 const HARVEST_CSS_MAX_SHEETS = Math.max(
@@ -453,7 +482,7 @@ const HARVEST_CSS_MAX_BYTES = Math.max(
 );
 const HARVEST_CSS_FETCH_CONCURRENCY = Math.min(
   16,
-  Math.max(2, Number(process.env.HARVEST_CSS_FETCH_CONCURRENCY) || 8)
+  Math.max(2, readEnvInt('HARVEST_CSS_FETCH_CONCURRENCY', LOW_MEMORY_HOST ? 3 : 8))
 );
 
 const HTML_MODEL_MAX_CHARS_PER_PAGE = Math.min(
@@ -482,7 +511,10 @@ const MAX_ANALYSIS_IMAGES = Math.min(12, Math.max(1, Number(process.env.MAX_ANAL
 
 const MAX_OPENAI_REQUEST_JSON_BYTES = Math.min(
   24 * 1024 * 1024,
-  Math.max(2 * 1024 * 1024, Number(process.env.MAX_OPENAI_REQUEST_JSON_BYTES) || 14 * 1024 * 1024)
+  Math.max(
+    2 * 1024 * 1024,
+    readEnvInt('MAX_OPENAI_REQUEST_JSON_BYTES', LOW_MEMORY_HOST ? 8 * 1024 * 1024 : 14 * 1024 * 1024)
+  )
 );
 
 const GLOBAL_BURST_WINDOW_MS = Math.min(
@@ -491,7 +523,7 @@ const GLOBAL_BURST_WINDOW_MS = Math.min(
 );
 const GLOBAL_BURST_MAX = Math.min(
   500,
-  Math.max(8, Number(process.env.GLOBAL_ANALYZE_BURST_MAX) || 80)
+  Math.max(8, readEnvInt('GLOBAL_ANALYZE_BURST_MAX', LOW_MEMORY_HOST ? 24 : 80))
 );
 const globalAnalyzeBurstTimestamps = [];
 
@@ -515,7 +547,7 @@ function refundGlobalAnalyzeBurstSlot() {
 
 const GLOBAL_ANALYZE_MAX_IN_FLIGHT = Math.min(
   500,
-  Math.max(2, Number(process.env.GLOBAL_ANALYZE_MAX_IN_FLIGHT) || 32)
+  Math.max(1, readEnvInt('GLOBAL_ANALYZE_MAX_IN_FLIGHT', LOW_MEMORY_HOST ? 1 : 32))
 );
 let globalAnalyzeInFlight = 0;
 
@@ -528,10 +560,13 @@ function tryAcquireGlobalAnalyzeInFlightSlot() {
 function releaseGlobalAnalyzeInFlightSlot() {
   globalAnalyzeInFlight = Math.max(0, globalAnalyzeInFlight - 1);
 }
-const CRAWL_FETCH_CONCURRENCY = Math.min(40, Math.max(1, Number(process.env.CRAWL_FETCH_CONCURRENCY) || 20));
+const CRAWL_FETCH_CONCURRENCY = Math.min(
+  40,
+  Math.max(1, readEnvInt('CRAWL_FETCH_CONCURRENCY', LOW_MEMORY_HOST ? 4 : 20))
+);
 const CRAWL_SCREENSHOT_CONCURRENCY = Math.min(
   24,
-  Math.max(1, Number(process.env.CRAWL_SCREENSHOT_CONCURRENCY) || 10)
+  Math.max(1, readEnvInt('CRAWL_SCREENSHOT_CONCURRENCY', LOW_MEMORY_HOST ? 1 : 10))
 );
 const SCREENSHOT_TIMEOUT_MS = Math.min(
   120000,
@@ -558,7 +593,10 @@ const ENABLE_ASSET_PIPELINE_API =
   String(process.env.ENABLE_ASSET_PIPELINE_API || 'true').toLowerCase() !== 'false';
 const ASSET_PIPELINE_MAX_ZIP_BYTES = Math.min(
   150 * 1024 * 1024,
-  Math.max(5 * 1024 * 1024, Number(process.env.ASSET_PIPELINE_MAX_ZIP_BYTES) || 90 * 1024 * 1024)
+  Math.max(
+    5 * 1024 * 1024,
+    readEnvInt('ASSET_PIPELINE_MAX_ZIP_BYTES', LOW_MEMORY_HOST ? 35 * 1024 * 1024 : 90 * 1024 * 1024)
+  )
 );
 const ASSET_PIPELINE_MAX_RASTER = Math.min(
   2000,
@@ -4556,6 +4594,11 @@ function onListen() {
         ? 'any http://localhost or http://127.0.0.1 (any port)'
         : corsOrigins.join(', ');
   console.log(`CORS allowlist: ${corsLog}`);
+  if (LOW_MEMORY_HOST) {
+    console.log(
+      'Memory: low-RAM host profile (RENDER or CLONEAI_LOW_MEMORY) — tighter crawl/harvest/concurrency; owner runs still capped by CLONEAI_HOST_MAX_ZIP_BYTES / CLONEAI_HOST_MAX_HARVEST_IMAGES.'
+    );
+  }
   console.log(
     `Global API rate limit: ${GLOBAL_RATE_PER_MINUTE}/minute per IP (webhook + health excluded)`
   );
