@@ -3202,27 +3202,99 @@ async function hydrateBriefTextFromJobArtifacts(jobId) {
 
 function extractionStreamErrorShouldFallback(err) {
   if (userInitiatedStop) return false;
+  if (err?.name === 'AbortError') return false;
   const msg = String(err?.message || err || '');
   if (/^Request cancelled/i.test(msg)) return false;
   return true;
 }
 
 async function connectToExtractionJobWithFallback(jobId, opts) {
+  const userSignal = opts.signal;
+  const sseCtrl = new AbortController();
+  let preemptJob = null;
+  let pollTimer = null;
+
+  const stopPoll = () => {
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+  };
+
+  const abortSse = () => {
+    if (!sseCtrl.signal.aborted) sseCtrl.abort();
+  };
+
+  if (userSignal) {
+    if (userSignal.aborted) throw new Error('Request cancelled.');
+    userSignal.addEventListener('abort', () => sseCtrl.abort(), { once: true });
+  }
+
+  const pollTerminalOnce = async () => {
+    const res = await fetch(extractionJobUrl(jobId), {
+      headers: analyzeFetchHeaders(),
+      signal: userSignal,
+    });
+    const job = await res.json().catch(() => ({}));
+    if (!res.ok || !job?.id) return null;
+    const st = String(job.status || '');
+    if (st === 'completed' || st === 'failed' || st === 'cancelled') return job;
+    return null;
+  };
+
+  pollTimer = setInterval(() => {
+    void (async () => {
+      try {
+        const job = await pollTerminalOnce();
+        if (!job) return;
+        preemptJob = job;
+        stopPoll();
+        abortSse();
+      } catch {
+        /* ignore transient poll errors */
+      }
+    })();
+  }, 3500);
+
   try {
-    await connectToExtractionJob(jobId, opts);
+    await connectToExtractionJob(jobId, { ...opts, signal: sseCtrl.signal });
+    preemptJob = null;
   } catch (err) {
+    stopPoll();
+    if (preemptJob) {
+      const st = String(preemptJob.status || '');
+      const pj = preemptJob;
+      preemptJob = null;
+      if (st === 'completed') {
+        const gotBrief = await hydrateBriefTextFromJobArtifacts(jobId);
+        if (!gotBrief) {
+          throw new Error(
+            'Run finished on the server but the report could not be loaded. Refresh the page and open this job from history.'
+          );
+        }
+        markAllAgentRowsDone();
+        setProgress(98);
+        return;
+      }
+      if (st === 'failed') {
+        throw new Error(String(pj.error?.message || pj.error || 'Analysis failed'));
+      }
+      if (st === 'cancelled') {
+        throw new Error('Run stopped.');
+      }
+    }
     if (!extractionStreamErrorShouldFallback(err)) throw err;
     const ps = $('#progress-stage');
     if (ps) ps.textContent = 'Reconnecting — run continues on the server…';
-    const job = await waitForTerminalExtractionJob(jobId, opts.signal);
-    const st = String(job.status || '');
-    if (st === 'cancelled') {
+    const job = await waitForTerminalExtractionJob(jobId, userSignal);
+    const st2 = String(job.status || '');
+    if (st2 === 'cancelled') {
       throw new Error('Run stopped.');
     }
-    if (st === 'failed') {
+    if (st2 === 'failed') {
       throw new Error(String(job.error?.message || job.error || 'Analysis failed'));
     }
-    if (st !== 'completed') throw err;
+    if (st2 !== 'completed') throw err;
     const gotBrief = await hydrateBriefTextFromJobArtifacts(jobId);
     if (!gotBrief) {
       throw new Error(
@@ -3231,6 +3303,8 @@ async function connectToExtractionJobWithFallback(jobId, opts) {
     }
     markAllAgentRowsDone();
     setProgress(98);
+  } finally {
+    stopPoll();
   }
 }
 
@@ -3535,6 +3609,8 @@ async function openExtractionJob(jobId) {
   if (!jobId) return;
   if (analyzeAbort) analyzeAbort.abort();
   analyzeAbort = new AbortController();
+  userInitiatedStop = false;
+  currentRunJobId = jobId;
   persistActiveExtractionJob(jobId);
   prepareAnalyzeUiForStream();
   try {
@@ -3715,6 +3791,8 @@ async function runAnalyze() {
 
     const jobId = String(body.jobId || '').trim();
     if (!jobId) throw new Error('Server did not return a job id.');
+    userInitiatedStop = false;
+    currentRunJobId = jobId;
     persistActiveExtractionJob(jobId);
     await refreshExtractionJobHistory();
     await connectToExtractionJobWithFallback(jobId, { signal, fastStages: true });

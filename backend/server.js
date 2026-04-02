@@ -1545,16 +1545,45 @@ async function runExtractionJob(jobId) {
   clearInterval(heartbeat);
   if (artifactError && !finalError) finalError = artifactError;
   const extractionSatisfied = durableAssetsSatisfyExtraction(current.summary, durableAssets);
-  if (!extractionSatisfied && !finalError) {
-    finalError = extractionRunExpectsArtifacts(current.summary)
-      ? 'Extraction finished without durable archive/manifests.'
-      : 'Extraction did not complete cleanly.';
+  const expectsArtifacts = extractionRunExpectsArtifacts(current.summary);
+  const reportChars = fullText.trim().length;
+  const MIN_REPORT_DELIVERY_CHARS = 320;
+  const pipeOk = !finalError && sawDone;
+  const allowReportDespiteAssets =
+    pipeOk && expectsArtifacts && !extractionSatisfied && reportChars >= MIN_REPORT_DELIVERY_CHARS;
+
+  let completionError = finalError;
+  if (pipeOk && extractionSatisfied) {
+    completionError = null;
+  } else if (allowReportDespiteAssets) {
+    completionError = null;
+  } else if (pipeOk && !extractionSatisfied) {
+    completionError =
+      completionError ||
+      (expectsArtifacts
+        ? 'Extraction finished without durable archive/manifests.'
+        : 'Extraction did not complete cleanly.');
   }
+
+  const statusCompleted = pipeOk && (extractionSatisfied || allowReportDespiteAssets);
+
+  if (allowReportDespiteAssets) {
+    try {
+      await appendAndApplyJobEvent(jobId, {
+        type: 'warning',
+        message:
+          '\n\n> **Note:** Packaged site assets (ZIP / manifests) did not fully finish under current limits; your blueprint above is still available.\n',
+      });
+    } catch {
+      /* non-fatal */
+    }
+  }
+
   await finalizeExtractionJob(jobId, {
-    status: !finalError && sawDone && extractionSatisfied ? 'completed' : 'failed',
+    status: statusCompleted ? 'completed' : 'failed',
     scraper: latestScraper,
     assets: durableAssets,
-    error: !finalError && sawDone && extractionSatisfied ? null : finalError || 'Extraction did not complete cleanly.',
+    error: statusCompleted ? null : completionError || 'Extraction did not complete cleanly.',
   });
 }
 
