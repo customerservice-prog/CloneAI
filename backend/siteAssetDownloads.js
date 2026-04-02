@@ -15,7 +15,7 @@ function readMaxSiteAssetDownloads() {
     const n = Number(raw);
     if (Number.isFinite(n)) return Math.min(20_000, Math.max(200, Math.floor(n)));
   }
-  return LOW_MEMORY_HOST ? 40 : 2500;
+  return Math.min(20_000, Math.max(200, LOW_MEMORY_HOST ? 80 : 2500));
 }
 
 /** Short-lived ZIP blobs for GET /api/site-images/:token (not logged). */

@@ -34,7 +34,8 @@ services:
     rootDir: .
     plan: starter
     healthCheckPath: /api/health
-    buildCommand: npm run render:backend-with-spa
+    # NODE_OPTIONS helps npm ci + Playwright browser download avoid build-container OOM (see deploy Events if build fails).
+    buildCommand: "NODE_OPTIONS=--max-old-space-size=4096 npm run render:backend-with-spa"
     startCommand: npm start --prefix backend
     disk:
       name: cloneai-data
