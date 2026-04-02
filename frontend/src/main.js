@@ -1,6 +1,8 @@
 const isProd = import.meta.env.PROD;
 const envBase = import.meta.env.VITE_API_URL?.trim();
 const sameOriginApi = import.meta.env.VITE_SAME_ORIGIN_API === 'true';
+/** Always call the API on this origin in production builds (avoids /api hitting a static host on www or mis-routed DNS). */
+const BAKED_API_ORIGIN = (import.meta.env.VITE_API_URL || '').trim().replace(/\/$/, '') || '';
 
 function readMetaApiOrigin() {
   try {
@@ -37,6 +39,9 @@ const API_BASE = (() => {
 /** Dev with no explicit API host: same-origin `/api/...` so Vite proxies to the backend (see vite.config.js). */
 function apiUrl(path) {
   const p = path.startsWith('/') ? path : `/${path}`;
+  if (isProd && BAKED_API_ORIGIN) {
+    return `${BAKED_API_ORIGIN}${p}`;
+  }
   const configured = (API_BASE || '').replace(/\/$/, '');
   if (typeof window !== 'undefined' && isProd) {
     const pageOrigin = window.location.origin.replace(/\/$/, '');

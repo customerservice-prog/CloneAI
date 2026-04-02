@@ -4546,14 +4546,17 @@ app.post(
 );
 
 if (serveSpa) {
-  app.use(
-    express.static(spaRoot, {
-      maxAge: '2h',
-      etag: true,
-      fallthrough: true,
-      index: 'index.html',
-    })
-  );
+  const spaStatic = express.static(spaRoot, {
+    maxAge: '2h',
+    etag: true,
+    fallthrough: true,
+    index: 'index.html',
+  });
+  app.use((req, res, next) => {
+    const p = req.path || '';
+    if (p === '/api' || p.startsWith('/api/')) return next();
+    spaStatic(req, res, next);
+  });
   app.use((req, res, next) => {
     if (req.method !== 'GET' && req.method !== 'HEAD') return next();
     if (req.path.startsWith('/api')) return next();

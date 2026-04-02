@@ -56,7 +56,13 @@ export function parseCorsOrigins(rawValue, { isProd = false } = {}) {
  * @returns {string[]}
  */
 export function deriveProductionCorsOriginsFromEnv() {
-  const keys = ['FRONTEND_URL', 'PUBLIC_APP_URL', 'VITE_PUBLIC_APP_URL', 'VITE_API_URL'];
+  const keys = [
+    'FRONTEND_URL',
+    'PUBLIC_APP_URL',
+    'VITE_PUBLIC_APP_URL',
+    'VITE_API_URL',
+    'RENDER_EXTERNAL_URL',
+  ];
   const origins = new Set();
   for (const k of keys) {
     const raw = String(process.env[k] || '').trim();

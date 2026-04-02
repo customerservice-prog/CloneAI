@@ -1,1 +1,3 @@
-/*    /index.html   200
+# If this folder is deployed as a pure static SPA, never rewrite /api/* to index.html (that breaks clients with 200 + HTML).
+/api/*  /_api-static-miss.txt  404
+/*      /index.html   200

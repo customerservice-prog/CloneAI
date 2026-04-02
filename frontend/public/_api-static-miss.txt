@@ -1,0 +1,1 @@
+API is not served from this static host. Point the browser at your Node API host (same URL as VITE_API_URL).
