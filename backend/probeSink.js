@@ -25,7 +25,7 @@ export function isAutomatedProbePath(pathname) {
     return true;
   }
 
-  if (lower.includes('/wp-') || /\/wp-config/i.test(raw)) return true;
+  if (lower.startsWith('/wordpress/') || lower.includes('/wp-') || /\/wp-config/i.test(raw)) return true;
 
   if (/(^|\/)(phpinfo|info\.php|test\.php|phpinfo\.php)$/i.test(lower)) return true;
   if (lower.includes('_profiler')) return true;
@@ -82,8 +82,18 @@ export function isAutomatedProbePath(pathname) {
   return false;
 }
 
+function pathnameForProbe(req) {
+  try {
+    const raw = String(req.originalUrl || req.url || req.path || '/');
+    const noQuery = raw.replace(RE_STRIP_QUERY, '');
+    return noQuery.startsWith('/') ? noQuery : `/${noQuery}`;
+  } catch {
+    return '/';
+  }
+}
+
 export function probeSinkMiddleware(req, res, next) {
   if (req.method !== 'GET' && req.method !== 'HEAD') return next();
-  if (!isAutomatedProbePath(req.path)) return next();
+  if (!isAutomatedProbePath(pathnameForProbe(req))) return next();
   res.sendStatus(404);
 }
