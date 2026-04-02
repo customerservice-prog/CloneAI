@@ -1643,6 +1643,12 @@ function streamExtractionJobEvents(req, res, job) {
       }
       clearInterval(timer);
       res.end();
+      return;
+    }
+    try {
+      res.write(': keepalive\n\n');
+    } catch {
+      clearInterval(timer);
     }
   };
 

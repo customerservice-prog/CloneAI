@@ -2058,6 +2058,12 @@ function setAgentStatus(index, status) {
   }
 }
 
+function markAllAgentRowsDone() {
+  for (let i = 0; i < AGENTS.length; i += 1) {
+    setAgentStatus(i, 'done');
+  }
+}
+
 function setProgress(pct) {
   const n = Math.min(100, Math.max(0, pct));
   $('#progress-pct').textContent = `${Math.round(n)}%`;
@@ -3154,6 +3160,80 @@ async function connectToExtractionJob(jobId, { signal, fastStages = true } = {})
   });
 }
 
+async function waitForTerminalExtractionJob(jobId, signal) {
+  const maxWaitMs = 55 * 60 * 1000;
+  const interval = 2000;
+  const start = Date.now();
+  while (Date.now() - start < maxWaitMs) {
+    if (signal?.aborted) throw new Error('Request cancelled.');
+    try {
+      const res = await fetch(extractionJobUrl(jobId), { headers: analyzeFetchHeaders(), signal });
+      const job = await res.json().catch(() => ({}));
+      if (res.ok && job?.id) {
+        const st = String(job.status || '');
+        if (st === 'completed' || st === 'failed' || st === 'cancelled') return job;
+      }
+    } catch {
+      if (signal?.aborted) throw new Error('Request cancelled.');
+    }
+    await delay(interval);
+  }
+  throw new Error(
+    'The live stream was interrupted and the run did not reach a final state in time. Check job history — if it finished, open the job from there.'
+  );
+}
+
+async function hydrateBriefTextFromJobArtifacts(jobId) {
+  const tryNames = ['report.md', 'cursor-ready.md', 'ai-handoff.md'];
+  for (let attempt = 0; attempt < 36; attempt += 1) {
+    for (const name of tryNames) {
+      const res = await fetch(artifactDownloadUrl(jobId, name), { headers: analyzeFetchHeaders() });
+      if (!res.ok) continue;
+      const text = await res.text();
+      if (String(text || '').trim()) {
+        fullBriefText = text;
+        return true;
+      }
+    }
+    await delay(400);
+  }
+  return false;
+}
+
+function extractionStreamErrorShouldFallback(err) {
+  if (userInitiatedStop) return false;
+  const msg = String(err?.message || err || '');
+  if (/^Request cancelled/i.test(msg)) return false;
+  return true;
+}
+
+async function connectToExtractionJobWithFallback(jobId, opts) {
+  try {
+    await connectToExtractionJob(jobId, opts);
+  } catch (err) {
+    if (!extractionStreamErrorShouldFallback(err)) throw err;
+    const ps = $('#progress-stage');
+    if (ps) ps.textContent = 'Reconnecting — run continues on the server…';
+    const job = await waitForTerminalExtractionJob(jobId, opts.signal);
+    const st = String(job.status || '');
+    if (st === 'cancelled') {
+      throw new Error('Run stopped.');
+    }
+    if (st === 'failed') {
+      throw new Error(String(job.error?.message || job.error || 'Analysis failed'));
+    }
+    if (st !== 'completed') throw err;
+    const gotBrief = await hydrateBriefTextFromJobArtifacts(jobId);
+    if (!gotBrief) {
+      throw new Error(
+        'Run finished on the server but the report could not be loaded. Refresh the page and open this job from history.'
+      );
+    }
+    markAllAgentRowsDone();
+    setProgress(98);
+  }
+}
+
 async function runAnalyzeLegacy(form, { signal, headers } = {}) {
   if (!API_ANALYZE) throw new Error('Analysis API is unavailable.');
   const res = await fetch(API_ANALYZE, {
@@ -3458,7 +3538,7 @@ async function openExtractionJob(jobId) {
   persistActiveExtractionJob(jobId);
   prepareAnalyzeUiForStream();
   try {
-    await connectToExtractionJob(jobId, {
+    await connectToExtractionJobWithFallback(jobId, {
       signal: analyzeAbort.signal,
       fastStages: true,
     });
@@ -3637,7 +3717,7 @@ async function runAnalyze() {
     if (!jobId) throw new Error('Server did not return a job id.');
     persistActiveExtractionJob(jobId);
     await refreshExtractionJobHistory();
-    await connectToExtractionJob(jobId, { signal, fastStages: true });
+    await connectToExtractionJobWithFallback(jobId, { signal, fastStages: true });
     await hydrateCompletedJobArtifacts(jobId);
     await finalizeAnalyzeSuccess();
   } catch (e) {
