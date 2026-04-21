@@ -23,6 +23,7 @@ RUN export VITE_CLONEAI_KEY="${VITE_CLONEAI_KEY:-$CLONEAI_INGRESS_KEY}" && \
 FROM mcr.microsoft.com/playwright:v1.58.2-noble
 WORKDIR /app
 COPY backend/package.json backend/package-lock.json ./
+COPY backend/scripts/postinstall-embed-spa.mjs ./scripts/postinstall-embed-spa.mjs
 RUN npm ci --omit=dev
 COPY backend ./
 COPY --from=frontend-builder /build/frontend/dist ./public
