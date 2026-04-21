@@ -84,13 +84,23 @@ body {
   display: none;
 }
 
-.promo-label {
-  display: flex;
-  flex-direction: column;
-  gap: 0.35rem;
+.promo-label-short {
+  display: block;
   margin-top: 0.65rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--text2);
+}
+
+.promo-help {
+  margin: 0.35rem 0 0.5rem;
   font-size: 0.8125rem;
   color: var(--text3);
+  line-height: 1.45;
+}
+
+.promo-details .promo-input {
+  margin-top: 0;
 }
 
 .promo-input {
@@ -646,8 +656,25 @@ body.paywall-open {
 }
 
 .pricing-foot {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.35rem;
   text-align: center;
   margin: 0;
+}
+
+.pricing-foot-detail {
+  display: block;
+  max-width: 34rem;
+  font-size: 0.8rem;
+  font-weight: 400;
+  color: var(--text3);
+  line-height: 1.45;
+}
+
+.pricing-foot-btn {
+  text-decoration: underline;
 }
 
 .link-like {
@@ -950,7 +977,7 @@ body.paywall-open {
   border: 1px solid rgba(124, 109, 250, 0.25);
   border-radius: 100px;
   padding: 0.35rem 0.85rem;
-  margin: 0 0 1.25rem;
+  margin: 1.35rem 0 1rem;
 }
 
 .hero-pill-dot {
@@ -974,10 +1001,16 @@ body.paywall-open {
 .hero-title {
   font-family: 'Syne', sans-serif;
   font-weight: 800;
-  font-size: clamp(2.2rem, 5vw, 3.4rem);
+  font-size: clamp(1.35rem, 5.5vw + 0.5rem, 3.4rem);
   letter-spacing: -0.04em;
-  line-height: 1.1;
+  line-height: 1.12;
   margin: 0 0 0.85rem;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  hyphens: auto;
+  max-width: 100%;
+  padding-inline: 0.25rem;
+  box-sizing: border-box;
 }
 
 .hero-accent {
@@ -1100,7 +1133,7 @@ body.paywall-open {
   font-size: 1.05rem;
   color: var(--text2);
   max-width: 540px;
-  margin: 0 auto;
+  margin: 0.5rem auto 0;
   line-height: 1.55;
 }
 
@@ -2760,7 +2793,8 @@ button.metric-card-interactive:focus-visible {
   }
 
   .hero-title {
-    font-size: 1.8rem;
+    font-size: clamp(1.3rem, 6.5vw + 0.35rem, 2.15rem);
+    padding-inline: 0.15rem;
   }
 
   .hero-brand-logo {
@@ -2774,9 +2808,21 @@ button.metric-card-interactive:focus-visible {
   }
 
   .header-inner {
-    flex-wrap: wrap;
-    align-items: flex-start;
+    flex-wrap: nowrap;
+    align-items: center;
     gap: 0.65rem;
+  }
+
+  .logo {
+    flex-shrink: 0;
+    min-width: 0;
+  }
+
+  .header-actions {
+    flex-wrap: nowrap;
+    justify-content: flex-end;
+    flex: 1;
+    min-width: 0;
   }
 
   .owner-unlock-pill {
@@ -3329,6 +3375,37 @@ button.metric-card-interactive:focus-visible {
 .account-done-btn {
   width: 100%;
   margin-top: 1rem;
+}
+
+.site-footer {
+  margin: 3rem auto 0;
+  padding: 2rem 1.5rem 2.5rem;
+  border-top: 1px solid var(--border2);
+  text-align: center;
+  max-width: 1200px;
+}
+
+.site-footer-brand {
+  margin: 0 0 0.75rem;
+  font-size: 0.85rem;
+  color: var(--text3);
+}
+
+.site-footer-nav {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.65rem 1.25rem;
+}
+
+.site-footer-link {
+  font-size: 0.82rem;
+  color: var(--accent2);
+  text-decoration: none;
+}
+
+.site-footer-link:hover {
+  text-decoration: underline;
 }
 
 @media (max-width: 560px) {

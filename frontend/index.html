@@ -5,7 +5,17 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <!-- Filled at build from VITE_API_URL (see vite.config.js); empty in dev uses same-origin /api (Vite proxy → VITE_DEV_API_PROXY). -->
     <meta name="cloneai-api-origin" content="" />
-    <title>CloneAI — AI cloning team &amp; build-ready site specs</title>
+    <meta
+      name="description"
+      content="SiteCloner PRO crawls any site, harvests assets, and delivers a developer-ready blueprint — multi-page crawl, ZIP exports, and optional AI narrative."
+    />
+    <meta property="og:title" content="SiteCloner PRO — Site analysis &amp; clone-ready specs" />
+    <meta
+      property="og:description"
+      content="Multi-page crawl, harvested media, full-page captures, and a build handoff you can share with developers or agencies."
+    />
+    <meta property="og:type" content="website" />
+    <title>SiteCloner PRO — Site analysis &amp; clone-ready specs</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -24,21 +34,20 @@
           <img
             class="header-brand-mark"
             src="/sitecloner-pro-logo.png"
-            alt="CloneAI"
+            alt="SiteCloner PRO"
             width="140"
             height="44"
             decoding="async"
           />
         </div>
         <div class="header-actions">
-          <button type="button" class="btn-header-login" id="header-plans-btn">Plans</button>
           <span class="owner-unlock-pill hidden" id="owner-unlock-pill" aria-live="polite"></span>
           <span class="header-usage-wrap hidden" id="header-usage-wrap" aria-live="polite">
             <span class="header-usage" id="header-usage"></span>
             <span class="header-usage-urgent hidden" id="header-usage-urgent">You're almost out of runs</span>
           </span>
           <button type="button" class="btn-header-login hidden" id="header-login-btn">Log in</button>
-          <button type="button" class="btn-header-upgrade hidden" id="header-upgrade-btn">Upgrade</button>
+          <button type="button" class="btn-header-upgrade" id="header-upgrade-btn">Plans</button>
         </div>
       </div>
     </header>
@@ -46,10 +55,10 @@
     <section class="download-app-banner hidden" id="download-app-banner" aria-label="App download banner">
       <div class="download-app-banner-inner">
         <div>
-          <p class="download-app-banner-kicker">Download app</p>
-          <p class="download-app-banner-copy">Get ready for the CloneAI mobile app. Tap below to view the QR download screen.</p>
+          <p class="download-app-banner-kicker">Mobile app</p>
+          <p class="download-app-banner-copy">The SiteCloner PRO app is not on the store yet — get notified when it launches.</p>
         </div>
-        <button type="button" class="download-app-banner-btn" id="download-app-banner-btn">Download App Now</button>
+        <button type="button" class="download-app-banner-btn" id="download-app-banner-btn">Coming soon</button>
       </div>
     </section>
 
@@ -74,7 +83,7 @@
             </div>
             <p class="download-app-qr-label">Coming Soon</p>
           </div>
-          <p class="download-app-note">Once your app is tested, I can replace this placeholder with a real QR code and store links.</p>
+          <p class="download-app-note">A QR code and App Store / Play links will appear here when the app is published.</p>
         </div>
       </div>
     </section>
@@ -109,7 +118,7 @@
         </p>
         <ol class="hero-steps" aria-label="How it works in three steps">
           <li><span class="hero-step-num" aria-hidden="true">1</span> Paste a URL or upload screenshots</li>
-          <li><span class="hero-step-num" aria-hidden="true">2</span> Let CloneAI crawl, harvest, and package the site</li>
+          <li><span class="hero-step-num" aria-hidden="true">2</span> Let SiteCloner PRO crawl, harvest, and package the site</li>
           <li><span class="hero-step-num" aria-hidden="true">3</span> Download artifacts and a developer-ready brief</li>
         </ol>
         <p class="hero-pill">
@@ -122,7 +131,7 @@
         <p class="hero-trust">
           Built for developers, freelancers, and agencies. <strong>No database setup</strong> — start free in seconds.
         </p>
-        <ul class="hero-use-cases" aria-label="Use cases">
+        <ul class="hero-use-cases" aria-label="Four common use cases">
           <li>Clone websites faster</li>
           <li>Audit a clone in progress</li>
           <li>Plan platform migrations</li>
@@ -179,6 +188,7 @@
               type="button"
               class="scan-mode-pill active"
               data-scan-mode="elite"
+              aria-label="Elite scan"
               title="Full balanced depth across all 13 sections — default comprehensive clone spec"
             >
               Elite scan
@@ -187,6 +197,7 @@
               type="button"
               class="scan-mode-pill"
               data-scan-mode="images"
+              aria-label="Image extract"
               title="Prioritize image harvest, manifests, and Section 9 — best for extracting assets"
             >
               Image extract
@@ -195,13 +206,14 @@
               type="button"
               class="scan-mode-pill"
               data-scan-mode="screenshots"
+              aria-label="Screenshot sweep"
               title="Crawl same-host pages (per scan depth) and capture a full-page PNG of every URL — ZIP is the main deliverable"
             >
               Screenshot sweep
             </button>
           </div>
           <p class="screenshot-sweep-hint muted hidden" id="screenshot-sweep-hint" aria-live="polite">
-            <strong>Screenshot sweep</strong> — uses <strong>scan depth</strong> below: we visit each discovered same-host page and save a <strong>full-page PNG</strong> (plus a shorter AI brief). Choose <strong>Full crawl</strong> to cover the most URLs. URL tab only; no image uploads.
+            <strong>Screenshot sweep</strong> visits each same-host URL allowed by your <strong>scan depth</strong> and saves a <strong>full-page PNG</strong> for every page (plus a shorter written brief). Pick <strong>Full crawl</strong> to cover the most URLs. URL tab only — no image uploads.
           </p>
           <p class="scan-promo-hint muted hidden" id="scan-promo-hint" aria-live="polite">
             Authorized code on file — the model is also instructed to emphasize harvest, ZIPs, and image URLs.
@@ -247,6 +259,7 @@
                 type="button"
                 class="depth-pill active"
                 data-depth="homepage"
+                aria-label="Homepage only, 1 page"
                 title="Fastest: homepage only. Lowest run cost. Best for quick landing-page reviews."
               >
                 1 page
@@ -255,6 +268,7 @@
                 type="button"
                 class="depth-pill"
                 data-depth="shallow"
+                aria-label="Shallow crawl, up to about 25 pages"
                 title="Balanced: up to ~25 internal pages. Good default for most multi-section clones."
               >
                 Up to ~25 pages
@@ -263,6 +277,7 @@
                 type="button"
                 class="depth-pill"
                 data-depth="deep"
+                aria-label="Deep crawl, full site"
                 title="Deepest: up to ~300 pages on Pro (higher on Power). Longer runs; use for large catalogs and asset harvest."
               >
                 Full crawl (300+)
@@ -288,6 +303,7 @@
                 type="button"
                 class="scan-mode-pill extraction-profile-pill"
                 data-extraction-profile="quick_brief"
+                aria-label="Quick brief"
                 title="Shorter crawl window — fastest path to a written brief"
               >
                 Quick brief
@@ -296,6 +312,7 @@
                 type="button"
                 class="scan-mode-pill extraction-profile-pill active"
                 data-extraction-profile="standard"
+                aria-label="Standard crawl"
                 title="Balanced crawl and extraction"
               >
                 Standard crawl
@@ -304,6 +321,7 @@
                 type="button"
                 class="scan-mode-pill extraction-profile-pill"
                 data-extraction-profile="full_harvest"
+                aria-label="Full asset harvest"
                 title="Deep asset discovery; ZIP includes manifests/"
               >
                 Full asset harvest
@@ -312,6 +330,7 @@
                 type="button"
                 class="scan-mode-pill extraction-profile-pill"
                 data-extraction-profile="quality_first"
+                aria-label="Quality first"
                 title="Longest crawl budget; continue until queue or caps — may run hours on huge sites"
               >
                 Quality first
@@ -419,23 +438,25 @@
             <input type="checkbox" id="pref-strip-watermarks" />
             <span class="export-pref-text">
               <strong>No watermarks</strong>
-              <span class="export-pref-hint">Hides the on-screen badge and the “Generated with CloneAI” footer in the report text.</span>
+              <span class="export-pref-hint">Hides the on-screen badge and the “Generated with SiteCloner PRO” footer in the report text.</span>
             </span>
           </label>
         </div>
         <details class="promo-details" id="promo-details">
           <summary class="promo-summary">Authorized promo code (optional — unlocks Pro-class runs)</summary>
-          <label class="promo-label" for="promo-code-input">
-            Leave empty unless you were given a code — must match the server secret; saved in this browser until you clear it
-            <input
-              type="password"
-              id="promo-code-input"
-              class="promo-input"
-              autocomplete="off"
-              maxlength="128"
-              placeholder="Enter code"
-            />
-          </label>
+          <label class="promo-label-short" for="promo-code-input">Promo code</label>
+          <p class="promo-help" id="promo-code-desc">
+            Leave empty unless you were given a code — it must match the server. Saved in this browser until you clear it.
+          </p>
+          <input
+            type="password"
+            id="promo-code-input"
+            class="promo-input"
+            autocomplete="off"
+            maxlength="128"
+            placeholder="Enter code"
+            aria-describedby="promo-code-desc"
+          />
         </details>
       </section>
 
@@ -524,7 +545,14 @@
           <div class="results-sticky-inner">
             <span class="results-sticky-brand">Site analysis</span>
             <div class="results-sticky-actions">
-              <button type="button" class="btn-sticky btn-sticky-primary" id="sticky-copy-btn">Copy</button>
+              <button
+                type="button"
+                class="btn-sticky btn-sticky-primary"
+                id="sticky-copy-btn"
+                aria-label="Copy report to clipboard"
+              >
+                Copy
+              </button>
               <button type="button" class="btn-sticky" id="sticky-share-btn">Share report</button>
               <button type="button" class="btn-sticky btn-sticky-upgrade hidden" id="sticky-upgrade-btn">Upgrade</button>
               <button type="button" class="btn-sticky" id="sticky-rerun-btn">Re-run</button>
@@ -560,7 +588,7 @@
             </div>
             <p class="post-result-share-hint">
               <button type="button" class="link-like" id="post-result-share-btn">Share this report</button>
-              — or send builders to CloneAI.
+              with your team, or point builders to SiteCloner PRO.
             </p>
           </div>
         </div>
@@ -618,7 +646,9 @@
                 <input type="checkbox" id="autoscroll-toggle" checked />
                 <span>Auto-scroll</span>
               </label>
-              <button type="button" class="btn-toolbar-copy" id="copy-toolbar-btn">Copy</button>
+              <button type="button" class="btn-toolbar-copy" id="copy-toolbar-btn" aria-label="Copy report from toolbar">
+                Copy
+              </button>
             </div>
           </div>
           <div class="summary-body" id="summary-body">
@@ -627,15 +657,14 @@
           </div>
           <div class="report-brand-footer" id="report-brand-footer">
             <p class="report-brand-line">
-              Generated with <strong>CloneAI</strong> — AI-powered website analysis tool
+              Generated with <strong>SiteCloner PRO</strong> — AI-powered website analysis
             </p>
             <div class="report-brand-actions" id="report-brand-actions">
               <input type="text" readonly class="report-brand-link-field" id="report-app-link" value="" aria-label="App link" />
               <button type="button" class="btn-outline btn-sm" id="report-copy-link-btn">Copy link</button>
             </div>
             <p class="report-link-dev-hint hidden" id="report-link-dev-hint">
-              Production share link is hidden on localhost. Set <strong>VITE_PUBLIC_APP_URL</strong> in your Vite env (e.g.
-              <code class="report-link-dev-code">https://www.siteclonerpro.com</code>) and rebuild — or open the deployed site to copy a public link.
+              Local preview: set your public app URL at build time to copy a share link here, or use the deployed site.
             </p>
           </div>
         </div>
@@ -724,7 +753,7 @@
             <p class="plan-price">
               <span class="plan-price-num">$49</span><span class="plan-price-unit">/month</span>
             </p>
-            <p class="plan-runs"><strong>High volume</strong> analyses / month</p>
+            <p class="plan-runs"><strong>100</strong> analyses / month</p>
             <ul class="plan-features">
               <li>Very deep crawl · very large harvest · ZIP + manifests</li>
               <li>Cursor-ready style exports · priority processing · agency-grade</li>
@@ -742,24 +771,28 @@
         <p class="pricing-foot">
           <button
             type="button"
-            class="link-like"
+            class="link-like pricing-foot-btn"
             data-checkout="extra"
             id="pricing-extra-link"
             data-billing-source="pricing_extra"
+            aria-label="Buy one extra analysis run"
           >
-            Need just one more run? Buy an extra analysis (one-time; price in checkout).
+            Buy 1 extra run
           </button>
+          <span class="pricing-foot-detail">One-time purchase — price shown in secure checkout.</span>
         </p>
         <p class="pricing-foot pricing-foot-second">
           <button
             type="button"
-            class="link-like"
+            class="link-like pricing-foot-btn"
             data-checkout="deep_extract"
             id="pricing-deep-extract-link"
             data-billing-source="pricing_deep_extract"
+            aria-label="Buy one deep extraction run with heavy crawl and archive"
           >
-            One deep extraction run — heavy crawl + archive package (target: $9 to $15 one-time; final price in checkout).
+            Deep extraction (one-time)
           </button>
+          <span class="pricing-foot-detail">Heavy crawl plus full archive package — final price in checkout.</span>
         </p>
       </div>
     </div>
@@ -874,14 +907,18 @@
           <label class="account-field-label" for="credentials-login-field">Email (login)</label>
           <div class="account-field-row">
             <input type="text" readonly class="account-readonly-input" id="credentials-login-field" autocomplete="username" />
-            <button type="button" class="btn-outline" id="credentials-copy-email">Copy</button>
+            <button type="button" class="btn-outline" id="credentials-copy-email" aria-label="Copy email to clipboard">
+              Copy email
+            </button>
           </div>
         </div>
         <div class="account-field-block">
           <label class="account-field-label" for="credentials-password-field">Password</label>
           <div class="account-field-row">
             <input type="text" readonly class="account-readonly-input mono-input" id="credentials-password-field" autocomplete="off" spellcheck="false" />
-            <button type="button" class="btn-outline" id="credentials-copy-password">Copy</button>
+            <button type="button" class="btn-outline" id="credentials-copy-password" aria-label="Copy password to clipboard">
+              Copy password
+            </button>
           </div>
         </div>
         <button type="button" class="btn-plan btn-plan-primary account-done-btn" id="credentials-done-btn">I’ve saved these</button>
@@ -928,6 +965,15 @@
     <div class="toast" id="toast" role="status" aria-live="polite" hidden>Copied to clipboard</div>
 
     <input type="text" class="hp-field" id="form-hp" name="hp" tabindex="-1" autocomplete="off" aria-hidden="true" />
+
+    <footer class="site-footer" id="site-footer">
+      <p class="site-footer-brand">© SiteCloner PRO</p>
+      <nav class="site-footer-nav" aria-label="Legal and contact">
+        <a href="https://siteclonerpro.com/terms" class="site-footer-link">Terms</a>
+        <a href="https://siteclonerpro.com/privacy" class="site-footer-link">Privacy</a>
+        <a href="mailto:support@siteclonerpro.com" class="site-footer-link">Contact</a>
+      </nav>
+    </footer>
 
     <script type="module" src="/src/main.js"></script>
   </body>

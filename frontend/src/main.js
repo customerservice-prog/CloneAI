@@ -79,7 +79,8 @@ const LS_PROMO_CODE = 'cloneai_promo_code';
 const LS_PREF_SCAN_MODE = 'cloneai_pref_scan_mode';
 const LS_PREF_EXTRACTION_PROFILE = 'cloneai_pref_extraction_profile';
 const LS_ACTIVE_JOB_ID = 'cloneai_active_job_id';
-const WATERMARK_FOOTER = '\n\n---\n\n*Generated with CloneAI — upgrade to remove watermark.*';
+const WATERMARK_FOOTER =
+  '\n\n---\n\n*Generated with SiteCloner PRO — upgrade to remove watermark.*';
 
 /** @type {string | null} */
 let turnstileWidgetId = null;
@@ -542,9 +543,15 @@ async function refreshOpenAiServerNotice() {
       return;
     }
     if (data.offlineMode) {
-      titleEl.textContent = 'Offline blueprint mode (no OpenAI on server)';
+      if (isProd) {
+        wrap.classList.add('hidden');
+        titleEl.textContent = '';
+        detailEl.textContent = '';
+        return;
+      }
+      titleEl.textContent = 'Offline / dev API (no OpenAI key on server)';
       detailEl.textContent =
-        'Scans still run: crawl, assets, and a static developer blueprint from HTML stats. Add OPENAI_API_KEY to the server anytime for AI-written analysis.';
+        'Scans still run without cloud AI. For AI-written analysis, set OPENAI_API_KEY in backend/.env and restart.';
       wrap.classList.remove('hidden');
       return;
     }
@@ -646,13 +653,18 @@ async function refreshBillingStatus() {
       billingCache.enabled = false;
       billingCache.plan = 'guest';
       billingCache.promoUnlocked = false;
-      usageWrap.classList.remove('hidden');
-      usageEl.textContent = 'Runs: unlimited (billing off on server)';
       urgentEl?.classList.add('hidden');
+      syncOwnerPill(false);
+      if (isProd) {
+        usageWrap.classList.add('hidden');
+        usageEl.textContent = '';
+      } else {
+        usageWrap.classList.remove('hidden');
+        usageEl.textContent = 'Runs: unlimited (billing off on server)';
+      }
       upBtn.classList.remove('hidden');
       upBtn.textContent = 'Plans';
       syncLoginBtn(false);
-      syncOwnerPill(false);
       updatePlanGatedControls();
       updateExportGatedControls();
       return;
@@ -928,7 +940,7 @@ function applyStripWatermarkPreferenceToBrief() {
     fullBriefText = fullBriefText.slice(0, -WATERMARK_FOOTER.length);
   } else {
     fullBriefText = fullBriefText.replace(
-      /\r?\n\r?\n---\r?\n\r?\n\*Generated with CloneAI — upgrade to remove watermark\.\*\s*$/m,
+      /\r?\n\r?\n---\r?\n\r?\n\*Generated with (?:CloneAI|SiteCloner PRO) — upgrade to remove watermark\.\*\s*$/m,
       ''
     );
   }
@@ -959,7 +971,7 @@ function updateReportChrome() {
       linkDevHint.hidden = true;
     } else {
       linkActions.hidden = true;
-      linkDevHint.hidden = false;
+      linkDevHint.hidden = isProd;
     }
   }
 }
@@ -2494,12 +2506,12 @@ async function shareReport() {
   }
   trackClientEvent('share_report_clicked');
   const url = getShareableAppUrl();
-  const title = 'Website blueprint — CloneAI';
+  const title = 'Website blueprint — SiteCloner PRO';
   try {
     if (navigator.share) {
       await navigator.share({
         title,
-        text: 'Generated with CloneAI — developer-ready site blueprint.',
+        text: 'Generated with SiteCloner PRO — developer-ready site blueprint.',
         ...(url ? { url } : {}),
       });
       return;
@@ -2508,13 +2520,17 @@ async function shareReport() {
     /* user cancelled or share failed */
   }
   const chunk = text.length > 12000 ? `${text.slice(0, 12000)}\n\n…(truncated)` : text;
-  const head = url ? `${title}\n${url}\n\n---\n\n` : `${title}\n(Production link: set VITE_PUBLIC_APP_URL)\n\n---\n\n`;
+  const head = url
+    ? `${title}\n${url}\n\n---\n\n`
+    : `${title}\n${isProd ? '(Open this page on the live site to include a public link.)\n\n' : '(Set VITE_PUBLIC_APP_URL for a stable share link in dev.)\n\n'}---\n\n`;
   const ok = await writeClipboard(`${head}${chunk}`);
   showToast(
     ok
       ? url
         ? 'Copied link + report text for sharing'
-        : 'Copied report text — set VITE_PUBLIC_APP_URL for a production link'
+        : isProd
+          ? 'Copied report text (open the live app in a browser to add a share link)'
+          : 'Copied report text — set VITE_PUBLIC_APP_URL for a production link'
       : 'Copy failed — try Copy instead'
   );
 }
@@ -2568,7 +2584,7 @@ body{font-family:system-ui,-apple-system,sans-serif;padding:1.75rem;max-width:52
 pre{white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,monospace;font-size:9.5pt;}
 h1{font-size:1.1rem;margin:0 0 1rem;}
 @media print{body{padding:0.5in}}
-</style></head><body><h1>CloneAI — Site analysis</h1><pre>${safe}</pre>
+</style></head><body><h1>SiteCloner PRO — Site analysis</h1><pre>${safe}</pre>
 <script>window.onload=function(){window.print();};<\/script></body></html>`);
   w.document.close();
 }
@@ -3918,8 +3934,12 @@ function init() {
   $('#post-result-share-btn')?.addEventListener('click', () => void shareReport());
   $('#job-history-refresh-btn')?.addEventListener('click', () => void refreshExtractionJobHistory());
   $('#sticky-upgrade-btn')?.addEventListener('click', () => startBillingCheckout('pro', 'sticky_bar'));
-  $('#header-plans-btn')?.addEventListener('click', () => openPricingModal('header_plans'));
-  $('#download-app-banner-btn')?.addEventListener('click', () => showDownloadAppPage(true));
+  $('#download-app-banner-btn')?.addEventListener('click', () => {
+    showToast('The mobile app is not published yet. Check back here when we announce it.', {
+      variant: 'info',
+      duration: 3600,
+    });
+  });
   $('#download-app-back-btn')?.addEventListener('click', () => showDownloadAppPage(false));
   $('#download-images-btn')?.addEventListener('click', () => downloadSiteImagesZip());
   $('#download-manifest-btn')?.addEventListener('click', () => downloadExtractionManifest('manifest'));
@@ -3952,10 +3972,12 @@ function init() {
   $('#report-copy-link-btn')?.addEventListener('click', async () => {
     const v = ($('#report-app-link')?.value || '').trim() || getShareableAppUrl();
     if (!v) {
-      showToast('Set VITE_PUBLIC_APP_URL in your build for a production link (localhost is hidden).', {
-        variant: 'warning',
-        duration: 4200,
-      });
+      showToast(
+        isProd
+          ? 'Public link is not available in this preview. Open the live SiteCloner PRO site to copy a share link.'
+          : 'Set VITE_PUBLIC_APP_URL in your build for a production link (localhost is hidden).',
+        { variant: 'warning', duration: 4200 }
+      );
       return;
     }
     const ok = await writeClipboard(v);
