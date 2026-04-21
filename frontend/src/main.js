@@ -541,6 +541,13 @@ async function refreshOpenAiServerNotice() {
       detailEl.textContent = '';
       return;
     }
+    if (data.offlineMode) {
+      titleEl.textContent = 'Offline blueprint mode (no OpenAI on server)';
+      detailEl.textContent =
+        'Scans still run: crawl, assets, and a static developer blueprint from HTML stats. Add OPENAI_API_KEY to the server anytime for AI-written analysis.';
+      wrap.classList.remove('hidden');
+      return;
+    }
     titleEl.textContent = 'OpenAI is not configured on the API server yet';
     detailEl.textContent =
       'Set OPENAI_API_KEY in backend/.env on the machine running the API, save the file, then restart the server. This page has no OpenAI “settings” field — analysis always uses the server key.';
@@ -1905,6 +1912,12 @@ function humanizeError(status, rawMessage, body) {
   }
   if (status === 413) return 'Upload too large. Each image must be under 20MB (max 10 files).';
   if (status === 400) return msg || 'Invalid request. Check your URL and images.';
+  if (status === 503) {
+    if (body?.code === 'OFFLINE_NO_AI') {
+      return 'Brief revision needs an OpenAI API key on the server. Offline mode still runs full scans from the main button.';
+    }
+    return msg || body?.error || 'Service unavailable. Try again shortly.';
+  }
   if (status === 500) {
     if (/misconfiguration|OPENAI_API_KEY|not set/i.test(msg)) {
       return 'The analysis service is not configured (API key). Contact the site administrator.';

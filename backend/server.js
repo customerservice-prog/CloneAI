@@ -41,6 +41,7 @@ import { cleanHtmlForModel } from './htmlCleanForModel.js';
 import { tryAcquireAnalyzeSlot, releaseAnalyzeSlot } from './analyzeSlots.js';
 import { estimateOpenAiUsd } from './aiCostEstimate.js';
 import { openAiChatCompletionsRequest } from './aiChatProvider.js';
+import { buildOfflineMarkdownReport } from './offlineSiteReport.mjs';
 import { runInteractionSuite } from './playwrightInteraction.js';
 import { screenshotUrls, snapshotZipName } from './screenshotPages.js';
 import {
@@ -1800,7 +1801,12 @@ if (!serveSpa) {
 }
 
 app.get('/api/health', (_req, res) => {
-  res.json({ status: 'ok', openaiConfigured: isOpenAiConfigured() });
+  const openaiConfigured = isOpenAiConfigured();
+  res.json({
+    status: 'ok',
+    openaiConfigured,
+    offlineMode: !openaiConfigured,
+  });
 });
 
 app.get('/api/billing/status', requireIngressKey, (req, res) => {
@@ -2778,6 +2784,7 @@ async function runAnalyzePipeline(req, res) {
     priorityQueue:
       isBillingEnabled() &&
       (analyzePlan === PLANS.PRO || analyzePlan === PLANS.POWER || promoBypass),
+    offlineMode: !openAiConfigured,
   });
 
   const gateNotes = Array.isArray(req._planGateNotes) ? req._planGateNotes : [];
@@ -2851,13 +2858,6 @@ async function runAnalyzePipeline(req, res) {
         res.end();
         return;
       }
-    }
-
-    if (!openAiConfigured) {
-      send({ type: 'error', message: isProd ? ssePublicError() : 'Server misconfiguration: OPENAI_API_KEY is not set (add it to backend/.env).' });
-      await abortBillingIfNeeded(req);
-      res.end();
-      return;
     }
 
     send({ type: 'stage', index: 0, phase: 'running', label: 'Multi-page crawl & assets' });
@@ -3676,11 +3676,12 @@ async function runAnalyzePipeline(req, res) {
       label: 'States & micro-interactions (chief-requested revisit)',
     });
 
+    const reportWriterLabel = openAiConfigured ? 'Report writer (AI)' : 'Report writer (offline)';
     send({
       type: 'stage',
       index: REPORT_WRITER_STAGE_INDEX,
       phase: 'running',
-      label: 'Report writer (AI)',
+      label: reportWriterLabel,
     });
 
     const optimized = [];
@@ -3693,6 +3694,47 @@ async function runAnalyzePipeline(req, res) {
       optimized.push(Object.assign({}, f, { buffer, mimetype: mime }));
     }
     files = optimized;
+
+    if (!openAiConfigured) {
+      const offlineMd = buildOfflineMarkdownReport({
+        url,
+        depth,
+        scraperMeta,
+        rawHtml,
+        crawledPages,
+        screenshotSweep,
+        options,
+      });
+      streamedReportText = offlineMd;
+      for (let i = 0; i < offlineMd.length; i += 480) {
+        send({ type: 'text', content: offlineMd.slice(i, i + 480) });
+      }
+      send({
+        type: 'stage',
+        index: REPORT_WRITER_STAGE_INDEX,
+        phase: 'done',
+        label: reportWriterLabel,
+      });
+      send({ type: 'done' });
+
+      const ms = Date.now() - (req._analyzeStartedAt || Date.now());
+      logEvent('info', 'analyze_success_offline', { ip: clientIp(req), ms });
+      if (!req._privilegedAnalyze) {
+        noteSuccessfulAnalyzeForCaptcha(clientIp(req));
+      }
+      if (analyzeUserId) {
+        void recordProductEvent(analyzeUserId, isBillingEnabled() ? analyzePlan : null, 'run_completed', {
+          ms,
+          model: 'offline-heuristic',
+          offline: true,
+          htmlContextChars: htmlContext.length,
+          crawlPages: crawledPages.length,
+          promo: Boolean(req._promoValid),
+        });
+      }
+      res.end();
+      return;
+    }
 
     const userContent = buildOpenAiUserContent({
       url,
@@ -3910,7 +3952,12 @@ async function runAnalyzePipeline(req, res) {
     }
 
     const archSave = buildArchiveLookupContext(req, { openaiModel: OPENAI_MODEL });
-    if (archSave.eligible && streamedReportText.length > 80 && scraperMetaAllowsArchive(scraperMeta)) {
+    if (
+      openAiConfigured &&
+      archSave.eligible &&
+      streamedReportText.length > 80 &&
+      scraperMetaAllowsArchive(scraperMeta)
+    ) {
       let metaJson;
       let assetsJson;
       try {
@@ -4041,7 +4088,10 @@ async function runRevisePipeline(req, res) {
   if (!openAiConfigured) {
     releaseSlotOnce();
     res.status(503).json({
-      error: isProd ? 'Analysis service is not configured.' : 'OPENAI_API_KEY is not set.',
+      error: isProd
+        ? 'Brief revision requires an AI backend. Add OPENAI_API_KEY on the server.'
+        : 'OPENAI_API_KEY is not set.',
+      code: 'OFFLINE_NO_AI',
     });
     return;
   }
@@ -4088,6 +4138,7 @@ async function runRevisePipeline(req, res) {
     priorityQueue:
       isBillingEnabled() && (analyzePlan === PLANS.PRO || analyzePlan === PLANS.POWER || promoBypass),
     assets: { count: 0, token: null, filename: 'site-assets.zip', skipped: 0 },
+    offlineMode: false,
   });
 
   void recordProductEvent(analyzeUserId, isBillingEnabled() ? analyzePlan : null, 'run_started', {
