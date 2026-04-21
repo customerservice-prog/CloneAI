@@ -38,6 +38,29 @@ function attrVal(tag, name) {
   return m ? m[2].trim() : null;
 }
 
+/** Every resolved URL in a srcset (for manifests / coverage). */
+export function enumerateSrcsetUrls(srcset, baseHref) {
+  if (!srcset || !baseHref) return [];
+  let base;
+  try {
+    base = new URL(baseHref).href;
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const part of String(srcset).split(',')) {
+    const p = part.trim();
+    if (!p) continue;
+    const tokens = p.split(/\s+/).filter(Boolean);
+    if (!tokens.length) continue;
+    const raw = tokens[0];
+    const desc = tokens[1] || '';
+    const u = resolveHref(raw, base);
+    if (u) out.push({ url: u, descriptor: desc });
+  }
+  return out;
+}
+
 /** Parse srcset; prefer largest `w` or `x` candidate. */
 export function bestUrlFromSrcset(srcset, baseHref) {
   if (!srcset || !srcset.trim()) return null;
@@ -377,6 +400,48 @@ export function collectImageUrls(html, pageUrl) {
   return ordered;
 }
 
+/**
+ * Map normalized URL key → all srcset candidate URLs (for manifests).
+ * @param {Map<string, string[]>} dest
+ */
+export function mergeSrcsetMetadataFromHtml(html, pageUrl, dest) {
+  if (!html || !pageUrl || !dest) return;
+  let baseHref = pageUrl;
+  try {
+    baseHref = new URL(pageUrl).href;
+  } catch {
+    return;
+  }
+  const mergeKey = (primaryUrl, candidates) => {
+    const k = normalizeHarvestUrlKey(primaryUrl);
+    if (!k || !candidates?.length) return;
+    const cur = dest.get(k) || [];
+    const next = [...new Set([...cur, ...candidates].filter(Boolean))].sort();
+    dest.set(k, next);
+  };
+
+  const imgTagRe = /<img\b([^>]*)>/gi;
+  let m;
+  while ((m = imgTagRe.exec(html)) !== null) {
+    const inner = m[1] || '';
+    const ss = attrVal(inner, 'srcset') || attrVal(inner, 'data-srcset');
+    if (!ss) continue;
+    const best = bestUrlFromSrcset(ss, baseHref);
+    const all = enumerateSrcsetUrls(ss, baseHref).map((x) => x.url);
+    if (best) mergeKey(best, all);
+  }
+
+  const srcTagRe = /<source\b([^>]*)>/gi;
+  while ((m = srcTagRe.exec(html)) !== null) {
+    const inner = m[1] || '';
+    const ss = attrVal(inner, 'srcset');
+    if (!ss) continue;
+    const best = bestUrlFromSrcset(ss, baseHref);
+    const all = enumerateSrcsetUrls(ss, baseHref).map((x) => x.url);
+    if (best) mergeKey(best, all);
+  }
+}
+
 const CSS_URL_FUNC_RE = /url\(\s*["']?([^"')]+)["']?\s*\)/gi;
 
 /**
@@ -442,6 +507,18 @@ export function extractImageUrlsFromCss(cssText, sheetUrl) {
   return out;
 }
 
+const FONT_PATH_RE = /\.(?:woff2|woff|ttf|otf|eot)(?:[\s#?]|$)/i;
+
+/**
+ * Font file URLs from CSS `url(...)` (woff, ttf, etc.).
+ * @param {string} cssText
+ * @param {string} sheetUrl
+ * @returns {string[]}
+ */
+export function extractFontUrlsFromCss(cssText, sheetUrl) {
+  return extractImageUrlsFromCss(cssText, sheetUrl).filter((u) => FONT_PATH_RE.test(u));
+}
+
 /**
  * `@import` targets (typically other `.css` files) for chained harvesting.
  * @param {string} cssText
@@ -501,6 +578,63 @@ function sanitizeZipName(i, ext) {
   return `image-${n}.${ext}`;
 }
 
+function extFromUrlOrCt(url, ct) {
+  const s = String(url || '').toLowerCase();
+  if (/\.woff2(\?|$)/.test(s)) return 'woff2';
+  if (/\.woff(\?|$)/.test(s)) return 'woff';
+  if (/\.ttf(\?|$)/.test(s)) return 'ttf';
+  if (/\.otf(\?|$)/.test(s)) return 'otf';
+  return extFromContentType(ct);
+}
+
+async function imagePixelMeta(buf) {
+  try {
+    const { default: sharp } = await import('sharp');
+    const m = await sharp(buf).metadata();
+    return { width: m.width ?? null, height: m.height ?? null };
+  } catch {
+    return { width: null, height: null };
+  }
+}
+
+function normalizeHarvestFetchItem(row) {
+  if (typeof row === 'string') {
+    return {
+      url: row,
+      refererPage: '',
+      srcsetCandidates: [],
+      discoveryMethod: 'src',
+      destName: null,
+      assetKind: 'image',
+    };
+  }
+  return {
+    url: String(row.url || '').trim(),
+    refererPage: String(row.refererPage || '').trim(),
+    srcsetCandidates: Array.isArray(row.srcsetCandidates) ? row.srcsetCandidates : [],
+    discoveryMethod: String(row.discoveryMethod || 'src'),
+    destName: row.destName ? String(row.destName) : null,
+    assetKind: row.assetKind === 'font' ? 'font' : row.assetKind === 'meta' ? 'meta' : 'image',
+  };
+}
+
+async function axiosFetchBinary(url, { timeoutMs, maxBytesPerImage, referer, accept }) {
+  const headers = {
+    'User-Agent':
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 CloneAI/1.0',
+    Accept: accept || 'image/*,*/*;q=0.8',
+  };
+  if (referer) headers.Referer = referer;
+  return axios.get(url, {
+    responseType: 'arraybuffer',
+    timeout: timeoutMs,
+    maxContentLength: maxBytesPerImage,
+    maxRedirects: 5,
+    validateStatus: (s) => s >= 200 && s < 300,
+    headers,
+  });
+}
+
 /** SHA-256 hex of raw bytes — used to skip identical images from different URLs. */
 export function imageBytesFingerprint(buf) {
   return createHash('sha256').update(buf).digest('hex');
@@ -526,8 +660,9 @@ async function poolMap(items, concurrency, fn, onProgress = null) {
 }
 
 /**
- * Fetch remote images (original bytes, no recompression).
- * @returns {Promise<{ entries: { name: string, buffer: Buffer }[], skipped: number, errors: string[] }>}
+ * Fetch remote images/fonts (original bytes, no recompression).
+ * `urls` may be strings or `{ url, refererPage?, srcsetCandidates?, discoveryMethod?, destName?, assetKind? }`.
+ * @returns {Promise<{ entries: object[], skipped: number, errors: string[], missedAssets: object[] }>}
  */
 export async function fetchHarvestedImages(urls, {
   maxImages = Number.MAX_SAFE_INTEGER,
@@ -537,9 +672,10 @@ export async function fetchHarvestedImages(urls, {
   timeoutMs = 25000,
   onProgress = null,
 } = {}) {
+  const items = (urls || []).map(normalizeHarvestFetchItem).filter((x) => x.url);
   const cap =
-    Number.isFinite(maxImages) && maxImages < urls.length ? Math.max(0, Math.floor(maxImages)) : urls.length;
-  const slice = urls.slice(0, cap);
+    Number.isFinite(maxImages) && maxImages < items.length ? Math.max(0, Math.floor(maxImages)) : items.length;
+  const slice = items.slice(0, cap);
   const errors = [];
   let total = 0;
   const entries = [];
@@ -549,47 +685,110 @@ export async function fetchHarvestedImages(urls, {
   let nonImageSkipped = 0;
   let oversizedSkipped = 0;
   let totalFetchAttempts = 0;
+  const missedAssets = [];
 
-  const results = await poolMap(slice, concurrency, async (imageUrl) => {
+  const results = await poolMap(slice, concurrency, async (item) => {
+    const imageUrl = item.url;
     totalFetchAttempts += 1;
     const safe = await assertUrlSafeForServerFetch(imageUrl);
     if (!safe.ok) {
       errors.push(`${imageUrl}: ${safe.error}`);
+      missedAssets.push({ url: imageUrl, reason: safe.error || 'ssrf_blocked', refererTried: item.refererPage || '' });
       fetchFailures += 1;
       return null;
     }
-    try {
-      const res = await axios.get(imageUrl, {
-        responseType: 'arraybuffer',
-        timeout: timeoutMs,
-        maxContentLength: maxBytesPerImage,
-        maxRedirects: 5,
-        validateStatus: (s) => s >= 200 && s < 300,
-        headers: {
-          'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 CloneAI/1.0',
-          Accept: 'image/*,*/*;q=0.8',
-        },
+
+    const referer = item.refererPage || '';
+    const isFont = item.assetKind === 'font';
+    const accept = isFont ? '*/*' : 'image/*,*/*;q=0.8';
+
+    async function tryOnce(withReferer) {
+      return axiosFetchBinary(imageUrl, {
+        timeoutMs,
+        maxBytesPerImage,
+        referer: withReferer ? referer : undefined,
+        accept,
       });
-      const ct = res.headers['content-type'] || '';
-      if (!/^image\//i.test(ct) && !/octet-stream/i.test(ct)) {
-        errors.push(`${imageUrl}: not an image (${ct || 'no content-type'})`);
-        nonImageSkipped += 1;
+    }
+
+    let res;
+    try {
+      res = await tryOnce(false);
+    } catch (e1) {
+      if (referer) {
+        try {
+          res = await tryOnce(true);
+        } catch (e2) {
+          const code = e2?.response?.status ? `http_${e2.response.status}` : e2.message || 'fetch failed';
+          errors.push(`${imageUrl}: ${code}`);
+          missedAssets.push({ url: imageUrl, reason: code, refererTried: referer });
+          fetchFailures += 1;
+          return null;
+        }
+      } else {
+        const code = e1?.response?.status ? `http_${e1.response.status}` : e1.message || 'fetch failed';
+        errors.push(`${imageUrl}: ${code}`);
+        missedAssets.push({ url: imageUrl, reason: code, refererTried: '' });
+        fetchFailures += 1;
         return null;
       }
+    }
+
+    try {
+      const ct = res.headers['content-type'] || '';
       const buf = Buffer.from(res.data);
       if (buf.length > maxBytesPerImage) {
         errors.push(`${imageUrl}: exceeds per-file size limit`);
         oversizedSkipped += 1;
+        missedAssets.push({ url: imageUrl, reason: 'too_large', refererTried: referer || '' });
         return null;
       }
-      return { buffer: buf, ext: extFromContentType(ct), url: imageUrl };
+      if (!isFont) {
+        if (!/^image\//i.test(ct) && !/octet-stream/i.test(ct)) {
+          errors.push(`${imageUrl}: not an image (${ct || 'no content-type'})`);
+          nonImageSkipped += 1;
+          missedAssets.push({ url: imageUrl, reason: `not_image:${ct || 'none'}`, refererTried: referer || '' });
+          return null;
+        }
+      } else {
+        const okFont =
+          /font|woff|ttf|octet-stream|application\/x-font/i.test(ct) || FONT_PATH_RE.test(imageUrl);
+        if (!okFont) {
+          errors.push(`${imageUrl}: unexpected font response (${ct || 'no content-type'})`);
+          nonImageSkipped += 1;
+          missedAssets.push({ url: imageUrl, reason: `not_font:${ct || 'none'}`, refererTried: referer || '' });
+          return null;
+        }
+      }
+      const ext = isFont ? extFromUrlOrCt(imageUrl, ct) : extFromContentType(ct);
+      const httpStatus = res.status || 200;
+      const { width, height } = isFont ? { width: null, height: null } : await imagePixelMeta(buf);
+      return {
+        buffer: buf,
+        ext,
+        url: imageUrl,
+        httpStatus,
+        contentType: ct,
+        bytesOnDisk: buf.length,
+        width,
+        height,
+        refererPage: referer,
+        srcsetCandidates: item.srcsetCandidates,
+        discoveryMethod: item.discoveryMethod,
+        destName: item.destName,
+        assetKind: item.assetKind,
+      };
     } catch (e) {
       errors.push(`${imageUrl}: ${e.message || 'fetch failed'}`);
+      missedAssets.push({ url: imageUrl, reason: e.message || 'error', refererTried: referer || '' });
       fetchFailures += 1;
       return null;
     }
   }, onProgress);
+
+  let imageCounter = 0;
+  let fontCounter = 0;
+  let metaCounter = 0;
 
   const totalCap = Number.isFinite(maxTotalBytes) ? maxTotalBytes : Number.MAX_SAFE_INTEGER;
   for (let i = 0; i < results.length; i += 1) {
@@ -606,10 +805,34 @@ export async function fetchHarvestedImages(urls, {
       break;
     }
     total += r.buffer.length;
+
+    let name = r.destName;
+    if (!name) {
+      if (r.assetKind === 'font') {
+        fontCounter += 1;
+        name = `fonts/font-${String(fontCounter).padStart(4, '0')}.${r.ext}`;
+      } else if (r.assetKind === 'meta') {
+        metaCounter += 1;
+        name = `meta-assets/asset-${String(metaCounter).padStart(4, '0')}.${r.ext}`;
+      } else {
+        imageCounter += 1;
+        name = sanitizeZipName(imageCounter - 1, r.ext);
+      }
+    }
+
     entries.push({
-      name: sanitizeZipName(entries.length, r.ext),
+      name,
       buffer: r.buffer,
       sourceUrl: r.url,
+      httpStatus: r.httpStatus,
+      contentType: r.contentType,
+      bytesOnDisk: r.bytesOnDisk,
+      width: r.width,
+      height: r.height,
+      refererPage: r.refererPage,
+      srcsetCandidates: r.srcsetCandidates,
+      discoveryMethod: r.discoveryMethod,
+      assetKind: r.assetKind,
     });
     onProgress?.({
       imagesInZip: entries.length,
@@ -630,6 +853,7 @@ export async function fetchHarvestedImages(urls, {
     totalFetchAttempts,
     archiveBytes: total,
     errors: errors.slice(0, 250),
+    missedAssets: missedAssets.slice(0, 2000),
   };
 }
 

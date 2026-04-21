@@ -29,11 +29,16 @@ import {
   collectStylesheetHrefs,
   extractImageUrlsFromCss,
   extractImportUrlsFromCss,
+  extractFontUrlsFromCss,
+  mergeSrcsetMetadataFromHtml,
   fetchHarvestedImages,
   zipImageEntries,
   buildImageManifestForPrompt,
   normalizeHarvestUrlKey,
 } from './imageHarvest.js';
+import { runBrowserAssetHarvest } from './browserHarvest.js';
+import { extractContentJsonFromHtml } from './contentExtract.js';
+import { buildRunHealthMarkdown, validateBriefAgainstManifestHints, estimateNavLinkCount } from './briefGrounding.js';
 import { effectiveHarvestImageCap, effectiveHarvestZipCap } from './harvestBudget.js';
 import { crawlFromSeed, normalizeUrlKey, fetchCrawlPageHtml } from './crawlSite.js';
 import { crawlMaxPagesEnvCap, maxCrawlPagesForRun, crawlPageCapForRequest } from './crawlLimits.js';
@@ -209,6 +214,8 @@ function isLoopbackRequest(req) {
 function enforceHttpsUnlessLocal(req, res, next) {
   if (!isProd) return next();
   if (process.env.RELAX_HTTPS_ENFORCEMENT === 'true') return next();
+  /* Platform health checks (Railway, Render, etc.) often use internal HTTP without X-Forwarded-Proto. */
+  if (req.path === '/api/health') return next();
   if (isLoopbackRequest(req)) return next();
   const xf = (req.get('x-forwarded-proto') || '').split(',')[0]?.trim();
   const secure = req.secure === true || xf === 'https';
@@ -2032,6 +2039,10 @@ Hard requirements:
 - If data is missing, say what is unknown instead of guessing.
 - **Section 13 closing:** After the priority fix list, add a **Scorecard** subsection (### Scorecard) with 4–6 bullets: overall clone difficulty (Low/Med/High), structure confidence, visual fidelity confidence, content/inventory completeness, top risk, and estimated rebuild effort — each grounded in what you actually saw in the inputs.
 
+**Evidence contract (mandatory):** Do not invent navigation items, footer links, product categories, pricing tier counts, CMS/framework names, or color hex codes that are not supported by the supplied HTML, \`content.json\` excerpts, harvest manifests, or explicit scraper metadata. For every color or font claim, cite the artifact (e.g. "from content excerpt — homepage" or "from harvested CSS URL …") or write **Unknown from artifacts**. Prefer **quoting** taglines and CTAs verbatim from the \`CONTENT (verbatim excerpts)\` block when it is present instead of paraphrasing.
+
+**Section confidence:** After each numbered \`## N. …\` section, add one line: \`**Confidence:** High | Medium | Low\` — **High** only when the section is grounded in manifests or verbatim excerpts; **Low** must not contain factual counts or brand tokens (use unknowns instead).
+
 **Efficiency (cost / latency):** Prefer dense bullets over narrative prose. Do not repeat the user prompt or quote large chunks of HTML. Honor "not requested" sections with minimal text.`;
 
 /** Owner coupon: quality-first instructions and in-brief QA (no extra model round-trip). */
@@ -2110,6 +2121,7 @@ function buildOpenAiUserContent({
   scraperMeta,
   comparePair,
   harvestedImageManifest,
+  contentGroundingExcerpt = '',
   clientDelivery,
   servicePackage,
   scanMode = 'elite',
@@ -2158,6 +2170,11 @@ function buildOpenAiUserContent({
 
   if (harvestedImageManifest) {
     text += `\n${harvestedImageManifest}\n`;
+  }
+
+  const cg = String(contentGroundingExcerpt || '').trim();
+  if (cg) {
+    text += `\n---\nCONTENT (verbatim excerpts — quote these strings in the brief; do not paraphrase critical copy):\n\n${cg.slice(0, 28_000)}\n`;
   }
 
   if (clientDelivery) {
@@ -2410,6 +2427,21 @@ function csvEscape(value) {
   return `"${String(value ?? '').replace(/"/g, '""')}"`;
 }
 
+function extFromUrlPath(u) {
+  try {
+    const p = new URL(u).pathname || '';
+    if (/\.ico$/i.test(p)) return 'ico';
+    if (/\.png$/i.test(p)) return 'png';
+    if (/\.svg$/i.test(p)) return 'svg';
+    if (/\.jpe?g$/i.test(p)) return 'jpg';
+    if (/\.webp$/i.test(p)) return 'webp';
+    if (/\.gif$/i.test(p)) return 'gif';
+  } catch {
+    /* ignore */
+  }
+  return 'ico';
+}
+
 /**
  * Fetch linked stylesheets (and shallow @import chain) and collect url(...) targets.
  * @param {{ url: string, html: string }[]} pages
@@ -2418,7 +2450,7 @@ function csvEscape(value) {
 async function harvestLinkedStylesheetImageUrls(pages) {
   const list = Array.isArray(pages) ? pages.filter((p) => (p.html || '').length > 0) : [];
   if (!list.length) {
-    return { imageUrls: [], sheetsProcessed: 0, pageImageUrls: [] };
+    return { imageUrls: [], fontUrls: [], sheetsProcessed: 0, pageImageUrls: [], pageFontUrls: [] };
   }
 
   const sheetKey = (u) => normalizeHarvestUrlKey(u) || u;
@@ -2440,8 +2472,11 @@ async function harvestLinkedStylesheetImageUrls(pages) {
   }
 
   const imageUrls = [];
+  const fontUrls = [];
   const imgKeys = new Set();
+  const fontKeys = new Set();
   const pageImageUrls = new Map();
+  const pageFontUrls = new Map();
 
   async function fetchOneStylesheet(sheetUrl) {
     const safe = await assertUrlSafeForServerFetch(sheetUrl);
@@ -2508,6 +2543,18 @@ async function harvestLinkedStylesheetImageUrls(pages) {
         imgKeys.add(ik);
         imageUrls.push(iu);
       }
+      for (const fu of extractFontUrlsFromCss(css, sheetUrl)) {
+        const fk = normalizeHarvestUrlKey(fu);
+        if (!fk) continue;
+        for (const pageUrl of ownerPages) {
+          const cur = pageFontUrls.get(pageUrl) || [];
+          cur.push(fu);
+          pageFontUrls.set(pageUrl, cur);
+        }
+        if (fontKeys.has(fk)) continue;
+        fontKeys.add(fk);
+        fontUrls.push(fu);
+      }
       if (processedKeys.size >= HARVEST_CSS_MAX_SHEETS) break;
       for (const imp of extractImportUrlsFromCss(css, sheetUrl)) {
         const sk = sheetKey(imp);
@@ -2524,8 +2571,13 @@ async function harvestLinkedStylesheetImageUrls(pages) {
 
   return {
     imageUrls,
+    fontUrls,
     sheetsProcessed: processedKeys.size,
     pageImageUrls: [...pageImageUrls.entries()].map(([pageUrl, urls]) => ({
+      pageUrl,
+      urls: sortUniqueStrings(urls),
+    })),
+    pageFontUrls: [...pageFontUrls.entries()].map(([pageUrl, urls]) => ({
       pageUrl,
       urls: sortUniqueStrings(urls),
     })),
@@ -3264,12 +3316,21 @@ async function runAnalyzePipeline(req, res) {
 
       try {
         const imgSeen = new Set();
+        const candidateUrlKeys = new Set();
         const allImageUrls = [];
         const pageDiscoveredUrls = new Map();
         const imageSourceMap = new Map();
+        const srcsetCandidatesByKey = new Map();
+
+        const noteCandidate = (rawUrl) => {
+          const key = normalizeHarvestUrlKey(rawUrl);
+          if (key) candidateUrlKeys.add(key);
+        };
+
         const trackImageOnPage = (imageUrl, pageUrl, discoveredFrom = 'html') => {
           const key = normalizeHarvestUrlKey(imageUrl);
           if (!key || !pageUrl) return;
+          noteCandidate(imageUrl);
           const currentPageUrls = pageDiscoveredUrls.get(pageUrl) || [];
           if (!currentPageUrls.includes(imageUrl)) {
             currentPageUrls.push(imageUrl);
@@ -3285,22 +3346,35 @@ async function runAnalyzePipeline(req, res) {
           current.discoveredFrom.add(discoveredFrom);
           imageSourceMap.set(key, current);
         };
+
         for (const p of pagesForImageHarvest) {
+          mergeSrcsetMetadataFromHtml(p.html, p.url, srcsetCandidatesByKey);
           for (const u of collectImageUrls(p.html, p.url)) {
             const k = normalizeHarvestUrlKey(u);
             if (!k) continue;
-            trackImageOnPage(u, p.url, 'html');
+            trackImageOnPage(u, p.url, 'src');
             if (imgSeen.has(k)) continue;
             imgSeen.add(k);
             allImageUrls.push(u);
           }
         }
+
+        let cssFontUrls = [];
         if (pagesForImageHarvest.length > 0) {
-          const { imageUrls: cssImageUrls, sheetsProcessed, pageImageUrls } =
-            await harvestLinkedStylesheetImageUrls(pagesForImageHarvest);
+          const {
+            imageUrls: cssImageUrls,
+            fontUrls: cssFonts,
+            sheetsProcessed,
+            pageImageUrls,
+            pageFontUrls,
+          } = await harvestLinkedStylesheetImageUrls(pagesForImageHarvest);
+          cssFontUrls = cssFonts || [];
           scraperMeta.cssSheetsProcessed = sheetsProcessed;
           for (const entry of pageImageUrls || []) {
-            for (const u of entry.urls || []) trackImageOnPage(u, entry.pageUrl, 'css');
+            for (const u of entry.urls || []) trackImageOnPage(u, entry.pageUrl, 'css-bg');
+          }
+          for (const entry of pageFontUrls || []) {
+            for (const u of entry.urls || []) noteCandidate(u);
           }
           for (const u of cssImageUrls) {
             const k = normalizeHarvestUrlKey(u);
@@ -3309,6 +3383,131 @@ async function runAnalyzePipeline(req, res) {
             allImageUrls.push(u);
           }
         }
+
+        let browserHarvest = { perPage: [], error: null };
+        if (
+          !screenshotSweep &&
+          pagesForImageHarvest.length > 0 &&
+          process.env.ENABLE_BROWSER_ASSET_PASS !== 'false'
+        ) {
+          pushHarvestProgress({
+            phase: 'browser_harvest',
+            phaseLabel: 'Live DOM + network image pass (Playwright)',
+            pagesCrawled: crawledPages.length,
+            queueLength: crawlQueueRemaining,
+            pagesDiscovered: crawledPages.length + crawlQueueRemaining,
+            imagesFound: allImageUrls.length,
+            elapsedMs: Date.now() - (req._analyzeStartedAt || Date.now()),
+          });
+          flushHarvestProgress();
+          browserHarvest = await runBrowserAssetHarvest(
+            pagesForImageHarvest.map((p) => p.url),
+            url || pagesForImageHarvest[0]?.url,
+            {
+              concurrency: Math.min(6, Math.max(1, readEnvInt('BROWSER_HARVEST_CONCURRENCY', 2))),
+              navigationTimeoutMs: Math.min(120_000, SCREENSHOT_TIMEOUT_MS + 15_000),
+            }
+          );
+          for (const bp of browserHarvest.perPage || []) {
+            if (bp.error) continue;
+            for (const rec of bp.records || []) {
+              const method =
+                rec.method === 'css-bg'
+                  ? 'css-bg'
+                  : rec.method === 'meta'
+                    ? 'meta'
+                    : rec.method === 'svg-use'
+                      ? 'svg-use'
+                      : rec.method === 'srcset'
+                        ? 'srcset'
+                        : rec.method === 'poster'
+                          ? 'poster'
+                          : rec.method === 'data-attr'
+                            ? 'data-attr'
+                            : 'js-runtime';
+              trackImageOnPage(rec.url, bp.pageUrl, method);
+              const k = normalizeHarvestUrlKey(rec.url);
+              if (k && !imgSeen.has(k)) {
+                imgSeen.add(k);
+                allImageUrls.push(rec.url);
+              }
+            }
+            for (const ni of bp.networkImages || []) {
+              if (!ni?.url) continue;
+              trackImageOnPage(ni.url, bp.pageUrl, 'js-runtime');
+              const nk = normalizeHarvestUrlKey(ni.url);
+              if (nk && !imgSeen.has(nk)) {
+                imgSeen.add(nk);
+                allImageUrls.push(ni.url);
+              }
+            }
+          }
+          scraperMeta.browserAssetPassError = browserHarvest.error || null;
+        }
+
+        for (const u of allImageUrls) noteCandidate(u);
+
+        const metaAssetFetchItems = [];
+        const LINK_ICON_RE = /<link\b([^>]*)>/gi;
+        let metaAssetIdx = 0;
+        for (const p of pagesForImageHarvest) {
+          let lm;
+          LINK_ICON_RE.lastIndex = 0;
+          const html = p.html || '';
+          while ((lm = LINK_ICON_RE.exec(html)) !== null) {
+            const inner = lm[1] || '';
+            const relM = inner.match(/\brel\s*=\s*(["'])([^"']*)\1/i);
+            const rel = (relM?.[2] || '').toLowerCase();
+            if (!/icon|apple-touch|mask-icon|shortcut\s+icon/i.test(rel)) continue;
+            const hrefM = inner.match(/\bhref\s*=\s*(["'])([^"']+)\1/i);
+            if (!hrefM) continue;
+            const raw = hrefM[2].trim();
+            try {
+              const abs = new URL(raw, p.url).href;
+              trackImageOnPage(abs, p.url, 'meta');
+              noteCandidate(abs);
+              metaAssetFetchItems.push({
+                url: abs,
+                refererPage: p.url,
+                destName: `meta-assets/icon-${String(metaAssetIdx + 1).padStart(3, '0')}.${extFromUrlPath(abs)}`,
+                discoveryMethod: 'meta',
+                assetKind: 'meta',
+                srcsetCandidates: [],
+              });
+              metaAssetIdx += 1;
+            } catch {
+              /* skip */
+            }
+          }
+        }
+
+        const firstPage = pagesForImageHarvest[0]?.url || url || '';
+        const allFetchItems = [
+          ...allImageUrls.map((u) => {
+            const k = normalizeHarvestUrlKey(u);
+            const meta = k ? imageSourceMap.get(k) : null;
+            const pages = meta ? [...meta.sourcePages] : [];
+            const refererPage = pages[0] || firstPage;
+            const methods = meta ? [...meta.discoveredFrom].join('|') : 'src';
+            const srcsetCandidates = k ? srcsetCandidatesByKey.get(k) || [] : [];
+            return {
+              url: u,
+              refererPage,
+              discoveryMethod: methods,
+              srcsetCandidates,
+              assetKind: 'image',
+            };
+          }),
+          ...metaAssetFetchItems,
+          ...cssFontUrls.map((fu) => ({
+            url: fu,
+            refererPage: firstPage,
+            discoveryMethod: 'css-font',
+            srcsetCandidates: [],
+            assetKind: 'font',
+          })),
+        ];
+
         scraperMeta.imagesDiscoveredCount = allImageUrls.length;
         scraperMeta.pagesDiscoveredCount = crawledPages.length + crawlQueueRemaining;
         assetsPayload.discoveredUrlCount = allImageUrls.length;
@@ -3319,7 +3518,7 @@ async function runAnalyzePipeline(req, res) {
         assetsPayload.crawlStopReason = crawlStopReason;
         pushHarvestProgress({
           phase: 'discover_images',
-          phaseLabel: 'Discovering images and CSS assets',
+          phaseLabel: 'Discovering images, fonts, CSS, and live DOM assets',
           pagesCrawled: crawledPages.length,
           queueLength: crawlQueueRemaining,
           pagesDiscovered: crawledPages.length + crawlQueueRemaining,
@@ -3327,7 +3526,7 @@ async function runAnalyzePipeline(req, res) {
           elapsedMs: Date.now() - (req._analyzeStartedAt || Date.now()),
         });
         flushHarvestProgress();
-        const fetched = await fetchHarvestedImages(allImageUrls, {
+        const fetched = await fetchHarvestedImages(allFetchItems, {
           maxImages: harvestImageCap,
           maxBytesPerImage: IMAGE_HARVEST_MAX_BYTES,
           maxTotalBytes: harvestZipCap,
@@ -3346,30 +3545,77 @@ async function runAnalyzePipeline(req, res) {
               elapsedMs: Date.now() - (req._analyzeStartedAt || Date.now()),
             }),
         });
+
+        let domSignalTotal = 0;
+        for (const bp of browserHarvest.perPage || []) {
+          const st = bp.stats;
+          if (!st) continue;
+          domSignalTotal +=
+            (Number(st.documentImagesLength) || 0) +
+            (Number(st.backgroundImageUniqueCount) || 0) +
+            (Number(st.svgUseRefCount) || 0) +
+            (Number(st.srcsetCandidateCount) || 0);
+        }
+        const discoveredUrlsTotal = candidateUrlKeys.size;
+        const coverageDenominator = Math.max(discoveredUrlsTotal, domSignalTotal, 1);
+        const archivedUrlKeys = new Set(
+          fetched.entries.map((e) => normalizeHarvestUrlKey(e.sourceUrl || '')).filter(Boolean)
+        );
+        const coverageMatched = [...candidateUrlKeys].filter((k) => archivedUrlKeys.has(k)).length;
+        const coveragePct = Math.min(100, (coverageMatched / coverageDenominator) * 100);
+        scraperMeta.imageHarvestCoverageLabel = `${coverageMatched}/${coverageDenominator} (${coveragePct.toFixed(1)}%)`;
+        scraperMeta.imageHarvestCoveragePct = coveragePct;
+        scraperMeta.partialExtraction = coveragePct < 95;
+        scraperMeta.partialExtractionMessage =
+          coveragePct < 95
+            ? 'Partial extraction — retry recommended. Re-run with deeper crawl, full_harvest profile, or confirm Playwright is installed.'
+            : '';
+        if (isBillingEnabled() && req._billingReservation?.ok && coveragePct < 90) {
+          await abortBillingIfNeeded(req);
+          scraperMeta.billingRefundedForQuality = true;
+        }
+
         scraperMeta.harvestContentDuplicatesSkipped = fetched.contentDuplicatesSkipped || 0;
         scraperMeta.imagesFailedCount = fetched.fetchFailures || 0;
         scraperMeta.archiveBytes = fetched.archiveBytes || 0;
         const crawlHtmlExtras = buildCrawlHtmlExtractEntries(pagesForImageHarvest);
-        if (allImageUrls.length > 0) {
+        const discoveredListTxt = sortUniqueStrings([
+          ...allImageUrls,
+          ...cssFontUrls,
+          ...metaAssetFetchItems.map((m) => m.url),
+        ]);
+        if (discoveredListTxt.length > 0) {
           crawlHtmlExtras.push({
             name: 'extract/_discovered_image_urls.txt',
             buffer: Buffer.from(
               [
-                '# Unique image-related URLs discovered from HTML + linked CSS (one per line).',
+                '# URLs discovered (images + fonts + meta icons). One per line.',
                 '# Fetching may skip some URLs (plan caps, SSRF rules, non-image responses, size limits).',
                 '',
-                ...allImageUrls,
+                ...discoveredListTxt,
               ].join('\n'),
               'utf8'
             ),
           });
         }
+        const contentByPage = pagesForImageHarvest.map((p) => extractContentJsonFromHtml(p.html, p.url));
+        req._contentByPage = contentByPage;
+        const svgZipExtras = [];
+        for (const bp of browserHarvest.perPage || []) {
+          for (const x of bp._svgBuffers || []) {
+            if (x?.buffer?.length && x?.name) svgZipExtras.push({ name: x.name, buffer: x.buffer });
+          }
+        }
+
         const archivedFilesByPage = new Map();
         const imagesManifestJson = fetched.entries.map((e, index) => {
           const key = normalizeHarvestUrlKey(e.sourceUrl || '');
           const sourceMeta = key ? imageSourceMap.get(key) : null;
           const sourcePages = sortUniqueStrings(sourceMeta ? [...sourceMeta.sourcePages] : []);
           const discoveredFrom = sortUniqueStrings(sourceMeta ? [...sourceMeta.discoveredFrom] : []);
+          const srcsetCandidates = key ? srcsetCandidatesByKey.get(key) || [] : [];
+          const discoveryMethod =
+            e.discoveryMethod || (discoveredFrom.length ? discoveredFrom.join('|') : 'src');
           for (const pageUrl of sourcePages) {
             const currentFiles = archivedFilesByPage.get(pageUrl) || [];
             currentFiles.push(e.name);
@@ -3378,11 +3624,26 @@ async function runAnalyzePipeline(req, res) {
           return {
             order: index + 1,
             file: e.name,
+            sourcePageUrl: sourcePages[0] || '',
+            originalUrl: e.sourceUrl || '',
             sourceUrl: e.sourceUrl || '',
+            resolvedAbsoluteUrl: e.sourceUrl || '',
+            httpStatus: e.httpStatus ?? null,
+            bytesOnDisk: e.bytesOnDisk ?? null,
+            widthPx: e.width ?? null,
+            heightPx: e.height ?? null,
+            contentType: e.contentType || null,
+            discoveryMethod,
+            srcsetCandidates,
             sourcePage: sourcePages[0] || '',
             sourcePages,
             sourcePageCount: sourcePages.length,
             discoveredFrom,
+            assetKind: e.assetKind || 'image',
+            confidence:
+              discoveryMethod.includes('js-runtime') || discoveryMethod.includes('css-bg')
+                ? 'High (manifest)'
+                : 'Medium (HTML/CSS)',
           };
         });
         const pagesManifestJson = pagesForImageHarvest.map((p, index) => {
@@ -3409,6 +3670,9 @@ async function runAnalyzePipeline(req, res) {
           imagesDiscovered: allImageUrls.length,
           imagesArchived: fetched.entries.length,
           imagesFailed: fetched.fetchFailures || 0,
+          missedAssetCount: (fetched.missedAssets || []).length,
+          imageHarvestCoverage: scraperMeta.imageHarvestCoverageLabel,
+          imageHarvestCoveragePct: coveragePct,
           duplicatesSkipped: fetched.contentDuplicatesSkipped || 0,
           skippedEntries: fetched.skipped,
           snapshots: snapshotEntries.length,
@@ -3416,7 +3680,22 @@ async function runAnalyzePipeline(req, res) {
           pagesWithArchivedImages: pagesManifestJson.filter((p) => p.archivedImageCount > 0).length,
           archiveBytes: fetched.archiveBytes || 0,
           cssSheetsProcessed: Number(scraperMeta.cssSheetsProcessed) || 0,
+          domSignalTotal,
+          candidateUrlCount: discoveredUrlsTotal,
           elapsedMs: Date.now() - (req._analyzeStartedAt || Date.now()),
+        };
+
+        const imagesManifestDocument = {
+          version: 2,
+          imageHarvestCoverage: scraperMeta.imageHarvestCoverageLabel,
+          imageHarvestCoveragePct: coveragePct,
+          missedAssets: fetched.missedAssets || [],
+          byPage: pagesManifestJson.map((p) => ({
+            pageUrl: p.url,
+            discoveredImageUrls: p.discoveredImageUrls,
+            archivedFiles: p.archivedFiles,
+          })),
+          archive: imagesManifestJson,
         };
         const manifestExtras = [
           {
@@ -3440,24 +3719,36 @@ async function runAnalyzePipeline(req, res) {
           },
           {
             name: 'manifests/images.json',
-            buffer: Buffer.from(JSON.stringify(imagesManifestJson, null, 2), 'utf8'),
+            buffer: Buffer.from(JSON.stringify(imagesManifestDocument, null, 2), 'utf8'),
           },
           {
             name: 'manifests/images.csv',
             buffer: Buffer.from(
               [
-                'order,file,source_url,source_page,source_pages,source_page_count,discovered_from',
+                'order,file,source_url,resolved_url,http_status,bytes,width,height,content_type,discovery_method,source_page,source_pages,srcset_candidates,discovered_from,asset_kind',
                 ...imagesManifestJson.map(
                   (p) =>
                     `${p.order},${csvEscape(p.file)},${csvEscape(p.sourceUrl)},${csvEscape(
-                      p.sourcePage
-                    )},${csvEscape(p.sourcePages.join(' | '))},${p.sourcePageCount},${csvEscape(
+                      p.resolvedAbsoluteUrl || p.sourceUrl
+                    )},${p.httpStatus ?? ''},${p.bytesOnDisk ?? ''},${p.widthPx ?? ''},${p.heightPx ?? ''},${csvEscape(
+                      p.contentType || ''
+                    )},${csvEscape(p.discoveryMethod || '')},${csvEscape(p.sourcePage)},${csvEscape(
+                      p.sourcePages.join(' | ')
+                    )},${csvEscape((p.srcsetCandidates || []).join(' | '))},${csvEscape(
                       p.discoveredFrom.join(' | ')
-                    )}`
+                    )},${csvEscape(p.assetKind || 'image')}`
                 ),
               ].join('\n'),
               'utf8'
             ),
+          },
+          {
+            name: 'manifests/missed-assets.json',
+            buffer: Buffer.from(JSON.stringify(fetched.missedAssets || [], null, 2), 'utf8'),
+          },
+          {
+            name: 'manifests/content.json',
+            buffer: Buffer.from(JSON.stringify(contentByPage, null, 2), 'utf8'),
           },
           {
             name: 'manifests/manifest.json',
@@ -3488,14 +3779,14 @@ async function runAnalyzePipeline(req, res) {
           ),
         ].join('\n');
         const imagesCsvText = [
-          'order,file,source_url,source_page,source_pages,source_page_count,discovered_from',
+          'order,file,source_url,resolved_url,http_status,bytes,width,height,content_type,discovery_method,source_page,asset_kind',
           ...imagesManifestJson.map(
             (p) =>
               `${p.order},${csvEscape(p.file)},${csvEscape(p.sourceUrl)},${csvEscape(
-                p.sourcePage
-              )},${csvEscape(p.sourcePages.join(' | '))},${p.sourcePageCount},${csvEscape(
-                p.discoveredFrom.join(' | ')
-              )}`
+                p.resolvedAbsoluteUrl || p.sourceUrl
+              )},${p.httpStatus ?? ''},${p.bytesOnDisk ?? ''},${p.widthPx ?? ''},${p.heightPx ?? ''},${csvEscape(
+                p.contentType || ''
+              )},${csvEscape(p.discoveryMethod || '')},${csvEscape(p.sourcePage)},${csvEscape(p.assetKind || 'image')}`
           ),
         ].join('\n');
         const manifestCsvText = [
@@ -3505,14 +3796,18 @@ async function runAnalyzePipeline(req, res) {
         req._jobArtifacts = {
           ...(req._jobArtifacts || {}),
           pagesJson: pagesManifestJson,
-          imagesJson: imagesManifestJson,
+          imagesJson: imagesManifestDocument,
           manifestJson,
           pagesCsvText,
           imagesCsvText,
           manifestCsvText,
           siteMapText: pagesForImageHarvest.map((p) => p.url).join('\n'),
         };
-        const zipBuf = await zipImageEntries(fetched.entries, snapshotEntries, [...crawlHtmlExtras, ...manifestExtras]);
+        const zipBuf = await zipImageEntries(fetched.entries, snapshotEntries, [
+          ...svgZipExtras,
+          ...crawlHtmlExtras,
+          ...manifestExtras,
+        ]);
         if (zipBuf?.length) {
           if (fetched.entries.length > 0) {
             harvestedImageManifest = buildImageManifestForPrompt(fetched.entries);
@@ -3542,8 +3837,8 @@ async function runAnalyzePipeline(req, res) {
           assetsPayload.archive_size_bytes = fetched.archiveBytes || 0;
           assetsPayload.archiveFileCount = assetsPayload.count;
           assetsPayload.archive_file_count = assetsPayload.count;
-          assetsPayload.manifestCount = 3;
-          assetsPayload.manifest_count = 3;
+          assetsPayload.manifestCount = 5;
+          assetsPayload.manifest_count = 5;
           assetsPayload.crawlStatus = 'completed';
           assetsPayload.crawl_status = 'completed';
           assetsPayload.screenshotStatus =
@@ -3695,6 +3990,34 @@ async function runAnalyzePipeline(req, res) {
     }
     files = optimized;
 
+    let contentGroundingExcerpt = '';
+    if (Array.isArray(req._contentByPage) && req._contentByPage.length) {
+      contentGroundingExcerpt = req._contentByPage
+        .map((c) => `### ${c.pageUrl}\n${(c.mergedSample || '').trim()}`)
+        .join('\n\n')
+        .slice(0, 28_000);
+    } else if (crawledPages.length) {
+      contentGroundingExcerpt = crawledPages
+        .map((p) => extractContentJsonFromHtml(p.html, p.url))
+        .map((c) => `### ${c.pageUrl}\n${(c.mergedSample || '').trim()}`)
+        .join('\n\n')
+        .slice(0, 28_000);
+    }
+
+    const runHealthBanner = buildRunHealthMarkdown({
+      imageHarvestCoverageLabel: scraperMeta.imageHarvestCoverageLabel,
+      imageHarvestCoveragePct: scraperMeta.imageHarvestCoveragePct,
+      crawlPageCount: scraperMeta.crawlPageCount,
+      pagesCrawled: scraperMeta.crawlPageCount,
+      imagesArchived: assetsPayload?.imageCount,
+      imagesDiscovered: scraperMeta.imagesDiscoveredCount,
+      imagesFailed: scraperMeta.imagesFailedCount,
+      partialExtraction: scraperMeta.partialExtraction,
+      partialExtractionMessage: scraperMeta.partialExtractionMessage,
+      browserPassError: scraperMeta.browserAssetPassError,
+      briefValidation: { ok: true, issues: [] },
+    });
+
     if (!openAiConfigured) {
       const offlineMd = buildOfflineMarkdownReport({
         url,
@@ -3705,9 +4028,10 @@ async function runAnalyzePipeline(req, res) {
         screenshotSweep,
         options,
       });
-      streamedReportText = offlineMd;
-      for (let i = 0; i < offlineMd.length; i += 480) {
-        send({ type: 'text', content: offlineMd.slice(i, i + 480) });
+      const offlineFull = `${runHealthBanner}\n\n${offlineMd}`;
+      streamedReportText = offlineFull;
+      for (let i = 0; i < offlineFull.length; i += 480) {
+        send({ type: 'text', content: offlineFull.slice(i, i + 480) });
       }
       send({
         type: 'stage',
@@ -3745,6 +4069,7 @@ async function runAnalyzePipeline(req, res) {
       scraperMeta,
       comparePair,
       harvestedImageManifest,
+      contentGroundingExcerpt,
       clientDelivery: Boolean(req._clientDelivery),
       servicePackage: req._servicePackage || '',
       scanMode: req._scanMode || 'elite',
@@ -3853,6 +4178,9 @@ async function runAnalyzePipeline(req, res) {
       return;
     }
 
+    streamedReportText = `${runHealthBanner}\n\n`;
+    send({ type: 'text', content: streamedReportText });
+
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let sseBuffer = '';
@@ -3910,6 +4238,19 @@ async function runAnalyzePipeline(req, res) {
       sseBuffer += decoder.decode();
       if (sseBuffer.trim()) flushEventBlock(sseBuffer);
     });
+
+    const briefCheck = validateBriefAgainstManifestHints(streamedReportText, {
+      crawlPageCount: scraperMeta.crawlPageCount,
+      navLinkCountEstimate: estimateNavLinkCount(rawHtml || crawledPages[0]?.html || ''),
+    });
+    if (!briefCheck.ok && briefCheck.issues.length) {
+      send({
+        type: 'warning',
+        code: 'brief_claim_audit',
+        message: briefCheck.issues.join('\n'),
+        issues: briefCheck.issues,
+      });
+    }
 
     if (streamStopReason === 'max_tokens' || streamStopReason === 'length') {
       send({
@@ -4697,9 +5038,9 @@ function onListen() {
   }
 }
 
-function tryBindListen(appInstance, port) {
+function tryBindListen(appInstance, port, host) {
   return new Promise((resolve, reject) => {
-    const srv = appInstance.listen(port);
+    const srv = host ? appInstance.listen(port, host) : appInstance.listen(port);
     const onOk = () => {
       srv.off('error', onErr);
       resolve(srv);
@@ -4715,18 +5056,26 @@ function tryBindListen(appInstance, port) {
 
 let httpServer;
 (async () => {
-  if (isProd && hasExplicitPort) {
-    const p = basePort;
+  if (isProd) {
+    const p = Number(envPortRaw);
+    const port =
+      Number.isFinite(p) && p >= 1 && p <= 65535
+        ? p
+        : Number.isFinite(basePort) && basePort >= 1 && basePort <= 65535
+          ? basePort
+          : 3001;
     if (!Number.isFinite(p) || p < 1 || p > 65535) {
-      console.error(`Invalid PORT: ${JSON.stringify(envPortRaw)}`);
-      process.exit(1);
+      console.warn(
+        `PORT missing or invalid (${JSON.stringify(envPortRaw)}); listening on ${port} (set PORT for PaaS deploys).`
+      );
     }
     try {
-      httpServer = await tryBindListen(app, p);
-      listenPort = p;
+      /* 0.0.0.0: required for Docker / Railway / Render so the router can reach the process. */
+      httpServer = await tryBindListen(app, port, '0.0.0.0');
+      listenPort = port;
       onListen();
     } catch (e) {
-      console.error(`Failed to listen on PORT=${p} (required in production):`, e);
+      console.error(`Failed to listen on 0.0.0.0:${port}:`, e);
       process.exit(1);
     }
     return;

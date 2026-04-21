@@ -5,6 +5,9 @@ import {
   collectStylesheetHrefs,
   extractImageUrlsFromCss,
   extractImportUrlsFromCss,
+  extractFontUrlsFromCss,
+  enumerateSrcsetUrls,
+  mergeSrcsetMetadataFromHtml,
   normalizeHarvestUrlKey,
   dedupeHarvestUrls,
   imageBytesFingerprint,
@@ -46,6 +49,29 @@ test('extractImportUrlsFromCss finds chained stylesheets', () => {
   const css = '@import url("/fonts/extra.css"); body{}';
   const im = extractImportUrlsFromCss(css, 'https://x.example/main.css');
   assert.ok(im.some((u) => u.includes('/fonts/extra.css')));
+});
+
+test('extractFontUrlsFromCss filters font extensions', () => {
+  const css = '@font-face{font-family:X;src:url(/a.woff2) format("woff2"),url(/b.png)}';
+  const fonts = extractFontUrlsFromCss(css, 'https://cdn.example/assets/app.css');
+  assert.ok(fonts.some((u) => u.includes('/a.woff2')));
+  assert.ok(!fonts.some((u) => u.includes('/b.png')));
+});
+
+test('enumerateSrcsetUrls lists every candidate', () => {
+  const list = enumerateSrcsetUrls('/lo.jpg 600w, /hi.jpg 1200w', 'https://shop.example/p/');
+  assert.equal(list.length, 2);
+  assert.ok(list.some((x) => x.url.includes('/hi.jpg')));
+});
+
+test('mergeSrcsetMetadataFromHtml maps best key to all candidates', () => {
+  const html = '<img src="/x.jpg" srcset="/a.webp 1x, /b.webp 2x" alt="t" />';
+  const m = new Map();
+  mergeSrcsetMetadataFromHtml(html, 'https://ex.com/', m);
+  const best = normalizeHarvestUrlKey('https://ex.com/b.webp');
+  assert.ok(best);
+  const c = m.get(best);
+  assert.ok(c && c.length >= 2);
 });
 
 test('collectImageUrls finds SVG image href', () => {
